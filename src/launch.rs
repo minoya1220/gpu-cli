@@ -21,7 +21,7 @@ use crate::pyfmt::{fixed, py_str, truthy};
 use crate::pyjson::{self, Dict, Value};
 use crate::redact::redact_text;
 use crate::repos::{resolve_repo, save_cached_repos, Repo};
-use crate::vast::{RequestArgs, Vast};
+use crate::vast::{argv, RequestArgs, Vast};
 use crate::wizard::{LaunchWizard, Picks, WizardOptions, MODES};
 
 const CLONE_URL: &str = ":clone-url:";
@@ -345,8 +345,7 @@ pub fn launch(ctx: &Ctx, args: &UpArgs, cfg: &Dict, deadline: Option<Timestamp>)
     let request = vast.request(&offer, &request_args, cfg)?;
     if args.dry_run {
         ctx.println("DRY RUN: no instance created")?;
-        let list = Value::List(request.iter().map(|s| Value::str(s.as_str())).collect());
-        ctx.println(&pyjson::dumps(&list, Some(2)))?;
+        ctx.println(&pyjson::dumps(&Value::List(request), Some(2)))?;
         if let Some(expire) = args.expire() {
             ctx.println(&format!(
                 "Auto-destroy requested after {expire}; no timer installed (dry run)."
@@ -364,7 +363,7 @@ pub fn launch(ctx: &Ctx, args: &UpArgs, cfg: &Dict, deadline: Option<Timestamp>)
         ctx.println("Cancelled.")?;
         return Ok(());
     }
-    let response = run(ctx, &request, None)?;
+    let response = run(ctx, &argv(&request)?, None)?;
     ctx.println(&created_summary(&response)?)?;
     record_picks(&ctx.env, &[("mode", &mode), ("gpu", &gpu)])?;
     let instance_id = match pyjson::loads(&response) {

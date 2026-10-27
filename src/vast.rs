@@ -5,7 +5,7 @@ use crate::config::{self, CONTAINER_ENV};
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use crate::process::run;
-use crate::pyfmt::{float_repr, py_float, py_str};
+use crate::pyfmt::{float_repr, py_float, py_str, type_name};
 use crate::pyjson::{self, Dict, Value};
 use crate::repos::{resolve_repo, Repo};
 use crate::startup::startup_script;
@@ -53,12 +53,14 @@ impl Vast {
         self.json(&args)
     }
 
-    pub fn request(&self, offer: &Dict, args: &RequestArgs, cfg: &Dict) -> Result<Vec<String>> {
+    pub fn request(&self, offer: &Dict, args: &RequestArgs, cfg: &Dict) -> Result<Vec<Value>> {
         request(offer, args, cfg)
     }
 }
 
-pub fn request(offer: &Dict, args: &RequestArgs, cfg: &Dict) -> Result<Vec<String>> {
+/// The create request as Python builds it: every item is a string except the
+/// image, which is the raw config value.
+pub fn request(offer: &Dict, args: &RequestArgs, cfg: &Dict) -> Result<Vec<Value>> {
     let mode = args.mode;
     let script = startup_script(args.repo, mode, cfg)?;
     let none = Value::Null;
@@ -78,30 +80,45 @@ pub fn request(offer: &Dict, args: &RequestArgs, cfg: &Dict) -> Result<Vec<Strin
             if mode == "vm" { "vm_disk" } else { "disk" },
         )?),
     };
-    let mut command: Vec<String> = vec![
-        "vastai".into(),
-        "create".into(),
-        "instance".into(),
-        py_str(offer.get("id").ok_or_else(|| Error::key("id"))?),
-        "--image".into(),
-        py_str(config::get(cfg, &format!("{mode}_image"))?),
-        "--disk".into(),
-        disk,
-        "--onstart-cmd".into(),
-        script,
-        "--ssh".into(),
-        "--direct".into(),
-        "--label".into(),
-        resolve_repo(args.repo.as_arg(), &py_str(config::get(cfg, "owner")?))?.1,
+    let mut command: Vec<Value> = vec![
+        Value::str("vastai"),
+        Value::str("create"),
+        Value::str("instance"),
+        Value::Str(py_str(offer.get("id").ok_or_else(|| Error::key("id"))?)),
+        Value::str("--image"),
+        config::get(cfg, &format!("{mode}_image"))?.clone(),
+        Value::str("--disk"),
+        Value::Str(disk),
+        Value::str("--onstart-cmd"),
+        Value::Str(script),
+        Value::str("--ssh"),
+        Value::str("--direct"),
+        Value::str("--label"),
+        Value::Str(resolve_repo(args.repo.as_arg(), &py_str(config::get(cfg, "owner")?))?.1),
     ];
     if mode == "container" {
-        command.extend(["--env".into(), CONTAINER_ENV.into()]);
+        command.extend([Value::str("--env"), Value::str(CONTAINER_ENV)]);
     }
     if args.interruptible {
-        command.extend(["--bid_price".into(), float_repr(hourly)]);
+        command.extend([Value::str("--bid_price"), Value::Str(float_repr(hourly))]);
     }
-    command.push("--raw".into());
+    command.push(Value::str("--raw"));
     Ok(command)
+}
+
+/// The request as process arguments; a non-string item fails with the
+/// `TypeError` text `subprocess.run` raises before starting anything.
+pub fn argv(request: &[Value]) -> Result<Vec<String>> {
+    request
+        .iter()
+        .map(|item| match item {
+            Value::Str(s) => Ok(s.clone()),
+            other => Err(Error::msg(format!(
+                "expected str, bytes or os.PathLike object, not {}",
+                type_name(other)
+            ))),
+        })
+        .collect()
 }
 
 /// `vastai show instances --raw` as instance dicts.

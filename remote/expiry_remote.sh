@@ -163,7 +163,68 @@ destroy() {
         curl -q --config - --silent --fail --noproxy '*' --max-time 15 \
             --request DELETE --header 'Content-Type: application/json' --data '{}' \
             "$DESTROY_URL/$instance_id/" 2>/dev/null | head -c 65536) || return 1
-    printf '%s' "$body" | grep -Eq '"success"[[:space:]]*:[[:space:]]*true'
+    accepted "$body"
+}
+
+# Whether a reply is a JSON object whose top-level "success" is true, like
+# Python's `isinstance(result, dict) and result.get("success") is True`.
+# Nested values and string contents are skipped; a reply that is not a
+# complete object counts as not accepted.
+accepted() {
+    local LC_ALL=C body=$1 i=0 n=${#1} c depth=0 key='' success=0 rest
+    while [ "$i" -lt "$n" ]; do
+        c=${body:i:1}
+        case $c in
+            '{' | [[:space:]]) ;;
+            *) [ "$depth" -gt 0 ] || return 1 ;;
+        esac
+        case $c in
+            '"')
+                key=''
+                i=$((i + 1))
+                while [ "$i" -lt "$n" ]; do
+                    c=${body:i:1}
+                    case $c in
+                        '"') break ;;
+                        '\')
+                            key+=${body:i:2}
+                            i=$((i + 2))
+                            ;;
+                        *)
+                            key+=$c
+                            i=$((i + 1))
+                            ;;
+                    esac
+                done
+                [ "$i" -lt "$n" ] || return 1
+                ;;
+            :)
+                if [ "$depth" -eq 1 ] && [ "$key" = success ]; then
+                    rest=${body:i+1}
+                    rest=${rest#"${rest%%[![:space:]]*}"}
+                    case $rest in
+                        true | true[[:space:],}]*) success=1 ;;
+                        *) success=0 ;;
+                    esac
+                fi
+                key=''
+                ;;
+            '{' | '[')
+                depth=$((depth + 1))
+                ;;
+            '}' | ']')
+                depth=$((depth - 1))
+                if [ "$depth" -eq 0 ]; then
+                    rest=${body:i+1}
+                    [ -z "${rest//[[:space:]]/}" ] && [ "$success" = 1 ]
+                    return
+                fi
+                [ "$depth" -gt 0 ] || return 1
+                ;;
+        esac
+        i=$((i + 1))
+    done
+    return 1
 }
 
 # One locked worker iteration. Prints "exit" or the seconds until the next.
@@ -231,10 +292,7 @@ start_worker() {
         "ready "*) ;;
         *) return 1 ;;
     esac
-    if ! running "$pid" "$token"; then
-        kill "$pid" 2>/dev/null
-        return 1
-    fi
+    running "$pid" "$token" || return 1
     printf '%s' "$pid"
 }
 
@@ -294,7 +352,6 @@ control() {
             else
                 rm -f "$ROOT/state"
             fi
-            kill "$pid" 2>/dev/null
             fail verification
         fi
         printf '{"status": "armed", "deadline": %s}\n' "$deadline"

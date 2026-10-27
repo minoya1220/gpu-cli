@@ -11,7 +11,7 @@ use crate::pyjson::Value;
 use crate::repos::Repo;
 use crate::startup::startup_script;
 use crate::testing::*;
-use crate::vast::{request, RequestArgs, Vast};
+use crate::vast::{argv, request, RequestArgs, Vast};
 
 pub const EXPECTED_CONTAINER_SCRIPT: &str = r#"#!/bin/bash
 source /etc/environment 2>/dev/null || true
@@ -122,7 +122,7 @@ fn test_launch_request_exact_image_env_script_and_offer() {
         interruptible: false,
         disk: None,
     };
-    let actual = request(&offer, &args, &defaults()).unwrap();
+    let actual = argv(&request(&offer, &args, &defaults()).unwrap()).unwrap();
     assert_eq!(
         strs(&actual),
         [
@@ -152,7 +152,7 @@ fn test_launch_request_exact_image_env_script_and_offer() {
         interruptible: true,
         disk: Some(130),
     };
-    let request = request(&vm_offer, &vm_args, &defaults()).unwrap();
+    let request = argv(&request(&vm_offer, &vm_args, &defaults()).unwrap()).unwrap();
     assert_eq!(
         strs(&request[..8]),
         [
@@ -200,6 +200,79 @@ fn test_adapter_search_generates_exact_read_only_cli_call() {
             "--raw"
         ]]
     );
+}
+
+// Expected values from CPython 3.13: shlex.quote returns '' for falsy values
+// and raises TypeError for other non-strings.
+#[test]
+fn test_non_string_git_identity_is_quoted_like_shlex() {
+    let gpu_kernels = repo("gpu-kernels");
+    let cases = [
+        ("null", Ok("''")),
+        ("0", Ok("''")),
+        ("false", Ok("''")),
+        ("[]", Ok("''")),
+        ("5", Err("expected string or bytes-like object, got 'int'")),
+        (
+            "true",
+            Err("expected string or bytes-like object, got 'bool'"),
+        ),
+    ];
+    for key in ["git_name", "git_email"] {
+        let line = if key == "git_name" {
+            "user.name"
+        } else {
+            "user.email"
+        };
+        for (value, expected) in &cases {
+            let mut cfg = defaults();
+            cfg.insert(key, json(value));
+            let result = startup_script(&gpu_kernels, "container", &cfg);
+            match expected {
+                Ok(quoted) => {
+                    let script = result.unwrap();
+                    assert!(
+                        script.contains(&format!("git config --global {line} {quoted}\n")),
+                        "{key}={value}"
+                    );
+                }
+                Err(text) => assert_eq!(result.unwrap_err().text(), *text, "{key}={value}"),
+            }
+        }
+    }
+}
+
+// Python puts the raw image value into the argument list: json.dumps prints
+// it in a dry run, and subprocess.run raises TypeError before starting vastai.
+#[test]
+fn test_non_string_image_is_printed_raw_and_never_reaches_vastai() {
+    let mut cfg = defaults();
+    cfg.insert("container_image", Value::Null);
+    let args = UpArgs {
+        gpu: Some("RTX 4090".into()),
+        offer: Some(42),
+        yes: true,
+        ..up_args()
+    };
+
+    let t = TestEnv::new();
+    let ctx = t.ctx().runner(&search_answer(RTX_OFFER)).build();
+    let dry = UpArgs {
+        dry_run: true,
+        ..args.clone()
+    };
+    launch(&ctx, &dry, &cfg, None).unwrap();
+    assert!(out(&ctx).contains("  \"--image\",\n  null,\n  \"--disk\","));
+
+    let t = TestEnv::new();
+    let runner = search_answer(RTX_OFFER);
+    let ctx = t.ctx().runner(&runner).build();
+    let err = launch(&ctx, &args, &cfg, None).unwrap_err();
+    assert_eq!(
+        err.text(),
+        "expected str, bytes or os.PathLike object, not NoneType"
+    );
+    assert!(runner.argvs().iter().all(|argv| argv[1] != "create"));
 }
 
 #[test]
@@ -679,7 +752,9 @@ fn test_dry_run_request_contains_no_credentials() {
         interruptible: false,
         disk: None,
     };
-    let request = request(&dict(r#"{"id": 42, "dph_total": 0.1}"#), &args, &defaults()).unwrap();
+    let request =
+        argv(&request(&dict(r#"{"id": 42, "dph_total": 0.1}"#), &args, &defaults()).unwrap())
+            .unwrap();
     for part in &request {
         for secret in ["api_key", "ghp_", "gho_"] {
             assert!(!part.contains(secret));

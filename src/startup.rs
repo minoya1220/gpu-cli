@@ -2,7 +2,7 @@
 
 use crate::config;
 use crate::error::{Error, Result};
-use crate::pyfmt::{py_str, shell_quote};
+use crate::pyfmt::{py_str, shell_quote, shell_quote_value};
 use crate::pyjson::Dict;
 use crate::repos::{resolve_repo, Repo};
 
@@ -37,11 +37,11 @@ pub fn startup_script(repo: &Repo, mode: &str, cfg: &Dict) -> Result<String> {
     lines.push("mkdir -p /workspace".into());
     lines.push(format!(
         "git config --global user.name {}",
-        shell_quote(&py_str(config::get(cfg, "git_name")?))
+        shell_quote_value(config::get(cfg, "git_name")?)?
     ));
     lines.push(format!(
         "git config --global user.email {}",
-        shell_quote(&py_str(config::get(cfg, "git_email")?))
+        shell_quote_value(config::get(cfg, "git_email")?)?
     ));
     lines.push(r#"if [ -n "${GH_TOKEN:-}" ]; then gh auth setup-git; else echo "WARNING: GH_TOKEN is not set in Vast account environment; private GitHub repos may not clone." >&2; fi"#.into());
     if *repo != Repo::NoRepo {

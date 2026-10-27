@@ -154,7 +154,9 @@ test_post_arm_verification_failure_rolls_back() {
             local original=''
             [ -e "$ROOT/state" ] && original=$(cat "$ROOT/state")
             running() { return 1; }
+            kill() { echo "$*" >>"$TEST_DIR/killed"; }
             equals "$(arm)" '{"error": "verification"}'
+            check "an unverified PID is never signalled" [ ! -e "$TEST_DIR/killed" ]
             if [ "$existing" = true ]; then
                 equals "$(cat "$ROOT/state")" "$original"
             else
@@ -231,6 +233,12 @@ test_worker_is_detached_and_startup_verified() {
     READY_TRIES=3
     printf 'exit 0\n' >"$ROOT/runner.sh"
     refute "startup verification" start_worker generation 123 scoped-key
+    # A ready line naming a process that is not the worker fails without
+    # signalling that process.
+    printf 'printf "ready %%s\\n" "$PPID" >"$2/ready.$3"\n' >"$ROOT/runner.sh"
+    kill() { echo "$*" >>"$TEST_DIR/killed"; }
+    refute "identity verification" start_worker generation 123 scoped-key
+    check "the other process is never signalled" [ ! -e "$TEST_DIR/killed" ]
 }
 
 test_process_identity_check() {
@@ -301,6 +309,28 @@ test_exact_destroy_request_mocked() {
     equals "$(cat "$TEST_DIR/curl-config")" 'header = "Authorization: Bearer scoped-key"'
     fake_curl '{"success": false}'
     refute "refused" destroy 123 scoped-key
+    fake_curl '{"detail": {"success": true}}'
+    refute "nested success only" destroy 123 scoped-key
+    fake_curl '{"success": false, "detail": {"success": true}}'
+    refute "top-level false with nested true" destroy 123 scoped-key
+    fake_curl '{"msg": "ok", "success": true}'
+    check "top-level true" destroy 123 scoped-key
+}
+
+# Expected values follow Python: json.loads(body), then
+# isinstance(result, dict) and result.get("success") is True.
+test_destroy_reply_acceptance() {
+    local body
+    for body in '{"success": true}' ' { "success" :true } ' $'{\n "a": [1, {"success": false}],\n "success": true\n}\n' \
+        '{"success": false, "success": true}' '{"note": "\"success\": false", "success": true}'; do
+        check "accepted: $body" accepted "$body"
+    done
+    for body in '' '{}' '{"success": false}' '{"success": 1}' '{"success": "true"}' '{"success": trueish}' \
+        '{"success": true, "success": false}' '{"detail": {"success": true}}' '[{"success": true}]' \
+        '{"note": "\"success\": true"}' '{"success": true' '{"success": true}x' 'x{"success": true}' \
+        '{"success": true}{"success": true}' '"success": true'; do
+        refute "not accepted: $body" accepted "$body"
+    done
 }
 
 # The full transport path: payload on stdin, a real detached worker, a fake curl.

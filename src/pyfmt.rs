@@ -339,6 +339,19 @@ pub fn shell_quote(s: &str) -> String {
     }
 }
 
+/// `shlex.quote(value)` for a JSON value: falsy values quote as `''`, other
+/// non-strings fail with Python's `TypeError` text.
+pub fn shell_quote_value(value: &Value) -> Result<String, String> {
+    match value {
+        Value::Str(s) => Ok(shell_quote(s)),
+        other if !truthy(other) => Ok("''".into()),
+        other => Err(format!(
+            "expected string or bytes-like object, got {}",
+            repr_str(type_name(other))
+        )),
+    }
+}
+
 /// `shlex.join`.
 pub fn shell_join<S: AsRef<str>>(args: &[S]) -> String {
     args.iter()
@@ -352,8 +365,6 @@ pub fn casefold(s: &str) -> String {
     s.to_lowercase()
 }
 
-/// Whether a string is a non-empty run of ASCII digits (`str.isdigit()`,
-/// restricted to ASCII).
 /// `str.splitlines()`: splits on `\r\n` and every Unicode line boundary,
 /// with no empty item after a final break.
 pub fn splitlines(s: &str) -> Vec<&str> {
@@ -387,6 +398,8 @@ pub fn splitlines(s: &str) -> Vec<&str> {
     lines
 }
 
+/// Whether a string is a non-empty run of ASCII digits (`str.isdigit()`,
+/// restricted to ASCII).
 pub fn is_digits(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
 }

@@ -250,13 +250,23 @@ fn test_transport_embeds_standalone_source_without_secrets() {
         let output = run_bash_library(&script);
         assert_eq!(output, REMOTE_SOURCE);
         assert!(!payload.contains("personal-key-sentinel"));
+        assert!(!cmd.argv.iter().any(|a| a.contains("personal-key-sentinel")));
         assert_eq!(cmd.timeout, Some(45.0));
         ok(&format!(
             r#"{{"status": "armed", "deadline": {}}}"#,
             now().as_second()
         ))
     });
-    let ctx = t.ctx().runner(&runner).build();
+    // The local account key, wherever vastai would find it.
+    std::fs::write(t.home.join(".vast_api_key"), "personal-key-sentinel").unwrap();
+    std::fs::create_dir_all(t.config.join("vastai")).unwrap();
+    std::fs::write(
+        t.config.join("vastai/vast_api_key"),
+        "personal-key-sentinel",
+    )
+    .unwrap();
+    let env = t.env().with("VAST_API_KEY", "personal-key-sentinel");
+    let ctx = t.ctx().env(env).runner(&runner).build();
     let reply = manage_expiry(&ctx, "vast-123", "123", "arm", Some(now())).unwrap();
     assert_eq!(reply.get("status"), Some(&Value::str("armed")));
     assert!(transport_payload().ends_with(REMOTE_SOURCE));

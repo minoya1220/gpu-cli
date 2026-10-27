@@ -239,11 +239,17 @@ fn python_create_requests() {
         };
         match (request(&offer, &args, &cfg), row.get("request")) {
             (Ok(mut actual), Some(expected)) => {
-                let at = actual.iter().position(|a| a == "--onstart-cmd").unwrap() + 1;
-                assert_eq!(actual[at], startup_script(&repo, mode, &cfg).unwrap());
-                actual[at] = "<startup_script>".into();
-                let actual = Value::List(actual.into_iter().map(Value::Str).collect());
-                assert_eq!(actual, *expected, "{row:?}");
+                let at = actual
+                    .iter()
+                    .position(|a| a.as_str() == Some("--onstart-cmd"))
+                    .unwrap()
+                    + 1;
+                assert_eq!(
+                    actual[at],
+                    Value::Str(startup_script(&repo, mode, &cfg).unwrap())
+                );
+                actual[at] = Value::str("<startup_script>");
+                assert_eq!(Value::List(actual), *expected, "{row:?}");
             }
             (Err(err), None) => assert_eq!(Some(err.text()), opt_s(&row, "error"), "{row:?}"),
             (actual, _) => panic!("{row:?}: {actual:?}"),

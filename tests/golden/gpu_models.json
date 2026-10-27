@@ -1,0 +1,334 @@
+{
+ "categories": {
+  "A10": "Datacenter Ampere/Ada/older",
+  "B200": "Datacenter Blackwell/Hopper",
+  "B300": "Datacenter Blackwell/Hopper",
+  "A100 PCIE": "Datacenter Ampere/Ada/older",
+  "A100 SXM4": "Datacenter Ampere/Ada/older",
+  "A40": "Datacenter Ampere/Ada/older",
+  "A800 PCIE": "Datacenter Ampere/Ada/older",
+  "CMP 170HX": "Other",
+  "GTX 1050 Ti": "Consumer RTX 30 and older",
+  "GTX 1060": "Consumer RTX 30 and older",
+  "GTX 1070": "Consumer RTX 30 and older",
+  "GTX 1070 Ti": "Consumer RTX 30 and older",
+  "GTX 1080": "Consumer RTX 30 and older",
+  "GTX 1080 Ti": "Consumer RTX 30 and older",
+  "GTX 1650": "Consumer RTX 30 and older",
+  "GTX 1660": "Consumer RTX 30 and older",
+  "GTX 1660 S": "Consumer RTX 30 and older",
+  "GTX 1660 Ti": "Consumer RTX 30 and older",
+  "GTX TITAN X": "Consumer RTX 30 and older",
+  "H100 NVL": "Datacenter Blackwell/Hopper",
+  "H100 SXM": "Datacenter Blackwell/Hopper",
+  "H200": "Datacenter Blackwell/Hopper",
+  "H200 NVL": "Datacenter Blackwell/Hopper",
+  "L4": "Datacenter Ampere/Ada/older",
+  "L40": "Datacenter Ampere/Ada/older",
+  "L40S": "Datacenter Ampere/Ada/older",
+  "Q RTX 4000": "Workstation/Pro",
+  "Q RTX 5000": "Workstation/Pro",
+  "Q RTX 6000": "Workstation/Pro",
+  "Q RTX 8000": "Workstation/Pro",
+  "Quadro GV100": "Workstation/Pro",
+  "Quadro P2000": "Workstation/Pro",
+  "Quadro P4000": "Workstation/Pro",
+  "RTX 2060": "Consumer RTX 30 and older",
+  "RTX 2060S": "Consumer RTX 30 and older",
+  "RTX 2070": "Consumer RTX 30 and older",
+  "RTX 2070S": "Consumer RTX 30 and older",
+  "RTX 2080": "Consumer RTX 30 and older",
+  "RTX 2080 Ti": "Consumer RTX 30 and older",
+  "RTX 3060": "Consumer RTX 30 and older",
+  "RTX 3060 Ti": "Consumer RTX 30 and older",
+  "RTX 3060 laptop": "Consumer RTX 30 and older",
+  "RTX 3070": "Consumer RTX 30 and older",
+  "RTX 3070 Ti": "Consumer RTX 30 and older",
+  "RTX 3080": "Consumer RTX 30 and older",
+  "RTX 3080 Ti": "Consumer RTX 30 and older",
+  "RTX 3090": "Consumer RTX 30 and older",
+  "RTX 3090 Ti": "Consumer RTX 30 and older",
+  "RTX 4000Ada": "Workstation/Pro",
+  "RTX 4060": "Consumer RTX 40 series",
+  "RTX 4060 Ti": "Consumer RTX 40 series",
+  "RTX 4070": "Consumer RTX 40 series",
+  "RTX 4070 Ti": "Consumer RTX 40 series",
+  "RTX 4070S": "Consumer RTX 40 series",
+  "RTX 4070S Ti": "Consumer RTX 40 series",
+  "RTX 4080": "Consumer RTX 40 series",
+  "RTX 4080 laptop": "Consumer RTX 40 series",
+  "RTX 4080S": "Consumer RTX 40 series",
+  "RTX 4090": "Consumer RTX 40 series",
+  "RTX 4090D": "Consumer RTX 40 series",
+  "RTX 4500Ada": "Workstation/Pro",
+  "RTX 5000Ada": "Workstation/Pro",
+  "RTX 5060": "Consumer RTX 50 series",
+  "RTX 5060 Ti": "Consumer RTX 50 series",
+  "RTX 5060 laptop": "Consumer RTX 50 series",
+  "RTX 5070": "Consumer RTX 50 series",
+  "RTX 5070 Ti": "Consumer RTX 50 series",
+  "RTX 5080": "Consumer RTX 50 series",
+  "RTX 5090": "Consumer RTX 50 series",
+  "RTX 5880Ada": "Workstation/Pro",
+  "RTX 6000Ada": "Workstation/Pro",
+  "RTX 6000D": "Workstation/Pro",
+  "RTX A2000": "Workstation/Pro",
+  "RTX A4000": "Workstation/Pro",
+  "RTX A5000": "Workstation/Pro",
+  "RTX A6000": "Workstation/Pro",
+  "RTX PRO 4000": "Workstation/Pro",
+  "RTX PRO 4500": "Workstation/Pro",
+  "RTX PRO 5000": "Workstation/Pro",
+  "RTX PRO 6000 Max-Q": "Workstation/Pro",
+  "RTX PRO 6000 S": "Workstation/Pro",
+  "RTX PRO 6000 WS": "Workstation/Pro",
+  "Tesla P100": "Datacenter Ampere/Ada/older",
+  "Tesla P4": "Datacenter Ampere/Ada/older",
+  "Tesla P40": "Datacenter Ampere/Ada/older",
+  "Tesla T4": "Datacenter Ampere/Ada/older",
+  "Tesla V100": "Datacenter Ampere/Ada/older",
+  "Titan RTX": "Consumer RTX 30 and older",
+  "Titan V": "Consumer RTX 30 and older",
+  "Titan Xp": "Consumer RTX 30 and older",
+  "\u00df": "Other",
+  "rtx5": "Consumer RTX 50 series",
+  "Quadro": "Workstation/Pro"
+ },
+ "groups": [
+  [
+   "Datacenter Blackwell/Hopper",
+   [
+    "B200",
+    "B300",
+    "H100 NVL",
+    "H100 SXM",
+    "H200",
+    "H200 NVL"
+   ]
+  ],
+  [
+   "Datacenter Ampere/Ada/older",
+   [
+    "A10",
+    "A100 PCIE",
+    "A100 SXM4",
+    "A40",
+    "A800 PCIE",
+    "L4",
+    "L40",
+    "L40S",
+    "Tesla P100",
+    "Tesla P4",
+    "Tesla P40",
+    "Tesla T4",
+    "Tesla V100"
+   ]
+  ],
+  [
+   "Workstation/Pro",
+   [
+    "Q RTX 4000",
+    "Q RTX 5000",
+    "Q RTX 6000",
+    "Q RTX 8000",
+    "Quadro GV100",
+    "Quadro P2000",
+    "Quadro P4000",
+    "RTX 4000Ada",
+    "RTX 4500Ada",
+    "RTX 5000Ada",
+    "RTX 5880Ada",
+    "RTX 6000Ada",
+    "RTX 6000D",
+    "RTX A2000",
+    "RTX A4000",
+    "RTX A5000",
+    "RTX A6000",
+    "RTX PRO 4000",
+    "RTX PRO 4500",
+    "RTX PRO 5000",
+    "RTX PRO 6000 Max-Q",
+    "RTX PRO 6000 S",
+    "RTX PRO 6000 WS"
+   ]
+  ],
+  [
+   "Consumer RTX 50 series",
+   [
+    "RTX 5060",
+    "RTX 5060 Ti",
+    "RTX 5060 laptop",
+    "RTX 5070",
+    "RTX 5070 Ti",
+    "RTX 5080",
+    "RTX 5090"
+   ]
+  ],
+  [
+   "Consumer RTX 40 series",
+   [
+    "RTX 4060",
+    "RTX 4060 Ti",
+    "RTX 4070",
+    "RTX 4070 Ti",
+    "RTX 4070S",
+    "RTX 4070S Ti",
+    "RTX 4080",
+    "RTX 4080 laptop",
+    "RTX 4080S",
+    "RTX 4090",
+    "RTX 4090D"
+   ]
+  ],
+  [
+   "Consumer RTX 30 and older",
+   [
+    "GTX 1050 Ti",
+    "GTX 1060",
+    "GTX 1070",
+    "GTX 1070 Ti",
+    "GTX 1080",
+    "GTX 1080 Ti",
+    "GTX 1650",
+    "GTX 1660",
+    "GTX 1660 S",
+    "GTX 1660 Ti",
+    "GTX TITAN X",
+    "RTX 2060",
+    "RTX 2060S",
+    "RTX 2070",
+    "RTX 2070S",
+    "RTX 2080",
+    "RTX 2080 Ti",
+    "RTX 3060",
+    "RTX 3060 Ti",
+    "RTX 3060 laptop",
+    "RTX 3070",
+    "RTX 3070 Ti",
+    "RTX 3080",
+    "RTX 3080 Ti",
+    "RTX 3090",
+    "RTX 3090 Ti",
+    "Titan RTX",
+    "Titan V",
+    "Titan Xp"
+   ]
+  ],
+  [
+   "Other",
+   [
+    "CMP 170HX"
+   ]
+  ]
+ ],
+ "model_labels": [
+  [
+   "B200",
+   "B200  $1.735/hr (1 offer)"
+  ],
+  [
+   "RTX 4090",
+   "RTX 4090  $0.300/hr (12 offers)"
+  ],
+  [
+   "H100 SXM",
+   "H100 SXM  $2.000/hr (3 offers)"
+  ],
+  [
+   "Tesla T4",
+   "Tesla T4  $0.062/hr (1 offer)"
+  ],
+  [
+   "A100 PCIE",
+   "A100 PCIE  $inf/hr (2 offers)"
+  ],
+  [
+   "Unknown",
+   "Unknown"
+  ]
+ ],
+ "category_labels": [
+  [
+   "Datacenter Blackwell/Hopper",
+   "Datacenter Blackwell/Hopper (2 models, from $1.735/hr)"
+  ],
+  [
+   "Datacenter Ampere/Ada/older",
+   "Datacenter Ampere/Ada/older (2 models, from $0.062/hr)"
+  ],
+  [
+   "Workstation/Pro",
+   "Workstation/Pro (23 models)"
+  ],
+  [
+   "Consumer RTX 50 series",
+   "Consumer RTX 50 series (7 models)"
+  ],
+  [
+   "Consumer RTX 40 series",
+   "Consumer RTX 40 series (1 model, from $0.300/hr)"
+  ],
+  [
+   "Consumer RTX 30 and older",
+   "Consumer RTX 30 and older (29 models)"
+  ],
+  [
+   "Other",
+   "Other (1 model)"
+  ]
+ ],
+ "valid_names": [
+  [
+   "A",
+   false
+  ],
+  [
+   "AB",
+   true
+  ],
+  [
+   "RTX 4090",
+   true
+  ],
+  [
+   " RTX",
+   false
+  ],
+  [
+   "RTX ",
+   false
+  ],
+  [
+   "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   true
+  ],
+  [
+   "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   false
+  ],
+  [
+   "bad\tname",
+   false
+  ],
+  [
+   "\u00dcn\u00ef",
+   true
+  ],
+  [
+   "a,b+(c)/d_e-f.g",
+   true
+  ],
+  [
+   "a*b",
+   false
+  ],
+  [
+   "\u0661\u0662",
+   true
+  ],
+  [
+   "\u540d\u524d",
+   true
+  ]
+ ]
+}

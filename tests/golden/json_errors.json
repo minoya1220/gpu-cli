@@ -1,0 +1,23 @@
+[
+{"doc": "", "error": "Expecting value: line 1 column 1 (char 0)"},
+{"doc": " ", "error": "Expecting value: line 1 column 2 (char 1)"},
+{"doc": "{", "error": "Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"},
+{"doc": "[1,", "error": "Expecting value: line 1 column 4 (char 3)"},
+{"doc": "[1 2]", "error": "Expecting ',' delimiter: line 1 column 4 (char 3)"},
+{"doc": "{\"a\" 1}", "error": "Expecting ':' delimiter: line 1 column 6 (char 5)"},
+{"doc": "{\"a\": 1,}", "error": "Illegal trailing comma before end of object: line 1 column 8 (char 7)"},
+{"doc": "[1,]", "error": "Illegal trailing comma before end of array: line 1 column 3 (char 2)"},
+{"doc": "{1: 2}", "error": "Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"},
+{"doc": "\"unterminated", "error": "Unterminated string starting at: line 1 column 1 (char 0)"},
+{"doc": "\"bad \\x\"", "error": "Invalid \\escape: line 1 column 6 (char 5)"},
+{"doc": "\"ctl \u0001\"", "error": "Invalid control character at: line 1 column 6 (char 5)"},
+{"doc": "tru", "error": "Expecting value: line 1 column 1 (char 0)"},
+{"doc": "01", "error": "Extra data: line 1 column 2 (char 1)"},
+{"doc": "1.", "error": "Extra data: line 1 column 2 (char 1)"},
+{"doc": "-", "error": "Expecting value: line 1 column 1 (char 0)"},
+{"doc": "[1] x", "error": "Extra data: line 1 column 5 (char 4)"},
+{"doc": "\"\\u12G4\"", "error": "Invalid \\uXXXX escape: line 1 column 3 (char 2)"},
+{"doc": "\ufeff[]", "error": "Unexpected UTF-8 BOM (decode using utf-8-sig): line 1 column 1 (char 0)"},
+{"doc": "nan", "error": "Expecting value: line 1 column 1 (char 0)"},
+{"doc": "{\"a\":1}\n\n x", "error": "Extra data: line 3 column 2 (char 10)"}
+]

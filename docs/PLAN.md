@@ -1,6 +1,9 @@
 # Plan: Rust rewrite of the `gpu` CLI
 
-Status: proposal for review. No Rust code exists yet.
+Status: approved and implemented. During phase 2 the owner changed section 3.9
+(the remote worker became a bash script) and approved both fixes in 9.4; those
+sections are updated below, and section 11 lists every other place where the
+implementation differs from this plan.
 
 Source of truth for behavior: `reference/python/` (snapshot of the Python CLI at
 commit b803934). Where the Python README and the Python code disagree, this plan
@@ -22,6 +25,7 @@ Contents:
 8. CI
 9. Deviations: unavoidable, proposed, and dropped
 10. Delivery steps for phase 2
+11. Changes during phase 2
 
 ---
 
@@ -34,7 +38,9 @@ Contents:
   - GPU model cache: `$XDG_CACHE_HOME/gpu/gpu_models.txt`, default `~/.cache/gpu/gpu_models.txt`
   - repo cache: `$XDG_CACHE_HOME/gpu/repos-<owner>.json`
   - managed SSH: `~/.ssh/vst_config`, plus the `Include ~/.ssh/vst_config` line prepended to `~/.ssh/config`
-  - remote expiry state on the instance: `~/.local/state/gpu-expire/{deadline.json,runner.py,lock}`
+  - remote expiry state on the instance: `~/.local/state/gpu-expire/{state,runner.sh,lock}`
+    (changed in phase 2 with the bash worker, see 3.9; timers armed by the Python
+    tool are not carried over)
 - All Vast and GitHub access still goes through the user's authenticated `vastai`
   and `gh` CLIs as subprocesses. The Rust tool reads no API key and makes no HTTP
   request of its own (same as Python).
@@ -282,23 +288,45 @@ the terminal.
   any single separator character after the `T`/space pre-check, `HH`,
   `HH:MM`, `HH:MM:SS`, fractional seconds, `Z`, `+HH:MM`, `+HHMM`. A table of
   cases generated from Python checks it (section 7).
-- `remote_command` (alias and ID validation, `python3 - <action> <id>
+- `remote_command` (alias and ID validation, `bash -s -- <action> <id>
   [ceil(deadline)]`, `BatchMode=yes`, `ConnectTimeout=10`), `manage_expiry`
   (45 s timeout, never echoes stderr or remote text, same error table and
   status checks), `expiry_summary` (local ISO time with offset, time zone
   abbreviation from `jiff`, `in Xh Ym Zs`).
 
-### 3.9 `expiry_remote.py` (stays Python)
+### 3.9 `expiry_remote.py` (becomes bash; changed in phase 2)
 
-This script runs on the rented instance with the instance's own `python3`;
-the README documents that requirement. It stays a Python file, byte-identical,
-moved to `remote/expiry_remote.py` and embedded with `include_str!`. The
-transport sends `SOURCE = <python string literal>` followed by the source, as
-Python does with `repr()`; the Rust side writes an equivalent literal (exact
-`repr()` output is not needed, only a literal that evaluates to the same
-text, which a test checks with the local `python3`). Keeping it unchanged
-means timers armed by the Python CLI can be shown, cancelled and re-armed by
-the Rust CLI, and the remote requirements do not change.
+The owner changed this section during phase 2: instances should not need
+`python3`, and no compatibility with timers armed by the Python tool is needed
+(no instances are running). The worker is rewritten as a bash script,
+`remote/expiry_remote.sh`, embedded with `include_str!`, with the same
+user-facing behavior:
+
+- Same actions and replies: `arm ID DEADLINE`, `show ID`, `cancel ID`, one JSON
+  line `{"status": ..., "deadline": N}` or `{"error": "credentials" | "past" |
+  "verification" | "remote"}`, so the local error table is unchanged.
+- Same credential rules: `CONTAINER_ID`/`CONTAINER_API_KEY` from PID 1's
+  environment, `/etc/environment`, then the process environment; ID must match,
+  key must be non-empty without whitespace; never an account key.
+- Same safety design: a `flock` lock shared by every mutation and the destroy
+  request; atomic state and runner replacement; a worker started with `setsid`,
+  stdin/stdout/stderr on `/dev/null` and only the scoped variables in its
+  environment; a readiness handshake and a `/proc/<pid>/cmdline` identity check
+  (token plus `worker`); rollback to the previous deadline on failure; 30 s
+  retries; `destroy-request-accepted` on success.
+- The destroy request is `curl` with the key passed on stdin (`--config -`, never
+  on a command line), `--noproxy '*'`, no redirects, 15 s timeout, `DELETE` with
+  an empty JSON body.
+- Transport: `ssh ... vast-ID 'bash -s -- ACTION ID [DEADLINE]'` with
+  `GPU_EXPIRE_SOURCE=<shell-quoted source>` followed by the source on stdin, so
+  the script can install itself as `runner.sh`.
+- Remote requirements change from Python 3.8+ to bash, `flock` and `setsid`
+  (util-linux) and `curl`. The README says so, and the remote error message now
+  names them instead of `python3`.
+
+Its tests are bash (`remote/test_expiry_remote.sh`), ported from the Python
+remote tests plus an end-to-end arm and destroy with a real detached worker and a
+stub `curl`; `tests/remote_worker.rs` runs them under `cargo test` on Linux.
 
 ### 3.10 Signals, terminal and process exit
 
@@ -356,8 +384,8 @@ Considered and not used:
 Cargo.toml                 package gpu-cli, [lib] gpu, [[bin]] gpu
 Cargo.lock
 assets/gpu_models.txt      bundled GPU names (moved from src/gpu/gpu_models.txt)
-remote/expiry_remote.py    remote worker, byte-identical to the Python one
-remote/test_expiry_remote.py  its tests, ported to stdlib unittest
+remote/expiry_remote.sh    remote worker in bash (3.9, changed in phase 2)
+remote/test_expiry_remote.sh  its tests, in bash
 src/
   main.rs                  calls gpu::main_with(argv, Ctx::real()) and exits
   lib.rs                   module tree, main_with (dispatch, error to exit code)
@@ -391,7 +419,7 @@ tests/
   terminal.rs              pty end-to-end tests (Python test_terminal.py)
   cli_flows.rs             non-TTY end-to-end runs of the real binary
   golden.rs                data-driven parity tables from tests/golden/
-  remote_worker.rs         runs python3 -m unittest on remote/test_expiry_remote.py
+  remote_worker.rs         runs bash remote/test_expiry_remote.sh (Linux)
   golden/*.json            cases generated from the Python reference
 .github/workflows/ci.yml
 ```
@@ -414,7 +442,7 @@ is computed from `Ctx.env`, a snapshot of `HOME`, `XDG_*`, `PATH`, `TZ`.
 Layout rule: each Python file `tests/test_X.py` maps to `src/tests/X.rs`,
 and each test function keeps its name. Exceptions: `test_terminal.py` goes to
 `tests/terminal.rs` (it needs the built binary), and the remote worker tests in
-`test_expiry.py` go to `remote/test_expiry_remote.py`. Parametrized cases
+`test_expiry.py` go to `remote/test_expiry_remote.sh`. Parametrized cases
 become table-driven loops that name the failing case, or separate tests where
 the setup differs.
 
@@ -523,11 +551,11 @@ Drivers that replace the Python fixtures:
 | test_argument_shape[4] | same | |
 | test_ambiguous_arguments[5] | same | |
 | test_command_has_no_user_shell_input | same | |
-| test_transport_embeds_standalone_source_without_secrets | same | Executes the payload with local `python3` (as `__name__ != "__main__"`) and compares `SOURCE` with the embedded file. |
+| test_transport_embeds_standalone_source_without_secrets | same | Evaluates the payload with local `bash` as a library and compares `GPU_EXPIRE_SOURCE` with the embedded script. |
 | test_transport_errors_do_not_leak[4] | same | |
 | test_timeout_marks_arming_unverified | same | |
 | test_confirmation_local_timezone_and_remaining | same | |
-| test_arm_show_replace_cancel | `remote/test_expiry_remote.py` | Same test, stdlib `unittest` and `unittest.mock`. |
+| test_arm_show_replace_cancel | `remote/test_expiry_remote.sh` | Same test in bash; functions overridden after sourcing the script as a library. |
 | test_tick_only_destroys_at_deadline_and_retries | remote | |
 | test_failed_rearm_preserves_existing_deadline | remote | |
 | test_post_arm_verification_failure_rolls_back[2] | remote | |
@@ -543,8 +571,8 @@ Drivers that replace the Python fixtures:
 | test_cli_show_inactive_is_nonzero | same | |
 | test_up_expire_invalid_fails_before_launch | same | |
 
-`tests/remote_worker.rs` runs `python3 -m unittest remote/test_expiry_remote.py`
-so `cargo test` stays the single gate. CI runners have `python3`.
+`tests/remote_worker.rs` runs `bash remote/test_expiry_remote.sh` so `cargo test`
+stays the single gate (Linux only: the worker needs `/proc`, `flock`, `setsid`).
 
 ### test_expiry_launch.py → src/tests/expiry_launch.rs
 
@@ -697,9 +725,8 @@ in the workflow.
    `urlsplit`'s `Invalid IPv6 URL`. These get plain Rust-written equivalents
    with the same exit codes. Every message the Python tool writes itself is
    kept verbatim.
-3. The remote worker stays Python (section 3.9). Its tests move from pytest to stdlib
-   `unittest` so they run without installing anything, and `cargo test` invokes
-   them.
+3. The remote worker is a bash script (section 3.9, changed in phase 2), so timers
+   armed by the Python tool are not visible to the Rust tool; re-arm them.
 
 ### 9.2 README and code disagree (plan follows the code)
 
@@ -733,7 +760,7 @@ Each is an edge case; say if you want any of them matched exactly.
 7. `format_uptime` for values above 2^64 seconds prints `-`; JSON integers above
    64 bits are read as floats.
 
-### 9.4 Proposed fixes (default: keep Python behavior unless you approve)
+### 9.4 Fixes (both approved and applied in phase 2)
 
 1. Three expiry error messages tell the user to run `gpu expire ID --show` (or
    `run --show`), a flag that does not exist (the README says so). Proposed
@@ -762,6 +789,7 @@ Each is an edge case; say if you want any of them matched exactly.
    migration.
 
 ## 10. Delivery steps for phase 2
+11. Changes during phase 2
 
 One branch `rust-rewrite`, one PR. Order of work:
 
@@ -778,3 +806,30 @@ One branch `rust-rewrite`, one PR. Order of work:
 7. README for the Rust tool, `AGENTS.md`, CI workflow, delete `reference/`.
 8. `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
    `cargo test` all green locally, then open the PR.
+
+## 11. Changes during phase 2
+
+Requested by the owner: section 3.9 (bash worker) and both fixes in 9.4.
+
+Implementation choices that differ from sections 4 to 6:
+
+1. No `serde_json`: `src/pyjson.rs` is a small parser and writer with its own
+   value type, which holds `NaN`/`Infinity` directly instead of sentinel strings
+   and reproduces Python's decode error messages.
+2. No `which` crate: `shutil.which` is ten lines in `src/editors.rs`.
+3. `crossterm` is used for raw mode and drawing commands; the terminal size comes
+   from stdout via `rustix` (as prompt_toolkit reads it), with crossterm as the
+   fallback.
+4. `test_system_local_timezone_uses_future_rules` builds a `TZ=America/New_York`
+   environment snapshot instead of re-running the test binary, since every path
+   already reads `TZ` from `Ctx.env`.
+5. Tests that patched higher-level functions in Python (`expire_instance`,
+   `wait_for_ssh`, `edit_instance`) answer the underlying commands through the
+   fake runner instead, so they run the real code path end to end.
+6. `test_missing_nvim_installs_only_verified_archive` also links `gzip` into the
+   restricted `PATH`; the Python test fails without it on hosts where `tar` needs
+   an external `gzip`.
+7. Deadlines on 9999-12-31 are rejected as out of range: `jiff` timestamps end at
+   9999-12-30T22:00Z.
+8. When an offer row cannot be built (a missing `id`), the offer screen shows the
+   error with a retry instead of the picker exiting with a `KeyError`.

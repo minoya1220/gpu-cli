@@ -789,7 +789,6 @@ Each is an edge case; say if you want any of them matched exactly.
    migration.
 
 ## 10. Delivery steps for phase 2
-11. Changes during phase 2
 
 One branch `rust-rewrite`, one PR. Order of work:
 

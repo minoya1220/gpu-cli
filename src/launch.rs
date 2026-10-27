@@ -398,7 +398,7 @@ pub fn launch(ctx: &Ctx, args: &UpArgs, cfg: &Dict, deadline: Option<Timestamp>)
                     ctx,
                     &instance_id,
                     Some(&editor),
-                    config::nvim_config(cfg)?.as_deref(),
+                    config::nvim_config(cfg)?.as_ref(),
                     120.0,
                 )?;
             }

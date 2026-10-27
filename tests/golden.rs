@@ -434,6 +434,7 @@ fn python_internal(message: &str) -> bool {
 #[test]
 fn python_parse_when() {
     let mut checked = 0;
+    let mut rejected = 0;
     let mut failures = Vec::new();
     for row in rows("parse_when") {
         let zone = match s(&row, "zone") {
@@ -442,13 +443,14 @@ fn python_parse_when() {
         };
         let now: jiff::Timestamp = s(&row, "now").parse().unwrap();
         let when = s(&row, "when");
-        // jiff timestamps end at 9999-12-30T22:00Z; Python accepts the last
-        // day of year 9999 (a documented deviation).
-        if opt_s(&row, "result").is_some_and(|r| r.starts_with("9999-12-3")) {
-            continue;
-        }
         let actual = parse_when(when, now, &zone);
         let ok = match (&actual, opt_s(&row, "result"), opt_s(&row, "error")) {
+            // jiff timestamps end at 9999-12-30T22:00Z, so the last day of
+            // year 9999, which Python accepts, is rejected (plan section 11).
+            (result, Some(expected), _) if expected.starts_with("9999-12-31") => {
+                rejected += 1;
+                result.is_err()
+            }
             (Ok(value), Some(expected), _) => {
                 *value == expected.parse::<jiff::Timestamp>().unwrap()
             }
@@ -476,6 +478,7 @@ fn python_parse_when() {
         failures.join("\n")
     );
     assert!(checked > 1000);
+    assert!(rejected > 0);
 }
 
 #[test]

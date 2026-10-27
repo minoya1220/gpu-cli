@@ -58,19 +58,21 @@ pub fn get<'a>(cfg: &'a Dict, key: &str) -> Result<&'a Value> {
     cfg.get(key).ok_or_else(|| Error::key(key))
 }
 
-/// `cfg.get("editor", {}).get("nvim_config")`.
-pub fn nvim_config(cfg: &Dict) -> Result<Option<String>> {
-    let editor = match cfg.get("editor") {
-        None => return Ok(None),
-        Some(Value::Dict(editor)) => editor,
-        Some(other) => {
-            return Err(Error::msg(format!(
-                "'{}' object has no attribute 'get'",
-                crate::pyfmt::type_name(other)
-            )))
-        }
-    };
-    match editor.get("nvim_config") {
+/// `cfg.get("editor", {}).get("nvim_config")`, unchecked until Neovim uses it.
+pub fn nvim_config(cfg: &Dict) -> Result<Option<Value>> {
+    match cfg.get("editor") {
+        None => Ok(None),
+        Some(Value::Dict(editor)) => Ok(editor.get("nvim_config").cloned()),
+        Some(other) => Err(Error::msg(format!(
+            "'{}' object has no attribute 'get'",
+            crate::pyfmt::type_name(other)
+        ))),
+    }
+}
+
+/// The Neovim config source as `launch_editor` reads it: falsy means none.
+pub fn nvim_config_text(value: Option<&Value>) -> Result<Option<String>> {
+    match value {
         None | Some(Value::Null) => Ok(None),
         Some(Value::Str(s)) => Ok(Some(s.clone())),
         Some(other) if !crate::pyfmt::truthy(other) => Ok(None),

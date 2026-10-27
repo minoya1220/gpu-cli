@@ -143,10 +143,10 @@ fn dispatch(ctx: &Ctx, command: Command) -> Result<()> {
                 return Ok(());
             };
             let nvim_config = match nvim_config {
-                Some(config) => Some(config),
+                Some(config) => Some(pyjson::Value::Str(config)),
                 None => config::nvim_config(&cfg)?,
             };
-            commands::edit_instance(ctx, &id, editor.as_deref(), nvim_config.as_deref(), 120.0)
+            commands::edit_instance(ctx, &id, editor.as_deref(), nvim_config.as_ref(), 120.0)
         }
         Command::Cursor { id } => {
             let Some(id) = commands::selected_id(ctx, id.as_deref(), "cursor")? else {

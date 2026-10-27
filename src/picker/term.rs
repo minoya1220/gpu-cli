@@ -177,6 +177,28 @@ struct Renderer {
     last: Vec<u8>,
 }
 
+/// prompt_toolkit's display form for control characters: `^@`..`^_`, `^?`
+/// and `<80>`..`<9f>`, so nothing reaches the terminal as a control code.
+fn shown(line: &[(Style, String)]) -> Vec<(Style, String)> {
+    line.iter()
+        .map(|(style, text)| {
+            let mut out = String::with_capacity(text.len());
+            for c in text.chars() {
+                match c {
+                    '\0'..='\x1f' => {
+                        out.push('^');
+                        out.push(char::from(c as u8 + 0x40));
+                    }
+                    '\x7f' => out.push_str("^?"),
+                    '\u{80}'..='\u{9f}' => out.push_str(&format!("<{:02x}>", c as u32)),
+                    c => out.push(c),
+                }
+            }
+            (*style, out)
+        })
+        .collect()
+}
+
 /// Wrap one styled line to `width` display columns.
 fn wrap(line: &[(Style, String)], width: usize) -> Vec<Vec<(Style, String)>> {
     let mut rows = vec![Vec::new()];
@@ -299,9 +321,16 @@ impl Renderer {
     fn draw(&mut self, io: &mut dyn Io, frame: &Frame) {
         let (width, height) = io.size();
         let (width, height) = (width.max(1), height.max(1));
-        let header: Vec<_> = frame.header.iter().map(|l| truncate(l, width)).collect();
-        let wrapped: Vec<Vec<Vec<(Style, String)>>> =
-            frame.body.iter().map(|line| wrap(line, width)).collect();
+        let header: Vec<_> = frame
+            .header
+            .iter()
+            .map(|l| truncate(&shown(l), width))
+            .collect();
+        let wrapped: Vec<Vec<Vec<(Style, String)>>> = frame
+            .body
+            .iter()
+            .map(|line| wrap(&shown(line), width))
+            .collect();
         let heights: Vec<usize> = wrapped.iter().map(Vec::len).collect();
         let body_room = height.saturating_sub(header.len() + 1).max(1);
         self.scroll = scroll_position(
@@ -316,7 +345,7 @@ impl Renderer {
             .flatten()
             .take(body_room)
             .collect();
-        let footer = truncate(&[(Style::Plain, frame.footer.clone())], width);
+        let footer = truncate(&shown(&[(Style::Plain, frame.footer.clone())]), width);
         let mut rows: Vec<Vec<(Style, String)>> = header;
         rows.extend(body);
         rows.push(footer);
@@ -553,6 +582,32 @@ mod tests {
             screen.rows()[..4],
             ["A very lon", "0123456789", "abcde", "footer hin"]
         );
+    }
+
+    #[test]
+    fn control_characters_show_as_prompt_toolkit_draws_them() {
+        let mut screen = Screen::new(40, 10);
+        let mut renderer = Renderer::default();
+        let frame = Frame {
+            header: vec![plain("T\x1b[2Jitle")],
+            body: vec![plain("a\tb\x7fc\u{85}d\x00")],
+            cursor_line: None,
+            footer: "x\ry".into(),
+        };
+        renderer.draw(&mut screen, &frame);
+        assert_eq!(screen.rows()[..3], ["T^[[2Jitle", "a^Ib^?c<85>d^@", "x^My"]);
+        let mut narrow = Screen::new(4, 10);
+        let mut renderer = Renderer::default();
+        let frame = Frame {
+            header: vec![],
+            body: vec![plain("\t\t\t")],
+            cursor_line: None,
+            footer: String::new(),
+        };
+        renderer.draw(&mut narrow, &frame);
+        assert_eq!(narrow.rows()[..3], ["^I^I", "^I", ""]);
+        renderer.erase(&mut narrow);
+        assert_eq!(narrow.rows()[..2], ["", ""]);
     }
 
     #[test]

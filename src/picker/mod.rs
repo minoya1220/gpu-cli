@@ -518,7 +518,10 @@ impl<V: PickValue, R: 'static> Core<V, R> {
         }
         if view.load_failed_required() {
             let error = load.map(|l| l.error()).unwrap_or_default();
-            let lines: Vec<String> = error.lines().map(|line| format!("  {line}")).collect();
+            let lines: Vec<String> = crate::pyfmt::splitlines(&error)
+                .iter()
+                .map(|line| format!("  {line}"))
+                .collect();
             return (one(Style::Error, lines.join("\n")), None);
         }
         if !view.ready() {
@@ -611,7 +614,7 @@ impl<V: PickValue, R: 'static> Core<V, R> {
                     let error = prices.error();
                     hints.push(format!(
                         "F2 retry prices ({})",
-                        error.lines().next().unwrap_or("")
+                        crate::pyfmt::splitlines(&error).first().unwrap_or(&"")
                     ));
                 }
                 JobState::Done => {}

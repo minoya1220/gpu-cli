@@ -188,6 +188,21 @@ fn test_ambiguous_arguments() {
 }
 
 #[test]
+fn test_arm_deadline_rounds_up_to_whole_seconds() {
+    // Python sends math.ceil(deadline.timestamp()).
+    for (deadline, seconds) in [
+        ("2023-11-14T22:13:20.25Z", "1700000001"),
+        ("2023-11-14T22:13:20.000000001Z", "1700000001"),
+        ("2023-11-14T22:13:20Z", "1700000000"),
+    ] {
+        let command =
+            remote_command("vast-1", "1", "arm", Some(deadline.parse().unwrap())).unwrap();
+        let words = shlex::split(command.last().unwrap()).unwrap();
+        assert_eq!(words.last().unwrap(), seconds, "{deadline}");
+    }
+}
+
+#[test]
 fn test_command_has_no_user_shell_input() {
     let command = remote_command("vast-123", "123", "arm", Some(now())).unwrap();
     assert_eq!(

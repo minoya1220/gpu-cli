@@ -18,6 +18,7 @@ use crate::picker::testing::*;
 use crate::picker::Outcome;
 use crate::process::{Input, Output};
 use crate::pyfmt::shell_quote;
+use crate::pyjson::Value;
 use crate::testing::*;
 
 fn accepting() -> std::sync::Arc<FakeRunner> {
@@ -186,6 +187,24 @@ fn test_history_only_after_success() {
             assert_eq!(last_editor(&t.env()), None);
         }
     }
+}
+
+#[test]
+fn test_nvim_config_type_only_matters_for_nvim() {
+    // Python passes cfg["editor"]["nvim_config"] through unchecked and calls
+    // config.startswith only on the Neovim path.
+    let t = with_stubs();
+    let runner = fake_vast(vec![instances()[0].clone()], |_| Ok(Output::status(0)));
+    let ctx = t.ctx().runner(&runner).build();
+    let config = Value::Int(5);
+    edit_instance(&ctx, "12", Some("code"), Some(&config), 120.0).unwrap();
+    let error = edit_instance(&ctx, "12", Some("nvim"), Some(&config), 120.0).unwrap_err();
+    assert_eq!(error.text(), "'int' object has no attribute 'startswith'");
+    assert!(!runner
+        .calls()
+        .iter()
+        .any(|c| c.argv.iter().any(|a| a == "bash -s")));
+    edit_instance(&ctx, "12", Some("nvim"), Some(&Value::Int(0)), 120.0).unwrap();
 }
 
 #[test]

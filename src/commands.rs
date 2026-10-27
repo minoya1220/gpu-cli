@@ -226,7 +226,7 @@ pub fn edit_instance(
     ctx: &Ctx,
     instance_id: &str,
     editor: Option<&str>,
-    nvim_config: Option<&str>,
+    nvim_config: Option<&Value>,
     timeout: f64,
 ) -> Result<()> {
     let editor = match editor.map(String::from).or_else(|| last_editor(&ctx.env)) {
@@ -242,7 +242,12 @@ pub fn edit_instance(
     };
     check_editor(&ctx.env, &editor)?;
     let (alias, directory) = wait_for_ssh(ctx, instance_id, timeout)?;
-    launch_editor(ctx, &editor, &alias, &directory, nvim_config)?;
+    let nvim_config = if editor == "nvim" {
+        crate::config::nvim_config_text(nvim_config)?
+    } else {
+        None
+    };
+    launch_editor(ctx, &editor, &alias, &directory, nvim_config.as_deref())?;
     record_picks(&ctx.env, &[("editor", &editor)])?;
     ctx.println(&format!(
         "Opened {} at {directory} on {alias}.",

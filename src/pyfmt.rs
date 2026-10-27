@@ -354,6 +354,39 @@ pub fn casefold(s: &str) -> String {
 
 /// Whether a string is a non-empty run of ASCII digits (`str.isdigit()`,
 /// restricted to ASCII).
+/// `str.splitlines()`: splits on `\r\n` and every Unicode line boundary,
+/// with no empty item after a final break.
+pub fn splitlines(s: &str) -> Vec<&str> {
+    let mut lines = Vec::new();
+    let mut start = 0;
+    let mut chars = s.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if matches!(
+            c,
+            '\n' | '\r'
+                | '\x0b'
+                | '\x0c'
+                | '\x1c'
+                | '\x1d'
+                | '\x1e'
+                | '\u{85}'
+                | '\u{2028}'
+                | '\u{2029}'
+        ) {
+            lines.push(&s[start..i]);
+            start = i + c.len_utf8();
+            if c == '\r' && chars.peek().is_some_and(|&(_, n)| n == '\n') {
+                chars.next();
+                start += 1;
+            }
+        }
+    }
+    if start < s.len() {
+        lines.push(&s[start..]);
+    }
+    lines
+}
+
 pub fn is_digits(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
 }

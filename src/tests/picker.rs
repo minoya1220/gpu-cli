@@ -395,6 +395,20 @@ fn test_loading_screen_stays_responsive_while_its_loader_blocks() {
 }
 
 #[test]
+fn test_failed_load_error_splits_like_python_splitlines() {
+    // "\n".join(f"  {line}" for line in error.splitlines()) in Python.
+    let job = Job::new(|| Err::<Vec<String>, _>("gh: a\rb\x0bc\r\nd\u{2028}e\n".to_string()));
+    let observer = job.observer();
+    let screen = Screen::new("Repository", Vec::<Opt<String>>::new, Next::Done).load(job);
+    let result = drive(screen, move |keys| {
+        keys.wait_for("the load to fail", || observer.state() == JobState::Failed);
+        keys.wait(|s| s.body == ["  gh: a", "  b", "  c", "  d", "  e"]);
+        keys.press(CTRL_C);
+    });
+    assert_eq!(result, Outcome::Cancelled(130));
+}
+
+#[test]
 fn test_failed_load_shows_error_and_enter_retries() {
     let attempts = Arc::new(AtomicUsize::new(0));
     let counter = attempts.clone();

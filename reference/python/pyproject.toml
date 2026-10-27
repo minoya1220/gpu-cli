@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "gpu"
+version = "0.1.0"
+description = "Local CLI to launch Vast.ai GPU workspaces from GitHub repositories"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "prompt-toolkit>=3.0.50",
+]
+
+[project.scripts]
+gpu = "gpu.cli:main"
+
+[dependency-groups]
+dev = [
+    "pyte>=0.8.2",
+    "pytest>=8",
+    "ruff>=0.9",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gpu"]
+include = ["src/gpu/gpu_models.txt"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

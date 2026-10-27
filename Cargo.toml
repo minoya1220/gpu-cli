@@ -1,0 +1,30 @@
+[package]
+name = "gpu-cli"
+version = "0.1.0"
+edition = "2021"
+description = "Local CLI to launch Vast.ai GPU workspaces with an optional git repository"
+publish = false
+
+[lib]
+name = "gpu"
+path = "src/lib.rs"
+
+[[bin]]
+name = "gpu"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
+crossterm = "0.29.0"
+jiff = "0.2.38"
+regex = "1.13.1"
+rustix = { version = "1.1.6", features = ["event", "fs", "pipe", "process", "stdio", "termios"] }
+shlex = "2.0.1"
+signal-hook = "0.4.5"
+tempfile = "3.27.0"
+unicode-width = "0.2.2"
+
+[dev-dependencies]
+rustix = { version = "1.1.6", features = ["pty"] }
+sha2 = "0.11.1"
+vt100 = "0.18.1"

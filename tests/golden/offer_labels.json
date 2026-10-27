@@ -1,0 +1,63 @@
+{
+ "offers": [
+  {
+   "id": 42,
+   "gpu_name": "RTX 4090",
+   "num_gpus": 1,
+   "dph_total": 0.4,
+   "reliability": 0.99,
+   "geolocation": "Test, XX",
+   "verification": "verified"
+  },
+  {
+   "id": 7,
+   "gpu_name": "Tesla T4",
+   "num_gpus": 2,
+   "dph": 0.0625,
+   "reliability": "0.9876",
+   "verification": "unverified"
+  },
+  {
+   "id": 123456789,
+   "gpu_name": "H100 SXM",
+   "num_gpus": 8,
+   "dph_total": 12.3456,
+   "geolocation": null
+  },
+  {
+   "id": 1,
+   "gpu_name": "B200",
+   "num_gpus": 1,
+   "dph_total": 1e-05,
+   "reliability": 1,
+   "geolocation": "Qu\u00e9bec, CA",
+   "verification": "deverified"
+  }
+ ],
+ "labels": [
+  "id=42 RTX 4090 x1 $0.400/hr reliability=0.990 location=Test, XX verification=verified",
+  "id=7 Tesla T4 x2 $0.062/hr reliability=0.988 location=? verification=unverified",
+  "id=123456789 H100 SXM x8 $12.346/hr reliability=0.000 location=None verification=unknown",
+  "id=1 B200 x1 $0.000/hr reliability=1.000 location=Qu\u00e9bec, CA verification=deverified"
+ ],
+ "rows": [
+  " $0.400/hr   99.0% reliable  verified    id=42         Test, XX",
+  " $0.062/hr   98.8% reliable  unverified  id=7          ?",
+  "$12.346/hr    0.0% reliable  unknown     id=123456789  None",
+  " $0.000/hr  100.0% reliable  deverified  id=1          Qu\u00e9bec, CA"
+ ],
+ "rows_each": [
+  [
+   "$0.400/hr   99.0% reliable  verified  id=42  Test, XX"
+  ],
+  [
+   "$0.062/hr   98.8% reliable  unverified  id=7  ?"
+  ],
+  [
+   "$12.346/hr    0.0% reliable  unknown  id=123456789  None"
+  ],
+  [
+   "$0.000/hr  100.0% reliable  deverified  id=1  Qu\u00e9bec, CA"
+  ]
+ ]
+}

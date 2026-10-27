@@ -1,0 +1,222 @@
+{
+ "strings": [
+  {
+   "text": "api_key=abc123",
+   "redacted": "api_key=REDACTED"
+  },
+  {
+   "text": "API-KEY: abc",
+   "redacted": "API-KEY: REDACTED"
+  },
+  {
+   "text": "apikey = 'xyz'",
+   "redacted": "apikey = 'REDACTED'"
+  },
+  {
+   "text": "token=\"t0k\"",
+   "redacted": "token=\"REDACTED\""
+  },
+  {
+   "text": "Authorization: Bearer abc.def",
+   "redacted": "Authorization: Bearer REDACTED"
+  },
+  {
+   "text": "password=hunter2;user=me",
+   "redacted": "password=REDACTED;user=me"
+  },
+  {
+   "text": "secret:s3cr3t,next",
+   "redacted": "secret:REDACTED,next"
+  },
+  {
+   "text": "my_access_token=zzz rest",
+   "redacted": "my_access_token=REDACTED rest"
+  },
+  {
+   "text": "no secrets here",
+   "redacted": "no secrets here"
+  },
+  {
+   "text": "jupyter_token=abc}",
+   "redacted": "jupyter_token=REDACTED}"
+  },
+  {
+   "text": "x-api-key: k1 k2",
+   "redacted": "x-api-key: REDACTED k2"
+  },
+  {
+   "text": "passwd=p,",
+   "redacted": "passwd=REDACTED,"
+  },
+  {
+   "text": "Started. {'instance_api_key': 'abc', 'id': 7}",
+   "redacted": "Started. {'instance_api_key': 'REDACTED', 'id': 7}"
+  },
+  {
+   "text": "{\"error\": \"boom\", \"instance_api_key\": \"abc\"}",
+   "redacted": "{\"error\": \"boom\", \"instance_api_key\": \"REDACTED\"}"
+  },
+  {
+   "text": "ssh://root@1.example:22?token=abc",
+   "redacted": "ssh://root@1.example:22?token=REDACTED"
+  },
+  {
+   "text": "tokenless",
+   "redacted": "tokenless"
+  },
+  {
+   "text": "token",
+   "redacted": "token"
+  },
+  {
+   "text": "token=",
+   "redacted": "token="
+  },
+  {
+   "text": "TOKEN = 'x y'",
+   "redacted": "TOKEN = 'REDACTED y'"
+  },
+  {
+   "text": "authorization=Bearer   spaced",
+   "redacted": "authorization=Bearer   REDACTED"
+  }
+ ],
+ "values": [
+  {
+   "value": {
+    "instance_api_key": "k",
+    "jupyter_token": "t",
+    "ok": "fine",
+    "nested": {
+     "password": 1,
+     "list": [
+      "a=b",
+      "token=c"
+     ]
+    }
+   },
+   "redacted": {
+    "instance_api_key": "REDACTED",
+    "jupyter_token": "REDACTED",
+    "ok": "fine",
+    "nested": {
+     "password": "REDACTED",
+     "list": [
+      "a=b",
+      "token=REDACTED"
+     ]
+    }
+   }
+  },
+  {
+   "value": [
+    [
+     "VAST_API_KEY",
+     "k"
+    ],
+    [
+     "PATH",
+     "/bin"
+    ],
+    [
+     "token",
+     1
+    ],
+    [
+     "x",
+     "y",
+     "z"
+    ]
+   ],
+   "redacted": [
+    [
+     "VAST_API_KEY",
+     "REDACTED"
+    ],
+    [
+     "PATH",
+     "/bin"
+    ],
+    [
+     "token",
+     "REDACTED"
+    ],
+    [
+     "x",
+     "y",
+     "z"
+    ]
+   ]
+  },
+  {
+   "value": [
+    "api_key",
+    "value"
+   ],
+   "redacted": [
+    "api_key",
+    "REDACTED"
+   ]
+  },
+  {
+   "value": [
+    1,
+    "secret=x"
+   ],
+   "redacted": [
+    1,
+    "secret=REDACTED"
+   ]
+  },
+  {
+   "value": {
+    "extra_env": [
+     [
+      "GH_TOKEN",
+      "ghp_x"
+     ]
+    ],
+    "id": 31337
+   },
+   "redacted": {
+    "extra_env": [
+     [
+      "GH_TOKEN",
+      "REDACTED"
+     ]
+    ],
+    "id": 31337
+   }
+  },
+  {
+   "value": "plain",
+   "redacted": "plain"
+  },
+  {
+   "value": 5,
+   "redacted": 5
+  },
+  {
+   "value": null,
+   "redacted": null
+  },
+  {
+   "value": true,
+   "redacted": true
+  },
+  {
+   "value": [
+    [
+     "Token",
+     null
+    ]
+   ],
+   "redacted": [
+    [
+     "Token",
+     "REDACTED"
+    ]
+   ]
+  }
+ ]
+}

@@ -1,0 +1,22 @@
+[
+{"text": "", "quoted": "''"},
+{"text": "simple", "quoted": "simple"},
+{"text": "with space", "quoted": "'with space'"},
+{"text": "it's", "quoted": "'it'\"'\"'s'"},
+{"text": "a'b'c", "quoted": "'a'\"'\"'b'\"'\"'c'"},
+{"text": "$(id)", "quoted": "'$(id)'"},
+{"text": "/workspace/repo", "quoted": "/workspace/repo"},
+{"text": "a=b,c:d@e%f+g-h.i/j_k", "quoted": "a=b,c:d@e%f+g-h.i/j_k"},
+{"text": "tab\there", "quoted": "'tab\there'"},
+{"text": "new\nline", "quoted": "'new\nline'"},
+{"text": "\u00fcn\u00efcode", "quoted": "'\u00fcn\u00efcode'"},
+{"text": "x*y", "quoted": "'x*y'"},
+{"text": "~home", "quoted": "'~home'"},
+{"text": "#hash", "quoted": "'#hash'"},
+{"text": "!bang", "quoted": "'!bang'"},
+{"text": "back\\slash", "quoted": "'back\\slash'"},
+{"text": "\"dq\"", "quoted": "'\"dq\"'"},
+{"text": "https://github.com/o/r.git", "quoted": "https://github.com/o/r.git"},
+{"text": "git@github.com:o/r.git", "quoted": "git@github.com:o/r.git"},
+{"text": "/workspace/a'; touch BAD; '", "quoted": "'/workspace/a'\"'\"'; touch BAD; '\"'\"''"}
+]

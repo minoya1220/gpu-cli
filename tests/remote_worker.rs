@@ -12,5 +12,10 @@ fn remote_worker_suite() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "{stdout}\n{stderr}");
-    assert!(stdout.contains(" passed, 0 failed"), "{stdout}");
+    let passed: usize = stdout
+        .lines()
+        .find_map(|line| line.strip_suffix(" passed, 0 failed"))
+        .and_then(|count| count.parse().ok())
+        .unwrap_or(0);
+    assert!(passed > 0, "{stdout}");
 }

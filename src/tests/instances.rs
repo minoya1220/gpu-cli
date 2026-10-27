@@ -259,6 +259,28 @@ fn test_managed_ssh_config_preserves_user_bytes() {
 }
 
 #[test]
+fn test_managed_ssh_config_with_crlf_replaces_stale_alias() {
+    let t = TestEnv::new();
+    let env = t.env();
+    let ssh = t.home.join(".ssh");
+    std::fs::create_dir(&ssh).unwrap();
+    let managed = ssh.join("vst_config");
+    std::fs::write(
+        &managed,
+        "Host vast-12\r\n  HostName old.example\r\n  Port 1\r\nHost vast-34\r\n  HostName ssh7.vast.ai\r\n  Port 2222\r\n",
+    )
+    .unwrap();
+    let entry = "Host vast-12\n  HostName ssh6.vast.ai\n  Port 12345\n  User root\n  IdentityFile ~/.ssh/id_ed25519\n  StrictHostKeyChecking accept-new\n";
+    assert_eq!(update_host(&env, &instances()[0]).unwrap(), "vast-12");
+    assert_eq!(
+        read(&managed),
+        format!("Host vast-34\n  HostName ssh7.vast.ai\n  Port 2222\n{entry}")
+    );
+    remove_host(&env, "34").unwrap();
+    assert_eq!(read(&managed), entry);
+}
+
+#[test]
 fn test_ssh_wait_timeout() {
     let t = TestEnv::new();
     editor_stubs(&t);

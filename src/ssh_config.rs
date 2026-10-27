@@ -60,8 +60,10 @@ fn chmod_600(path: &Path) -> Result<()> {
         .map_err(|e| os_error(&e, path))
 }
 
+/// `Path.read_text()`, with its universal newlines: `\r\n` and `\r` read as `\n`.
 fn read_text(path: &Path) -> Result<String> {
-    std::fs::read_to_string(path).map_err(|e| os_error(&e, path))
+    let text = std::fs::read_to_string(path).map_err(|e| os_error(&e, path))?;
+    Ok(text.replace("\r\n", "\n").replace('\r', "\n"))
 }
 
 fn ensure_include(env: &Env) -> Result<()> {

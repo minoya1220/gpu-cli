@@ -189,7 +189,9 @@ impl Runner for RealRunner {
         // Read both pipes on threads so a large output cannot deadlock.
         let stdout = drain(child.stdout.take());
         let stderr = drain(child.stderr.take());
-        let status = wait(&mut child, cmd.timeout).map_err(|e| RunError::Os(e.to_string()))?;
+        let status = wait(&mut child, cmd.timeout)
+            .map_err(|e| RunError::Os(e.to_string()))?
+            .ok_or(RunError::TimedOut)?;
         let collect = |handle: Option<thread::JoinHandle<Vec<u8>>>| {
             handle
                 .map(|h| translate_newlines(&h.join().unwrap_or_default()))
@@ -199,7 +201,6 @@ impl Runner for RealRunner {
         if let Some(writer) = writer {
             let _ = writer.join();
         }
-        let status = status.ok_or(RunError::TimedOut)?;
         let code = status
             .code()
             .unwrap_or_else(|| -status.signal().unwrap_or(1));

@@ -53,6 +53,7 @@ run_test() {
         . "$SCRIPT"
         ROOT=$dir/state
         WORKER_HOME=$HOME
+        WORKER_PATH=$dir/bin:/usr/bin:/bin
         PROC1_ENVIRON=$dir/proc1-environ
         ETC_ENVIRONMENT=$dir/etc-environment
         mkdir -p "$ROOT"
@@ -243,11 +244,12 @@ test_process_identity_check() {
 
 test_scoped_credentials_sources() {
     export VAST_API_KEY=personal-key-must-never-be-used
-    for environment in container vm pid1; do
+    for environment in container vm vm-comments pid1; do
         (
             case $environment in
                 container) export CONTAINER_ID=123 CONTAINER_API_KEY=scoped ;;
                 vm) printf 'CONTAINER_ID="123"\nCONTAINER_API_KEY="scoped"\n' >"$ETC_ENVIRONMENT" ;;
+                vm-comments) printf '# Vast\nCONTAINER_ID=123 # vast\nCONTAINER_API_KEY="scoped"#x\n' >"$ETC_ENVIRONMENT" ;;
                 pid1) printf 'CONTAINER_ID=123\0CONTAINER_API_KEY=scoped\0' >"$PROC1_ENVIRON" ;;
             esac
             credentials 123
@@ -292,6 +294,7 @@ test_exact_destroy_request_mocked() {
     check "exact URL" grep -qx 'https://console.vast.ai/api/v0/instances/123/' "$TEST_DIR/curl-args"
     check "DELETE" grep -qx DELETE "$TEST_DIR/curl-args"
     check "15 s timeout" grep -qx 15 "$TEST_DIR/curl-args"
+    equals "$(head -n 1 "$TEST_DIR/curl-args")" -q
     check "no proxy" grep -qx -- --noproxy "$TEST_DIR/curl-args"
     refute "no redirects" grep -qx -e -L -e --location "$TEST_DIR/curl-args"
     refute "key not on the command line" grep -q scoped-key "$TEST_DIR/curl-args"

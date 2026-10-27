@@ -17,6 +17,8 @@ pub enum Value {
     Null,
     Bool(bool),
     Int(i64),
+    /// An integer outside `i64`, kept as its exact decimal digits.
+    BigInt(String),
     Float(f64),
     Str(String),
     List(Vec<Value>),
@@ -124,6 +126,7 @@ impl Value {
         match self {
             Value::Bool(b) => Some(f64::from(u8::from(*b))),
             Value::Int(i) => Some(*i as f64),
+            Value::BigInt(digits) => digits.parse().ok(),
             Value::Float(f) => Some(*f),
             _ => None,
         }
@@ -288,9 +291,10 @@ impl Parser<'_> {
         }
         let text: String = self.s[start..self.pos].iter().collect();
         if !is_float {
-            if let Ok(i) = text.parse::<i64>() {
-                return Ok(Value::Int(i));
-            }
+            return Ok(match text.parse::<i64>() {
+                Ok(i) => Value::Int(i),
+                Err(_) => Value::BigInt(text),
+            });
         }
         Ok(Value::Float(text.parse::<f64>().unwrap_or(f64::NAN)))
     }
@@ -455,6 +459,7 @@ fn write_value(out: &mut String, value: &Value, indent: Option<usize>, level: us
         Value::Int(i) => {
             let _ = write!(out, "{i}");
         }
+        Value::BigInt(digits) => out.push_str(digits),
         Value::Float(f) => out.push_str(&json_float(*f)),
         Value::Str(s) => write_string(out, s),
         Value::List(items) if items.is_empty() => out.push_str("[]"),

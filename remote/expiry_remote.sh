@@ -41,7 +41,7 @@ is_digits() {
 # shells do not always inherit Vast's injected environment, so PID 1's
 # environment and /etc/environment are read too; the process environment wins.
 credentials() {
-    local instance_id=$1 id='' key='' entry name value line
+    local instance_id=$1 id='' key='' entry name value line char quote i
     if [ -r "$PROC1_ENVIRON" ]; then
         {
             while IFS= read -r -d '' entry; do
@@ -56,6 +56,18 @@ credentials() {
     fi
     if [ -r "$ETC_ENVIRONMENT" ]; then
         while IFS= read -r line || [ -n "$line" ]; do
+            quote=''
+            for ((i = 0; i < ${#line}; i++)); do
+                char=${line:i:1}
+                if [ -n "$quote" ]; then
+                    [ "$char" = "$quote" ] && quote=''
+                elif [ "$char" = '"' ] || [ "$char" = "'" ]; then
+                    quote=$char
+                elif [ "$char" = '#' ]; then
+                    line=${line:0:i}
+                    break
+                fi
+            done
             line=${line#"${line%%[![:space:]]*}"}
             line=${line#export }
             line=${line#"${line%%[![:space:]]*}"}
@@ -148,7 +160,7 @@ destroy() {
     key=${key//\\/\\\\}
     key=${key//\"/\\\"}
     body=$(printf 'header = "Authorization: Bearer %s"\n' "$key" |
-        curl --config - --silent --fail --noproxy '*' --max-time 15 \
+        curl -q --config - --silent --fail --noproxy '*' --max-time 15 \
             --request DELETE --header 'Content-Type: application/json' --data '{}' \
             "$DESTROY_URL/$instance_id/" 2>/dev/null | head -c 65536) || return 1
     printf '%s' "$body" | grep -Eq '"success"[[:space:]]*:[[:space:]]*true'

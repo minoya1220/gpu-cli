@@ -380,10 +380,14 @@ pub fn launch(ctx: &Ctx, args: &UpArgs, cfg: &Dict, deadline: Option<Timestamp>)
                 "Instance created but no ID returned; expiry NOT armed. Run gpu ls, then gpu expire ID WHEN.",
             ));
         };
-        if let Err(Error::Msg(text)) = expire_instance(ctx, instance_id, "arm", deadline) {
-            return Err(Error::msg(format!(
-                "Instance {instance_id} created but expiry NOT verified; billing continues. Run gpu expire {instance_id} show or gpu down {instance_id}. {text}"
-            )));
+        match expire_instance(ctx, instance_id, "arm", deadline) {
+            Err(Error::Msg(text)) => {
+                return Err(Error::msg(format!(
+                    "Instance {instance_id} created but expiry NOT verified; billing continues. Run gpu expire {instance_id} show or gpu down {instance_id}. {text}"
+                )))
+            }
+            Err(other) => return Err(other),
+            Ok(()) => {}
         }
     }
     if let Some(instance_id) = instance_id {

@@ -11,6 +11,9 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
+/// Name of the threads that run job work; their panics are caught.
+pub const THREAD_NAME: &str = "gpu-picker-job";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JobState {
     Idle,
@@ -243,7 +246,7 @@ impl<T: Clone + Send + 'static> AnyJob for Job<T> {
         let slot = Arc::new(Mutex::new(None));
         let (work, waker, filled) = (self.inner.work.clone(), runtime.waker.clone(), slot.clone());
         std::thread::Builder::new()
-            .name("gpu-picker-job".into())
+            .name(THREAD_NAME.into())
             .spawn(move || {
                 // Thread boundary: an escaping panic would leave the screen loading forever.
                 let outcome = match catch_unwind(AssertUnwindSafe(|| work())) {

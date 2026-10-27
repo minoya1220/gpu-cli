@@ -6,6 +6,9 @@ use signal_hook::iterator::Signals;
 fn main() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        if std::thread::current().name() == Some(gpu::picker::job::THREAD_NAME) {
+            return;
+        }
         gpu::picker::term::restore_terminal();
         default_hook(info);
     }));

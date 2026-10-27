@@ -2,6 +2,7 @@
 
 use std::io::{Read, Write};
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -128,24 +129,43 @@ fn translate_newlines(bytes: &[u8]) -> String {
         .replace('\r', "\n")
 }
 
-fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> Option<thread::JoinHandle<Vec<u8>>> {
+fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> Option<Receiver<Vec<u8>>> {
     pipe.map(|mut pipe| {
+        let (sender, receiver) = mpsc::channel();
         thread::spawn(move || {
             let mut buffer = Vec::new();
             let _ = pipe.read_to_end(&mut buffer);
-            buffer
-        })
+            let _ = sender.send(buffer);
+        });
+        receiver
     })
+}
+
+/// A drained pipe's text; `None` when the deadline passes first.
+fn collect(receiver: Option<Receiver<Vec<u8>>>, deadline: Option<Instant>) -> Option<String> {
+    let Some(receiver) = receiver else {
+        return Some(String::new());
+    };
+    let bytes = match deadline {
+        None => receiver.recv().unwrap_or_default(),
+        Some(deadline) => {
+            match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(bytes) => bytes,
+                Err(RecvTimeoutError::Timeout) => return None,
+                Err(RecvTimeoutError::Disconnected) => Vec::new(),
+            }
+        }
+    };
+    Some(translate_newlines(&bytes))
 }
 
 fn wait(
     child: &mut Child,
-    timeout: Option<f64>,
+    deadline: Option<Instant>,
 ) -> std::io::Result<Option<std::process::ExitStatus>> {
-    let Some(timeout) = timeout else {
+    let Some(deadline) = deadline else {
         return child.wait().map(Some);
     };
-    let deadline = Instant::now() + Duration::from_secs_f64(timeout.max(0.0));
     loop {
         if let Some(status) = child.try_wait()? {
             return Ok(Some(status));
@@ -177,30 +197,23 @@ impl Runner for RealRunner {
             std::io::ErrorKind::NotFound => RunError::NotFound,
             _ => RunError::Os(crate::error::os_message(&err, None)),
         })?;
-        let writer = match (&cmd.stdin, child.stdin.take()) {
-            (Input::Text(text), Some(mut stdin)) => {
-                let text = text.clone();
-                Some(thread::spawn(move || {
-                    let _ = stdin.write_all(text.as_bytes());
-                }))
-            }
-            _ => None,
-        };
+        let deadline = cmd
+            .timeout
+            .map(|t| Instant::now() + Duration::from_secs_f64(t.max(0.0)));
+        if let (Input::Text(text), Some(mut stdin)) = (&cmd.stdin, child.stdin.take()) {
+            let text = text.clone();
+            thread::spawn(move || {
+                let _ = stdin.write_all(text.as_bytes());
+            });
+        }
         // Read both pipes on threads so a large output cannot deadlock.
         let stdout = drain(child.stdout.take());
         let stderr = drain(child.stderr.take());
-        let status = wait(&mut child, cmd.timeout)
+        let status = wait(&mut child, deadline)
             .map_err(|e| RunError::Os(e.to_string()))?
             .ok_or(RunError::TimedOut)?;
-        let collect = |handle: Option<thread::JoinHandle<Vec<u8>>>| {
-            handle
-                .map(|h| translate_newlines(&h.join().unwrap_or_default()))
-                .unwrap_or_default()
-        };
-        let (stdout, stderr) = (collect(stdout), collect(stderr));
-        if let Some(writer) = writer {
-            let _ = writer.join();
-        }
+        let stdout = collect(stdout, deadline).ok_or(RunError::TimedOut)?;
+        let stderr = collect(stderr, deadline).ok_or(RunError::TimedOut)?;
         let code = status
             .code()
             .unwrap_or_else(|| -status.signal().unwrap_or(1));

@@ -106,15 +106,14 @@ pub fn request(offer: &Dict, args: &RequestArgs, cfg: &Dict) -> Result<Vec<Value
     Ok(command)
 }
 
-/// The request as process arguments; a non-string item fails with the
-/// `TypeError` text `subprocess.run` raises before starting anything.
+/// The request as process arguments; reject non-string items before starting a process.
 pub fn argv(request: &[Value]) -> Result<Vec<String>> {
     request
         .iter()
         .map(|item| match item {
             Value::Str(s) => Ok(s.clone()),
             other => Err(Error::msg(format!(
-                "expected str, bytes or os.PathLike object, not {}",
+                "Request argument must be text, got {}. Check image and repository config.",
                 type_name(other)
             ))),
         })

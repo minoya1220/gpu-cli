@@ -17,7 +17,7 @@ use crate::pyjson::{Dict, Value};
 use crate::vast::Vast;
 
 pub const NO_OFFERS: &str =
-    "No matching offers found; try a different model, GPU count, reliability, or disk size";
+    "No matching offers. Choose another GPU or relax --max-price, --reliability, or --disk.";
 pub const CATEGORY_ORDER: [&str; 7] = [
     "Datacenter Blackwell/Hopper",
     "Datacenter Ampere/Ada/older",
@@ -134,7 +134,7 @@ impl OfferSearch {
     }
 }
 
-/// The search result as offer dicts, or Python's error for other shapes.
+/// The search result as offer dicts, or a malformed-response error.
 pub fn offer_dicts(value: Value) -> Result<Vec<Dict>> {
     match value {
         Value::List(items) => items
@@ -142,21 +142,23 @@ pub fn offer_dicts(value: Value) -> Result<Vec<Dict>> {
             .map(|item| match item {
                 Value::Dict(dict) => Ok(dict),
                 other => Err(Error::msg(format!(
-                    "'{}' object has no attribute 'get'",
+                    "Vast returned a {} entry; expected an instance or offer object. Retry the command.",
                     crate::pyfmt::type_name(&other)
                 ))),
             })
             .collect(),
         Value::Dict(dict) if dict.is_empty() => Ok(Vec::new()),
-        Value::Dict(_) | Value::Str(_) => Err(Error::msg("'str' object has no attribute 'get'")),
+        Value::Dict(_) | Value::Str(_) => Err(Error::msg(
+            "Vast returned an object or text; expected a list of instances or offers. Retry the command.",
+        )),
         other => Err(Error::msg(format!(
-            "'{}' object is not iterable",
+            "Vast returned {}; expected a list of instances or offers. Retry the command.",
             crate::pyfmt::type_name(&other)
         ))),
     }
 }
 
-/// `offer[key]`, or Python's `KeyError`.
+/// `offer[key]`, or a missing-field error.
 pub fn field<'a>(offer: &'a Dict, key: &str) -> Result<&'a Value> {
     offer.get(key).ok_or_else(|| Error::key(key))
 }

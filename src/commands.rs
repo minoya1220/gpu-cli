@@ -31,7 +31,7 @@ pub fn ls(ctx: &Ctx, json: bool) -> Result<()> {
 
 pub fn render_instances(ctx: &Ctx, instances: &Value) -> Result<()> {
     if !truthy(instances) {
-        return ctx.println("No instances.");
+        return ctx.println("No instances. Launch one: gpu up");
     }
     let items = offer_dicts(instances.clone())?;
     let columns = [
@@ -121,7 +121,7 @@ pub fn wait_for_lifecycle(ctx: &Ctx, instance_id: &str, action: &str, timeout: f
                 "stopped status not observed"
             };
             return Err(Error::msg(format!(
-                "Instance {instance_id}: {action} not verified within {}s ({detail})",
+                "Instance {instance_id}: {action} not verified after {} seconds ({detail}). Check: gpu ls",
                 general(timeout)
             )));
         }
@@ -129,7 +129,7 @@ pub fn wait_for_lifecycle(ctx: &Ctx, instance_id: &str, action: &str, timeout: f
             Ok(live) => live,
             Err((true, err)) => {
                 return Err(Error::msg(format!(
-                    "Instance {instance_id}: {action} could not be verified: {}",
+                    "Instance {instance_id}: {action} not verified: {}. Check: gpu ls",
                     err.text()
                 )))
             }
@@ -156,11 +156,12 @@ pub fn wait_for_ssh(ctx: &Ctx, instance_id: &str, timeout: f64) -> Result<(Strin
     let deadline = ctx.clock.monotonic() + timeout;
     let timed_out = || {
         Error::msg(format!(
-            "Timed out waiting for instance {instance_id} to run and answer SSH"
+            "Instance {instance_id}: SSH not ready after {} seconds. Check: gpu ls",
+            general(timeout)
         ))
     };
     ctx.eprintln(&format!(
-        "Waiting for instance {instance_id} and SSH (up to {}s)...",
+        "Instance {instance_id}: waiting for running state and SSH, up to {} seconds.",
         general(timeout)
     ))?;
     loop {
@@ -173,8 +174,9 @@ pub fn wait_for_ssh(ctx: &Ctx, instance_id: &str, timeout: f64) -> Result<(Strin
             Err((true, err)) if err.text().contains("Timed out") => return Err(timed_out()),
             Err((_, err)) => return Err(err),
         };
-        let instance = find_instance(&live, instance_id)
-            .ok_or_else(|| Error::msg(format!("Instance {instance_id} not found")))?;
+        let instance = find_instance(&live, instance_id).ok_or_else(|| {
+            Error::msg(format!("Instance {instance_id} not found. Check: gpu ls"))
+        })?;
         if instance.get("actual_status") == Some(&Value::str("running")) {
             match update_host(&ctx.env, instance) {
                 // SSH endpoint not provisioned yet.
@@ -201,9 +203,7 @@ pub fn wait_for_ssh(ctx: &Ctx, instance_id: &str, timeout: f64) -> Result<(Strin
                                     None => "/workspace".into(),
                                 };
                                 if repo.is_none() {
-                                    ctx.println(
-                                        "No repository recorded on instance; opening /workspace.",
-                                    )?;
+                                    ctx.println("Workspace: /workspace (no repository recorded).")?;
                                 }
                                 return Ok((alias, directory));
                             }
@@ -234,7 +234,7 @@ pub fn edit_instance(
         None => {
             if !ctx.interactive() {
                 return Err(Error::msg(
-                    "No previous editor; specify --editor cursor|code|zed|nvim",
+                    format!("No saved editor (cursor, code, zed, nvim). Run: gpu edit {instance_id} --editor code"),
                 ));
             }
             pick(ctx, editor_screen())?
@@ -266,7 +266,7 @@ pub fn expire_instance(
     ctx.println(&expiry_summary(ctx, instance_id, &result)?)?;
     if result.get("status") == Some(&Value::str("inactive")) {
         return Err(Error::msg(format!(
-            "Timer is NOT running; re-arm with gpu expire {instance_id} WHEN."
+            "Instance {instance_id}: expiry worker is inactive. Re-arm: gpu expire {instance_id} 2h"
         )));
     }
     Ok(())
@@ -275,7 +275,11 @@ pub fn expire_instance(
 pub fn ssh(ctx: &Ctx, instance_id: &str, exec: bool) -> Result<()> {
     let url = run(ctx, &["vastai", "ssh-url", instance_id], None)?;
     if exec {
-        let words = shlex::split(&url).ok_or_else(|| Error::msg("No closing quotation"))?;
+        let words = shlex::split(&url).ok_or_else(|| {
+            Error::msg(format!(
+                "Vast returned an SSH URL with an unclosed quote. Retry: gpu ssh {instance_id}"
+            ))
+        })?;
         let mut argv = vec!["ssh".to_string()];
         argv.extend(words);
         return Err(Error::msg(ctx.runner.exec(&argv)));
@@ -289,7 +293,7 @@ pub fn lifecycle(ctx: &Ctx, instance_id: &str, destroy: bool, yes: bool) -> Resu
         && !yes
         && !confirm(
             ctx,
-            &format!("Destroy instance {instance_id}? Type 'yes' to confirm: "),
+            &format!("Delete instance {instance_id} and its disk? Type 'yes' to destroy: "),
         )?
     {
         return ctx.println("Cancelled.");
@@ -309,12 +313,12 @@ pub fn lifecycle(ctx: &Ctx, instance_id: &str, destroy: bool, yes: bool) -> Resu
     }
     if let Err(err) = run(ctx, &command, Some(60.0)) {
         return Err(Error::msg(format!(
-            "Instance {instance_id}: {action} failed; completion not verified: {}",
+            "Instance {instance_id}: {action} failed; completion unverified: {}. Check: gpu ls",
             err.text()
         )));
     }
     ctx.eprintln(&format!(
-        "Waiting for instance {instance_id} to {action}..."
+        "Instance {instance_id}: verifying {action}, up to 60 seconds."
     ))?;
     wait_for_lifecycle(ctx, instance_id, action, 60.0)?;
     if destroy {

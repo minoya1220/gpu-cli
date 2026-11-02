@@ -222,7 +222,10 @@ fn test_no_repo_usable_while_github_is_blocked() {
     let result = super::wizard::run(&flow(&t, job), tesla(), move |keys| {
         keys.wait_for("the sync to run", || observer.state() == JobState::Running);
         keys.type_text("No repository");
-        assert!(keys.press_until(ENTER, on("Mode")) < std::time::Duration::from_millis(500));
+        assert!(
+            keys.press_until(ENTER, |s| s.title.starts_with("Choose mode: "))
+                < std::time::Duration::from_millis(500)
+        );
         keys.press_until("2", on("Checking repositories"));
         release.set();
     });
@@ -243,22 +246,22 @@ fn test_url_entered_inline_and_back_preserves_choices() {
         let t = TestEnv::new();
         let result = super::wizard::run(&own_repo(&t), tesla(), move |keys| {
             keys.type_text("Clone from");
-            keys.press_until(ENTER, on("Clone from URL"));
+            keys.press_until(ENTER, on("Enter repository URL or owner/name"));
             keys.press(ENTER); // empty is not an implicit no-repo choice
-            assert_eq!(keys.title(), "Clone from URL");
+            assert_eq!(keys.title(), "Enter repository URL or owner/name");
             keys.type_text("https://host/repo;id");
             keys.press(ENTER);
-            assert_eq!(keys.title(), "Clone from URL");
+            assert_eq!(keys.title(), "Enter repository URL or owner/name");
             keys.press(BACK); // clear invalid input
             assert_eq!(keys.filter(), "");
-            keys.press_until(BACK, on("Repository"));
-            keys.press_until(ENTER, on("Clone from URL"));
+            keys.press_until(BACK, on("Choose repository"));
+            keys.press_until(ENTER, on("Enter repository URL or owner/name"));
             keys.type_text(&format!("{repo}x"));
             keys.press(BACKSPACE);
-            keys.press_until(ENTER, on("Mode"));
-            keys.press_until(BACK, on("Clone from URL"));
+            keys.press_until(ENTER, |s| s.title.starts_with("Choose mode: "));
+            keys.press_until(BACK, on("Enter repository URL or owner/name"));
             assert_eq!(keys.filter(), repo);
-            keys.press_until(ENTER, on("Mode"));
+            keys.press_until(ENTER, |s| s.title.starts_with("Choose mode: "));
             keys.press("1");
         });
         let expected = Picks::new(
@@ -280,8 +283,8 @@ fn test_github_failure_does_not_hide_static_choices() {
         keys.wait(|s| s.labels.contains(&"No repository".to_string()));
         assert!(keys.labels().contains(&"Clone from URL...".to_string()));
         keys.type_text("Clone from");
-        keys.press_until(ENTER, on("Clone from URL"));
-        keys.press_until(BACK, on("Repository"));
+        keys.press_until(ENTER, on("Enter repository URL or owner/name"));
+        keys.press_until(BACK, on("Choose repository"));
         keys.press(BACK); // clear repository filter
         keys.press(BACK);
         keys.press(BACK); // quit: twice on the first screen
@@ -332,7 +335,7 @@ fn test_paste_url_in_same_application() {
         Picks::new(None, Some("container"), Some("B200")),
         move |keys| {
             keys.type_text("Clone from");
-            keys.press_until(ENTER, on("Clone from URL"));
+            keys.press_until(ENTER, on("Enter repository URL or owner/name"));
             keys.press(&format!("\x1b[200~{repo}\x1b[201~"));
             assert_eq!(keys.filter(), repo);
             keys.press(ENTER);
@@ -382,7 +385,9 @@ fn test_line_picker_new_choices_without_github() {
         )
         .unwrap();
         assert_eq!(picks.repo, Some(repo));
-        assert!(err(&ctx).contains("Could not list repositories: offline"));
+        assert!(err(&ctx).contains(
+            "Repository list unavailable: offline. Choose No repository or enter a URL."
+        ));
     }
 }
 

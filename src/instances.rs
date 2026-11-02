@@ -94,7 +94,7 @@ pub fn instance_label(item: &Dict) -> Result<String> {
 /// The instance picker; `Ok(None)` when there is nothing to select.
 pub fn select_instance(ctx: &Ctx, instances: &[Dict], action: &str) -> Result<Option<String>> {
     if instances.is_empty() {
-        ctx.println("No instances to select.")?;
+        ctx.println("No instances. Launch one: gpu up")?;
         return Ok(None);
     }
     let mut options = Vec::new();
@@ -104,7 +104,7 @@ pub fn select_instance(ctx: &Ctx, instances: &[Dict], action: &str) -> Result<Op
     }
     // Even a single instance must be explicitly selected.
     let screen = Screen::new(
-        format!("Instance to {action}"),
+        format!("Choose instance: gpu {action}"),
         move || options.clone(),
         Next::Done,
     )

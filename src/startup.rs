@@ -43,7 +43,7 @@ pub fn startup_script(repo: &Repo, mode: &str, cfg: &Dict) -> Result<String> {
         "git config --global user.email {}",
         shell_quote_value(config::get(cfg, "git_email")?)?
     ));
-    lines.push(r#"if [ -n "${GH_TOKEN:-}" ]; then gh auth setup-git; else echo "WARNING: GH_TOKEN is not set in Vast account environment; private GitHub repos may not clone." >&2; fi"#.into());
+    lines.push(r#"if [ -n "${GH_TOKEN:-}" ]; then gh auth setup-git; else echo "GH_TOKEN is missing. For private GitHub repos, set GH_TOKEN in the Vast account environment before launching." >&2; fi"#.into());
     if *repo != Repo::NoRepo {
         lines.push(format!(
             "[ -d {} ] || git clone {} {}",

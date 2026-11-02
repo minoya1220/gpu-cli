@@ -88,7 +88,7 @@ fn github_names(output: &str) -> Result<Vec<String>> {
         Value::List(items) => items,
         other => {
             return Err(Error::msg(format!(
-                "'{}' object is not iterable",
+                "GitHub returned {}; expected a repository list. Check: gh auth status",
                 crate::pyfmt::type_name(&other)
             )))
         }
@@ -101,7 +101,7 @@ fn github_names(output: &str) -> Result<Vec<String>> {
                 .map(py_str)
                 .ok_or_else(|| Error::key("name")),
             other => Err(Error::msg(format!(
-                "{} indices must be integers or slices, not str",
+                "GitHub returned a {} repository entry; expected an object. Check: gh auth status",
                 crate::pyfmt::type_name(other)
             ))),
         })
@@ -140,7 +140,7 @@ pub fn prompt_for_picks(
             let mut repo = choose(
                 ctx,
                 &Choices::labelled(choices, labels),
-                "Repository",
+                "Choose repository",
                 None,
                 None,
             )?;
@@ -165,7 +165,7 @@ pub fn prompt_for_picks(
         None => choose(
             ctx,
             &Choices::strings(MODES.map(String::from).to_vec()),
-            "Mode",
+            "Choose mode",
             Some("mode"),
             None,
         )?,
@@ -211,7 +211,10 @@ fn github_repos_for_prompt(ctx: &Ctx, owner: &str) -> Result<Vec<String>> {
     ) {
         Ok(output) => github_names(&output),
         Err(err) => {
-            ctx.eprintln(&format!("Could not list repositories: {}", err.text()))?;
+            ctx.eprintln(&format!(
+                "Repository list unavailable: {}. Choose No repository or enter a URL.",
+                err.text()
+            ))?;
             Ok(Vec::new())
         }
     }
@@ -228,7 +231,9 @@ pub fn select_offer(ctx: &Ctx, offers: Vec<Dict>, args: &UpArgs) -> Result<Dict>
         labels.push(offer_label(offer)?);
     }
     if args.offer.is_some() || args.yes {
-        ctx.println("Matching offers (hourly, reliability, location, verification):")?;
+        ctx.println(
+            "Matching offers, cheapest first ($/hr, reliability, location, verification):",
+        )?;
         for (n, label) in labels.iter().enumerate() {
             ctx.println(&format!("{}. {label}", n + 1))?;
         }
@@ -239,7 +244,7 @@ pub fn select_offer(ctx: &Ctx, offers: Vec<Dict>, args: &UpArgs) -> Result<Dict>
             .into_iter()
             .find(|o| o.get("id").is_some_and(|id| id.py_eq(&wanted_value)))
             .ok_or_else(|| {
-                Error::msg(format!("Offer {wanted} does not match the current search"))
+                Error::msg(format!("Offer {wanted} does not match the current filters. Run gpu up to choose a matching offer."))
             });
     }
     if args.yes {
@@ -250,7 +255,7 @@ pub fn select_offer(ctx: &Ctx, offers: Vec<Dict>, args: &UpArgs) -> Result<Dict>
         labels,
         key: &|_: &Dict| None,
     };
-    choose(ctx, &choices, "Offer", None, None)
+    choose(ctx, &choices, "Choose offer", None, None)
 }
 
 /// Summarize `vastai create instance --raw` without echoing its secrets
@@ -259,7 +264,7 @@ pub fn created_summary(output: &str) -> Result<String> {
     let response = match pyjson::loads(output) {
         Ok(Value::Dict(dict)) => dict,
         _ => {
-            return Ok("Vast accepted the create request but its response was unreadable; run `gpu ls` to find the instance."
+            return Ok("Create request returned an unreadable response; instance creation is unverified. Check before retrying: gpu ls"
                 .into())
         }
     };
@@ -276,11 +281,13 @@ pub fn created_summary(output: &str) -> Result<String> {
         )));
     }
     match response.get("new_contract") {
-        None | Some(Value::Null) => Ok("Created instance. Next: `gpu ls` to find it.".into()),
+        None | Some(Value::Null) => {
+            Ok("Created instance; ID missing from response. Find it: gpu ls".into())
+        }
         Some(instance) => {
             let instance = py_str(instance);
             Ok(format!(
-                "Created instance {instance}. Next: `gpu ls` or `gpu ssh {instance}`."
+                "Created instance {instance}.\nConnect: gpu ssh {instance} --exec"
             ))
         }
     }
@@ -354,7 +361,8 @@ pub fn launch(ctx: &Ctx, args: &UpArgs, cfg: &Dict, deadline: Option<Timestamp>)
         return Ok(());
     }
     ctx.println(&format!(
-        "Launch {mode} for {} on offer {} at ${}/hr?",
+        "Create paid {mode}: {} x {gpu}, {}, offer {}, ${}/hr.",
+        args.num_gpus,
         repo.label(),
         py_str(crate::offers::field(&offer, "id")?),
         fixed(offer_price(&offer)?, 3)
@@ -376,13 +384,13 @@ pub fn launch(ctx: &Ctx, args: &UpArgs, cfg: &Dict, deadline: Option<Timestamp>)
     if args.expire().is_some() {
         let Some(instance_id) = &instance_id else {
             return Err(Error::msg(
-                "Instance created but no ID returned; expiry NOT armed. Run gpu ls, then gpu expire ID WHEN.",
+                "Instance created without an ID; expiry not armed.\n1. Find the ID: gpu ls\n2. Arm destruction: gpu expire ID 2h",
             ));
         };
         match expire_instance(ctx, instance_id, "arm", deadline) {
             Err(Error::Msg(text)) => {
                 return Err(Error::msg(format!(
-                    "Instance {instance_id} created but expiry NOT verified; billing continues. Run gpu expire {instance_id} show or gpu down {instance_id}. {text}"
+                    "Instance {instance_id} created; expiry unverified and billing continues. {text}\nCheck the timer: gpu expire {instance_id} show"
                 )))
             }
             Err(other) => return Err(other),

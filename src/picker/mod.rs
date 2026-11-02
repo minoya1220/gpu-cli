@@ -102,7 +102,7 @@ impl<V: PickValue, R: 'static> Screen<V, R> {
             search: None,
             load: None,
             loading: "Loading...".into(),
-            empty: "Nothing to choose from".into(),
+            empty: "No choices available".into(),
             prices: None,
             quick_select: true,
             load_required: true,
@@ -532,7 +532,7 @@ impl<V: PickValue, R: 'static> Core<V, R> {
             let text = if view.filter.is_empty() {
                 format!("  {}", screen.empty)
             } else {
-                "  No matches".into()
+                "  No matches. Press `/\u{2190} to clear the filter.".into()
             };
             return (one(Style::Note, text), None);
         }

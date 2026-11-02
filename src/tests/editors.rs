@@ -72,9 +72,9 @@ fn test_missing_cli() {
         let ctx = t.ctx().build();
         let error = launch_editor(&ctx, editor, "vast-12", "/workspace", None).unwrap_err();
         let text = error.text();
-        assert!(text.contains("not found on PATH"), "{text}");
+        assert!(text.contains("is not on PATH"), "{text}");
         assert!(
-            text.split("not found on PATH")
+            text.split("is not on PATH")
                 .nth(1)
                 .unwrap()
                 .to_lowercase()
@@ -199,7 +199,10 @@ fn test_nvim_config_type_only_matters_for_nvim() {
     let config = Value::Int(5);
     edit_instance(&ctx, "12", Some("code"), Some(&config), 120.0).unwrap();
     let error = edit_instance(&ctx, "12", Some("nvim"), Some(&config), 120.0).unwrap_err();
-    assert_eq!(error.text(), "'int' object has no attribute 'startswith'");
+    assert_eq!(
+        error.text(),
+        "Config 'editor.nvim_config' must be a git URL or directory path string."
+    );
     assert!(!runner
         .calls()
         .iter()
@@ -212,7 +215,7 @@ fn test_no_history_noninteractive() {
     let t = TestEnv::new();
     let ctx = t.ctx().interactive(false).build();
     let error = edit_instance(&ctx, "12", None, None, 120.0).unwrap_err();
-    assert!(error.text().contains("specify --editor"));
+    assert!(error.text().contains("gpu edit 12 --editor code"));
 }
 
 #[test]
@@ -238,7 +241,7 @@ fn test_after_up_real_keys() {
             }
             keys.press(ENTER);
             if (last.is_some() && choice == 1) || (choice == 0 && last.is_none()) {
-                keys.wait(on("Editor"));
+                keys.wait(on("Choose editor"));
                 keys.press(ENTER);
             }
         });
@@ -254,7 +257,7 @@ fn test_after_up_real_keys() {
 fn test_editor_real_keys() {
     for (index, (expected, _)) in EDITORS.iter().enumerate() {
         let result = drive(editor_screen(), move |keys| {
-            keys.wait(on("Editor"));
+            keys.wait(on("Choose editor"));
             for _ in 0..index {
                 keys.press(DOWN);
             }
@@ -544,5 +547,7 @@ fn test_invalid_local_config_does_not_run_ssh() {
         Some(missing.to_str().unwrap()),
     )
     .unwrap_err();
-    assert!(error.text().contains("existing local directory"));
+    assert!(error
+        .text()
+        .contains("--nvim-config to an existing directory or a git URL"));
 }

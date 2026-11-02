@@ -8,7 +8,7 @@ Each `*.json` file here was generated once from the Python reference implementat
 - Interpreter: CPython 3.13.17 with the reference's locked dependencies (`uv sync`), `TZ=UTC`.
 - Method: a one-off script, run from outside the repository, imported `reference/python/src/gpu` and called the functions below directly with the inputs listed, writing each result (or the exception text) next to its input. Lists are written one row per line.
 
-To regenerate, check out 5767d70, run the reference with `uv`, and call the same functions with the inputs stored in each file.
+To regenerate the original reference data, check out 5767d70, run the reference with `uv`, and call the same functions with the inputs stored in each file. Human-copy expectations now deliberately differ: line prompts name defaults and recovery flags, empty instance lists point to `gpu up`, startup warns how to set `GH_TOKEN`, missing fields and malformed responses name their cause, and expiry errors give supported inputs. Preserve these copy changes when regenerating; numeric formats, serialized values, tables, and request structure remain pinned.
 
 ## Tables
 
@@ -36,4 +36,4 @@ Each is listed in `docs/PLAN.md` section 9 or 11:
 
 - Non-ASCII digits in `float()` and `valid_gpu_name` (plan 9.3.2) and full case folding of `ß` (9.3.4).
 - `parse_when` results on 9999-12-31: `jiff` timestamps end at 9999-12-30T22:00Z (section 11).
-- Error text that comes from Python's `datetime` internals (`Invalid isoformat string`, offset and year range messages) is only required to be an error (plan 9.1.2).
+- Datetime parser errors (now `Invalid datetime`, UTC offset and year range messages) allow equivalent error categories rather than exact internal wording (plan 9.1.2).

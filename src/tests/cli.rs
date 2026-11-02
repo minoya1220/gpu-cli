@@ -22,7 +22,7 @@ rm -rf /venv
 mkdir -p /workspace
 git config --global user.name minoya1220
 git config --global user.email minoya1220@gmail.com
-if [ -n "${GH_TOKEN:-}" ]; then gh auth setup-git; else echo "WARNING: GH_TOKEN is not set in Vast account environment; private GitHub repos may not clone." >&2; fi
+if [ -n "${GH_TOKEN:-}" ]; then gh auth setup-git; else echo "GH_TOKEN is missing. For private GitHub repos, set GH_TOKEN in the Vast account environment before launching." >&2; fi
 [ -d /workspace/gpu-kernels ] || git clone https://github.com/minoya1220/gpu-kernels /workspace/gpu-kernels
 if [ -f /workspace/gpu-kernels/pyproject.toml ]; then uv sync --directory /workspace/gpu-kernels; fi
 sed -i 's|^cd \${WORKSPACE}$|[ "$PWD" = "$HOME" ] \&\& cd "${WORKSPACE:-/workspace}"|' /root/.bashrc
@@ -103,7 +103,7 @@ fn test_vm_script_preserves_toolchain_and_does_not_inject_secret() {
     let script = startup_script(&repo("gpu-kernels"), "vm", &defaults()).unwrap();
     assert!(script.contains("nsight-compute-2025.4.0") && script.contains("cuda-nvcc-12-8"));
     assert!(script.contains("source /etc/environment"));
-    assert!(script.contains("GH_TOKEN") && script.contains("WARNING"));
+    assert!(script.contains("GH_TOKEN is missing."));
     assert!(script.contains("gh auth setup-git"));
     assert!(script.contains("uv sync --directory /workspace/gpu-kernels"));
     assert!(!script.contains("vast_api_key"));
@@ -270,7 +270,7 @@ fn test_non_string_image_is_printed_raw_and_never_reaches_vastai() {
     let err = launch(&ctx, &args, &cfg, None).unwrap_err();
     assert_eq!(
         err.text(),
-        "expected str, bytes or os.PathLike object, not NoneType"
+        "Request argument must be text, got NoneType. Check image and repository config."
     );
     assert!(runner.argvs().iter().all(|argv| argv[1] != "create"));
 }
@@ -407,7 +407,7 @@ fn test_ls_table_and_json_output() {
     let empty = FakeRunner::new(|_| ok("[]"));
     let ctx = t.ctx().runner(&empty).build();
     assert_eq!(main(&ctx, &["ls"]), 0);
-    assert_eq!(out(&ctx).trim(), "No instances.");
+    assert_eq!(out(&ctx).trim(), "No instances. Launch one: gpu up");
 }
 
 #[test]
@@ -463,10 +463,8 @@ fn test_gpu_default_hint_only_appears_when_recent_pick_exists() {
         "H100 SXM"
     );
     let output = out(&ctx);
-    assert!(
-        output.contains("Type a model substring to filter all GPUs, or choose a category.\nGPU: ")
-    );
-    assert!(!output.contains("Enter = most recent"));
+    assert!(output.contains("Type a GPU name to filter, or select a category number.\nGPU: "));
+    assert!(!output.contains("GPU [Enter ="));
     assert!(output.contains("(1 offer)"));
     crate::history::record_picks(&t.env(), &[("gpu", "H100 SXM")]).unwrap();
     let ctx = t.ctx().input(&[""]).build();
@@ -474,7 +472,7 @@ fn test_gpu_default_hint_only_appears_when_recent_pick_exists() {
         choose_gpu(&ctx, &["H100 SXM".into()], &stats).unwrap(),
         "H100 SXM"
     );
-    assert!(out(&ctx).contains("\nGPU [Enter = most recent]: "));
+    assert!(out(&ctx).contains("\nGPU [Enter = H100 SXM]: "));
 }
 
 #[test]
@@ -631,10 +629,12 @@ fn test_up_never_prints_instance_api_key() {
         assert_eq!(status, 0);
         assert!(!captured.contains(FAKE_INSTANCE_KEY));
         if response.starts_with('{') {
-            assert!(captured.contains("Created instance 31337"));
-            assert!(captured.contains("gpu ssh 31337"));
+            assert!(captured.ends_with("Created instance 31337.\nConnect: gpu ssh 31337 --exec\n"));
         } else {
-            assert!(captured.contains("gpu ls"));
+            assert!(
+                captured.contains("instance creation is unverified. Check before retrying: gpu ls")
+            );
+            assert!(!captured.contains("Vast accepted"));
         }
     }
 }

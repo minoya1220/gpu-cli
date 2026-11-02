@@ -30,7 +30,7 @@ pub fn editor_label(editor: &str) -> Option<&'static str> {
 
 pub fn editor_screen() -> Screen<String, String> {
     Screen::new(
-        "Editor",
+        "Choose editor",
         || {
             EDITORS
                 .iter()
@@ -87,7 +87,9 @@ pub fn which(env: &Env, name: &str) -> Option<PathBuf> {
 
 pub fn check_editor(env: &Env, editor: &str) -> Result<()> {
     if editor_label(editor).is_none() {
-        return Err(Error::msg(format!("Unknown editor: {editor}")));
+        return Err(Error::msg(format!(
+            "Unknown editor: {editor}. Use cursor, code, zed, or nvim."
+        )));
     }
     if editor != "nvim" && which(env, editor).is_none() {
         let hint = match editor {
@@ -99,9 +101,7 @@ pub fn check_editor(env: &Env, editor: &str) -> Result<()> {
             }
             _ => "In Zed's command palette, run 'cli: install'.",
         };
-        return Err(Error::msg(format!(
-            "Required editor CLI '{editor}' not found on PATH. {hint}"
-        )));
+        return Err(Error::msg(format!("'{editor}' is not on PATH. {hint}")));
     }
     Ok(())
 }
@@ -234,7 +234,7 @@ pub fn launch_editor(
         if output.code != 0 {
             let label = editor_label(editor).unwrap_or(editor);
             return Err(Error::msg(format!(
-                "{label} failed to open the remote workspace"
+                "{label} could not open {directory} on {alias}. Check the editor's Remote SSH setup; test SSH with: ssh {alias}"
             )));
         }
         return Ok(());
@@ -253,7 +253,7 @@ pub fn launch_editor(
                 .filter(|p| p.is_dir());
             let Some(resolved) = resolved else {
                 return Err(Error::msg(
-                    "Neovim config must be a git URL or an existing local directory",
+                    "Neovim config path is not a directory. Set --nvim-config to an existing directory or a git URL.",
                 ));
             };
             if which(&ctx.env, "rsync").is_none() {

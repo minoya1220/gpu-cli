@@ -1,5 +1,5 @@
 //! Data-driven parity tables generated from the Python reference (see
-//! tests/golden/README.md). Every row must match what Python produced.
+//! tests/golden/README.md). Formatting stays pinned; human copy has deliberate updates.
 
 use std::sync::Arc;
 
@@ -425,11 +425,11 @@ fn python_gpu_models() {
     }
 }
 
-/// Messages Python's `datetime` writes itself; the Rust text differs (plan 9.1.2).
+/// Datetime parser error categories whose internal details can differ (plan 9.1.2).
 fn python_internal(message: &str) -> bool {
     [
-        "Invalid isoformat string",
-        "offset must be a timedelta",
+        "Invalid datetime",
+        "UTC offset must be between",
         "year ",
         "date value out of range",
     ]

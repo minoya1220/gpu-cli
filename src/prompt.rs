@@ -76,13 +76,13 @@ pub fn choose<T: Clone + PartialEq>(
             .map(|(i, _)| i)
             .collect();
         if !filter.is_empty() && filtered.len() == 1 {
-            ctx.println(&format!("Unique match: {}", labels[filtered[0]]))?;
+            ctx.println(&format!("Selected: {}", labels[filtered[0]]))?;
             return Ok(options[filtered[0]].clone());
         }
         let pages = filtered.len().div_ceil(PAGE_SIZE).max(1);
         page = page.min(pages - 1);
         if !recent.is_empty() && filter.is_empty() {
-            ctx.println("Recent/frequent:")?;
+            ctx.println("Recent choices:")?;
             for (i, option) in recent.iter().enumerate() {
                 ctx.println(&format!("  {}. {}", i + 1, labels[index_of(option)]))?;
             }
@@ -107,16 +107,22 @@ pub fn choose<T: Clone + PartialEq>(
         });
         let default = latest.or_else(|| filtered.first().copied());
         let usable_default = default.filter(|d| filter.is_empty() || filtered.contains(d));
-        let hint = if usable_default.is_some() {
-            ", Enter default"
-        } else {
-            ""
+        let hint = match usable_default {
+            Some(index) => format!(", Enter = {}", labels[index]),
+            None => String::new(),
         };
         let prompt_text = format!("Select number, text to filter, n/p page{hint}: ");
         let answer = ctx.console.input(&prompt_text)?.ok_or_else(|| {
+            let flag = match step {
+                Some("gpu") => "--gpu",
+                Some("mode") => "--mode",
+                _ if prompt.to_lowercase().contains("repository") => "--repo or --no-repo",
+                _ if prompt.to_lowercase().contains("offer") => "--offer",
+                _ if prompt.to_lowercase().contains("mode") => "--mode",
+                _ => "the corresponding flag",
+            };
             Error::msg(format!(
-                "Input unavailable while choosing {}; pass the corresponding flag",
-                prompt.to_lowercase()
+                "Input ended at {prompt}. Pass {flag} to choose without a prompt."
             ))
         })?;
         let answer = answer.trim();
@@ -182,7 +188,7 @@ pub fn choose_gpu(ctx: &Ctx, models: &[String], stats: &Stats) -> Result<String>
     );
     loop {
         if !recent.is_empty() {
-            ctx.println("Recent/frequent GPU models:")?;
+            ctx.println("Recent GPUs:")?;
             for (n, model) in recent.iter().enumerate() {
                 ctx.println(&format!("{}. {}", n + 1, model_label(model, stats)))?;
             }
@@ -194,17 +200,18 @@ pub fn choose_gpu(ctx: &Ctx, models: &[String], stats: &Stats) -> Result<String>
                 category_label(name, members, stats)
             ))?;
         }
-        ctx.println("Type a model substring to filter all GPUs, or choose a category.")?;
+        ctx.println("Type a GPU name to filter, or select a category number.")?;
         let has_default = history.first().is_some_and(|h| models.contains(h));
         let prompt = if has_default {
-            "GPU [Enter = most recent]: "
+            format!("GPU [Enter = {}]: ", history[0])
         } else {
-            "GPU: "
+            "GPU: ".into()
         };
-        let answer = ctx
-            .console
-            .input(prompt)?
-            .ok_or_else(|| Error::msg("Input unavailable while choosing GPU model; pass --gpu"))?;
+        let answer = ctx.console.input(&prompt)?.ok_or_else(|| {
+            Error::msg(
+                "Input ended at GPU selection. Pass --gpu 'RTX 4090' to choose without a prompt.",
+            )
+        })?;
         let answer = answer.trim();
         if answer.is_empty() && has_default {
             return Ok(history[0].clone());
@@ -245,7 +252,7 @@ pub fn choose_gpu(ctx: &Ctx, models: &[String], stats: &Stats) -> Result<String>
                 None,
             );
         }
-        ctx.println("Choose a listed category or type a matching model substring.")?;
+        ctx.println("No matching GPU. Enter a listed number or part of a GPU name.")?;
     }
 }
 

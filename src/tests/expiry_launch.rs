@@ -115,7 +115,7 @@ fn test_up_arming_failure_leaves_instance_and_warns() {
     assert_eq!(calls_to(&l.runner, &["vastai", "create"]).len(), 1);
     assert!(calls_to(&l.runner, &["vastai", "destroy"]).is_empty());
     let error = err(&ctx);
-    assert!(error.contains("123 created but expiry NOT verified"));
+    assert!(error.contains("123 created; expiry unverified"));
     assert!(error.contains("billing continues"));
     assert!(error.contains("gpu expire 123 show"));
 }
@@ -126,5 +126,5 @@ fn test_up_without_returned_id_cannot_claim_expiry() {
     let ctx = l.t.ctx().runner(&l.runner).clock(&l.clock).build();
     assert_eq!(main(&ctx, &ARGV[..11]), 1);
     assert!(calls_to(&l.runner, &["ssh"]).is_empty());
-    assert!(err(&ctx).contains("expiry NOT armed"));
+    assert!(err(&ctx).contains("expiry not armed"));
 }

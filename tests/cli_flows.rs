@@ -37,7 +37,7 @@ fn test_ctrl_c_at_a_line_prompt_cancels_without_traceback() {
         }
     });
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !String::from_utf8_lossy(&stdout.lock().unwrap()).contains("Enter default: ") {
+    while !String::from_utf8_lossy(&stdout.lock().unwrap()).contains("Enter = No repository: ") {
         assert!(
             Instant::now() < deadline,
             "no prompt: {}",
@@ -134,6 +134,90 @@ fn handled_errors_are_redacted_and_exit_1() {
         String::from_utf8_lossy(&output.stderr),
         "gpu: failure token=REDACTED\n"
     );
+}
+
+#[test]
+fn paid_launch_names_the_cost_and_one_connection_command() {
+    let sandbox = Sandbox::new();
+    sandbox.stub("vastai", r#"#!/bin/sh
+case "$1 $2" in
+    'search offers')
+        echo '[{"id": 100, "gpu_name": "RTX 4090", "num_gpus": 1, "dph_total": 0.3, "reliability": 0.99, "geolocation": "Test, XX", "verification": "verified"}]'
+        ;;
+    'create instance')
+        echo '{"success": true, "new_contract": 123, "instance_api_key": "secret-instance-key"}'
+        ;;
+    *) exit 97 ;;
+esac
+"#);
+    let output = run(
+        &sandbox,
+        &[
+            "up",
+            "--no-repo",
+            "--mode",
+            "container",
+            "--gpu",
+            "RTX 4090",
+            "--yes",
+        ],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout
+            .contains("Create paid container: 1 x RTX 4090, No repository, offer 100, $0.300/hr."),
+        "{stdout}"
+    );
+    assert!(
+        stdout.ends_with("Created instance 123.\nConnect: gpu ssh 123 --exec\n"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("secret-instance-key"));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("secret-instance-key"));
+}
+
+#[test]
+fn destruction_confirmation_names_disk_deletion_before_any_request() {
+    use std::io::Write;
+
+    let sandbox = Sandbox::new();
+    let mut child = sandbox
+        .command(&["down", "123"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(b"no\n").unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "Delete instance 123 and its disk? Type 'yes' to destroy: Cancelled.\n"
+    );
+    assert!(sandbox.calls().is_empty());
+}
+
+#[test]
+fn help_explains_paid_and_destructive_flags_without_dependency_calls() {
+    let sandbox = Sandbox::new();
+    let output = run(&sandbox, &["up", "--help"]);
+    assert_eq!(output.status.code(), Some(0));
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(help.contains("Skip paid-launch confirmation"));
+    assert!(help.contains("Print the request without renting"));
+    let output = run(&sandbox, &["expire", "--help"]);
+    assert_eq!(output.status.code(), Some(0));
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(help.contains("Scheduling authorizes deletion without another confirmation."));
+    assert!(help.contains("gpu expire 12345678 show"));
+    assert!(sandbox.calls().is_empty());
 }
 
 #[test]

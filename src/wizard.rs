@@ -186,7 +186,7 @@ impl LaunchWizard {
             let chosen = s.chosen_cached.borrow().clone();
             if let Some(name) = chosen {
                 if !s.repos.result().unwrap_or_default().contains(&name) {
-                    let notice = format!("Repository not available or deleted: {name}");
+                    let notice = format!("Repository {name} is unavailable. Choose another repository or enter its URL.");
                     return Next::Screen(self.repo_screen(Picks::default(), notice));
                 }
             }
@@ -213,7 +213,7 @@ impl LaunchWizard {
                         s.invalidated.set(true);
                         Some(self.repo_screen(
                             Picks::default(),
-                            format!("Repository not available or deleted: {name}"),
+                            format!("Repository {name} is unavailable. Choose another repository or enter its URL."),
                         ))
                     }
                     _ => None,
@@ -266,7 +266,7 @@ impl LaunchWizard {
             })
         };
         let wizard = self.clone();
-        Screen::new("Repository", options, select)
+        Screen::new("Choose repository", options, select)
             .load(s.repos.clone())
             .load_required(false)
             .wait_initial(s.cached.is_none())
@@ -280,7 +280,7 @@ impl LaunchWizard {
         let validate = move |value: &str| -> std::result::Result<(), String> {
             if value.is_empty() {
                 return Err(
-                    "Enter a repository, or `/\u{2190} back to choose No repository".into(),
+                    "Enter a URL or owner/name. For an empty workspace, press `/\u{2190} and choose No repository.".into(),
                 );
             }
             resolve_repo(value, &owner)
@@ -299,7 +299,7 @@ impl LaunchWizard {
                 ..picks.clone()
             })
         };
-        Screen::new("Clone from URL", Vec::new, select)
+        Screen::new("Enter repository URL or owner/name", Vec::new, select)
             .text_input(Some(Box::new(validate)))
             .quick_select(false)
     }
@@ -307,7 +307,14 @@ impl LaunchWizard {
     fn mode_screen(&self, picks: Picks) -> WizardScreen {
         let wizard = self.clone();
         Screen::new(
-            "Mode",
+            format!(
+                "Choose mode: {}",
+                picks
+                    .repo
+                    .as_ref()
+                    .map(Repo::label)
+                    .unwrap_or("No repository")
+            ),
             || {
                 MODES
                     .iter()
@@ -367,7 +374,7 @@ impl LaunchWizard {
             }),
             _ => Next::Done(picks.clone()),
         };
-        Screen::new("GPU", options, select)
+        Screen::new("Choose GPU", options, select)
             .search(search)
             .prices(prices)
             // Digits belong to names such as "RTX 4090".
@@ -439,7 +446,7 @@ impl LaunchWizard {
             }),
             _ => Next::Done(picks.clone()),
         };
-        Screen::new(format!("Offer: {gpu}"), options, select)
+        Screen::new(format!("Choose offer: {gpu}"), options, select)
             .load(offers)
             .loading(format!("Searching {gpu} offers..."))
             .empty(NO_OFFERS)

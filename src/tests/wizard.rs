@@ -120,19 +120,24 @@ fn test_back_walks_every_screen_without_refetching_or_quitting() {
     let watched = search.clone();
     let result = run(&flow, Picks::default(), move |keys| {
         keys.wait(|s| s.labels == ["No repository", "Clone from URL...", "gpu-kernels", "other"]);
-        keys.press_until(ENTER, on("Mode"));
-        keys.press_until(ENTER, on("GPU"));
+        keys.press_until(ENTER, |s| s.title.starts_with("Choose mode: "));
+        keys.press_until(ENTER, on("Choose GPU"));
         keys.press_until(ENTER, on("Datacenter Blackwell/Hopper"));
-        keys.press_until(ENTER, on("Offer: B200"));
-        for title in ["Datacenter Blackwell/Hopper", "GPU", "Mode", "Repository"] {
+        keys.press_until(ENTER, on("Choose offer: B200"));
+        for title in [
+            "Datacenter Blackwell/Hopper",
+            "Choose GPU",
+            "Choose mode: No repository",
+            "Choose repository",
+        ] {
             assert!(keys.press_until(BACK, on(title)) < quick());
         }
         // Forward again with different choices; earlier picks must not leak.
-        keys.press_until("4", on("Mode"));
+        keys.press_until("4", |s| s.title.starts_with("Choose mode: "));
         keys.press(DOWN);
-        keys.press_until(ENTER, on("GPU"));
+        keys.press_until(ENTER, on("Choose GPU"));
         keys.type_text("4090");
-        keys.press_until(ENTER, on("Offer: RTX 4090"));
+        keys.press_until(ENTER, on("Choose offer: RTX 4090"));
         keys.wait_for("the vm offer search", || {
             watched.offer_calls().last() == Some(&("vm".to_string(), Some("RTX 4090".to_string())))
         });
@@ -160,7 +165,7 @@ fn test_backtick_twice_on_the_first_real_screen_quits() {
         Picks::new(named("gpu-kernels"), Some("container"), None),
         |keys| {
             keys.press_until(ENTER, on("Datacenter Blackwell/Hopper"));
-            keys.press_until(BACK, on("GPU"));
+            keys.press_until(BACK, on("Choose GPU"));
             keys.press(BACK);
             keys.press(BACK);
         },
@@ -195,13 +200,13 @@ fn test_offer_search_never_blocks_navigation() {
         Picks::new(named("gpu-kernels"), Some("container"), None),
         move |keys| {
             keys.type_text("t4");
-            assert!(keys.press_until(ENTER, on("Offer: Tesla T4")) < quick());
+            assert!(keys.press_until(ENTER, on("Choose offer: Tesla T4")) < quick());
             keys.wait_for("the offer search", || {
                 watched.offer_calls() == [("container".to_string(), Some("Tesla T4".to_string()))]
             });
             keys.press(ENTER); // still searching: nothing to select
-            assert_eq!(keys.title(), "Offer: Tesla T4");
-            assert!(keys.press_until(BACK, on("GPU")) < quick());
+            assert_eq!(keys.title(), "Choose offer: Tesla T4");
+            assert!(keys.press_until(BACK, on("Choose GPU")) < quick());
             keys.press(CTRL_C);
         },
     );
@@ -218,8 +223,8 @@ fn test_f2_prices_are_shared_by_gpu_screens_and_loaded_once_per_mode() {
     let (watched, labels) = (search.clone(), gpu_labels.clone());
     let result = run(&flow, Picks::default(), move |keys| {
         keys.wait(|s| s.labels.contains(&"gpu-kernels".to_string()));
-        keys.press_until(ENTER, on("Mode"));
-        keys.press_until(ENTER, on("GPU"));
+        keys.press_until(ENTER, |s| s.title.starts_with("Choose mode: "));
+        keys.press_until(ENTER, on("Choose GPU"));
         keys.press(F2);
         keys.wait_for("container prices", || {
             watched.stats_calls() == ["container"]
@@ -228,10 +233,10 @@ fn test_f2_prices_are_shared_by_gpu_screens_and_loaded_once_per_mode() {
         keys.press_until(ENTER, on("Datacenter Blackwell/Hopper"));
         labels.lock().unwrap().extend(keys.labels());
         keys.press(F2);
-        keys.press_until(BACK, on("GPU"));
-        keys.press_until(BACK, on("Mode"));
+        keys.press_until(BACK, on("Choose GPU"));
+        keys.press_until(BACK, |s| s.title.starts_with("Choose mode: "));
         keys.press(DOWN);
-        keys.press_until(ENTER, on("GPU"));
+        keys.press_until(ENTER, on("Choose GPU"));
         assert!(!keys.labels().join(" ").contains("from $")); // vm prices not loaded yet
         keys.press(F2);
         keys.wait_for("vm prices", || watched.stats_calls() == ["container", "vm"]);

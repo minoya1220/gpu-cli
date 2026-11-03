@@ -164,10 +164,28 @@ pub fn field<'a>(offer: &'a Dict, key: &str) -> Result<&'a Value> {
 }
 
 pub fn offer_price(offer: &Dict) -> Result<f64> {
-    match offer.get("dph_total").or_else(|| offer.get("dph")) {
-        Some(value) => Ok(py_float(value)?),
+    match price_field(offer) {
+        Some((key, value)) => offer_number(key, value),
         None => Ok(f64::INFINITY),
     }
+}
+
+/// The offer's hourly price field: `dph_total`, else `dph`.
+pub fn price_field(offer: &Dict) -> Option<(&'static str, &Value)> {
+    offer
+        .get("dph_total")
+        .map(|value| ("dph_total", value))
+        .or_else(|| offer.get("dph").map(|value| ("dph", value)))
+}
+
+/// `float(offer[key])`, failing with the field and what it holds.
+pub fn offer_number(key: &str, value: &Value) -> Result<f64> {
+    py_float(value).map_err(|_| {
+        Error::msg(format!(
+            "Vast offer '{key}' must be a number, got {}. Retry the command.",
+            value.kind()
+        ))
+    })
 }
 
 pub fn gpu_stats(offers: &[Dict]) -> Result<Stats> {
@@ -188,9 +206,10 @@ pub fn plural(count: usize, noun: &str) -> String {
 }
 
 fn reliability(offer: &Dict) -> Result<f64> {
-    Ok(py_float(
+    offer_number(
+        "reliability",
         offer.get("reliability").unwrap_or(&Value::Int(0)),
-    )?)
+    )
 }
 
 fn text_or(offer: &Dict, key: &str, default: &str) -> String {

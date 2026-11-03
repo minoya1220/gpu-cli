@@ -130,6 +130,18 @@ fn test_up_arming_failure_without_command_names_show_and_down() {
 }
 
 #[test]
+fn test_up_arming_past_deadline_names_rearm_and_down_once() {
+    let l = launch(CREATED, r#"{"error": "past"}"#);
+    let ctx = l.t.ctx().runner(&l.runner).clock(&l.clock).build();
+    assert_eq!(main(&ctx, &ARGV[..11]), 1);
+    let error = err(&ctx);
+    assert!(
+        error.contains("expiry NOT armed. Run gpu expire 123 2h.\nOr stop billing: gpu down 123.")
+    );
+    assert_eq!(error.matches("gpu expire 123").count(), 1);
+}
+
+#[test]
 fn test_up_without_returned_id_cannot_claim_expiry() {
     let l = launch(r#"{"success": true}"#, ARMED);
     let ctx = l.t.ctx().runner(&l.runner).clock(&l.clock).build();

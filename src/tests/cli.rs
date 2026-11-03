@@ -212,11 +212,8 @@ fn test_non_string_git_identity_is_quoted_like_shlex() {
         ("0", Ok("''")),
         ("false", Ok("''")),
         ("[]", Ok("''")),
-        ("5", Err("expected string or bytes-like object, got 'int'")),
-        (
-            "true",
-            Err("expected string or bytes-like object, got 'bool'"),
-        ),
+        ("5", Err("must be a string, got a number.")),
+        ("true", Err("must be a string, got a boolean.")),
     ];
     for key in ["git_name", "git_email"] {
         let line = if key == "git_name" {
@@ -236,7 +233,11 @@ fn test_non_string_git_identity_is_quoted_like_shlex() {
                         "{key}={value}"
                     );
                 }
-                Err(text) => assert_eq!(result.unwrap_err().text(), *text, "{key}={value}"),
+                Err(text) => assert_eq!(
+                    result.unwrap_err().text(),
+                    format!("Config '{key}' {text}"),
+                    "{key}={value}"
+                ),
             }
         }
     }

@@ -381,7 +381,7 @@ pub fn launch(ctx: &Ctx, args: &UpArgs, cfg: &Dict, deadline: Option<Timestamp>)
         };
         match expire_instance(ctx, instance_id, "arm", deadline) {
             Err(Error::Msg(text)) => {
-                let next = if text.contains(&format!("gpu expire {instance_id} show")) {
+                let next = if text.contains(&format!("gpu expire {instance_id} ")) {
                     format!("Or stop billing: gpu down {instance_id}.")
                 } else {
                     format!("Run gpu expire {instance_id} show or gpu down {instance_id}.")

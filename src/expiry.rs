@@ -591,11 +591,15 @@ pub fn expiry_summary(ctx: &Ctx, instance_id: &str, reply: &Dict) -> Result<Stri
             "Instance {instance_id}: no auto-destroy deadline{suffix}"
         ));
     }
-    let seconds = py_float(
-        reply
-            .get("deadline")
-            .ok_or_else(|| Error::key("deadline"))?,
-    )?;
+    let deadline = reply
+        .get("deadline")
+        .ok_or_else(|| Error::key("deadline"))?;
+    let seconds = py_float(deadline).map_err(|_| {
+        Error::msg(format!(
+            "Expiry deadline must be a number, got {}. Run gpu expire {instance_id} show.",
+            deadline.kind()
+        ))
+    })?;
     let micros = (seconds * 1e6).round_ties_even();
     let deadline = Timestamp::from_microsecond(micros as i64)
         .map_err(|_| Error::msg("year is out of range"))?;

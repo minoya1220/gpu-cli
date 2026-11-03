@@ -55,9 +55,9 @@ fn test_cached_display_and_wait_before_launch() {
     let observer = job.observer();
     let release = gate.clone();
     let result = super::wizard::run(&flow(&t, job), b200(), move |keys| {
-        assert_eq!(keys.labels(), ["No repository", "Clone from URL...", "old"]);
+        assert_eq!(keys.labels(), ["old", "Clone from URL...", "No repository"]);
         keys.wait_for("the sync to run", || observer.state() == JobState::Running);
-        keys.press_until("3", on("Mode"));
+        keys.press_until("1", on("Mode"));
         keys.press_until("1", on("Checking repositories"));
         assert!(!keys.snapshot().done);
         release.set();
@@ -83,7 +83,7 @@ fn test_invalid_cache_resets_with_message_and_never_launches() {
         &flow(&t, gated(&gate, Ok(vec!["new"]))),
         b200(),
         move |keys| {
-            keys.press_until("3", on("Mode"));
+            keys.press_until("1", on("Mode"));
             keys.press_until("1", on("Checking repositories"));
             release.set();
             keys.wait(on("Repository"));
@@ -91,7 +91,7 @@ fn test_invalid_cache_resets_with_message_and_never_launches() {
                 keys.snapshot().notice,
                 "Repository not available or deleted: deleted"
             );
-            assert_eq!(keys.labels(), ["No repository", "Clone from URL...", "new"]);
+            assert_eq!(keys.labels(), ["new", "Clone from URL...", "No repository"]);
             keys.press(CTRL_C);
         },
     );
@@ -109,7 +109,7 @@ fn test_sync_error_resets_without_launch() {
         &flow(&t, gated(&gate, Err("GitHub unavailable"))),
         b200(),
         move |keys| {
-            keys.press_until("3", on("Mode"));
+            keys.press_until("1", on("Mode"));
             keys.press_until("1", on("Checking repositories"));
             release.set();
             keys.wait(on("Repository"));
@@ -135,7 +135,7 @@ fn test_first_run_waits_for_sync() {
             assert_eq!(keys.snapshot().loading, "Loading repositories...");
             release.set();
             keys.wait(|s| s.labels.contains(&"fresh".to_string()));
-            keys.press("3");
+            keys.press("1");
         },
     );
     gate.set();

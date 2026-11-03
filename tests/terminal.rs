@@ -266,7 +266,7 @@ fn test_keyboard_dry_run_launch_after_going_back() {
     term.press_until(ENTER, on("GPU"));
     term.press_until(BACK, on("Mode"));
     term.press_until(BACK, on("Repository"));
-    term.press_until("4", on("Mode")); // digits pick on short lists
+    term.press_until("2", on("Mode")); // explicit repository shortcut
     term.press_until("2", on("GPU"));
     for c in ["t", "4"] {
         term.press(c);
@@ -290,10 +290,10 @@ fn test_new_repository_choices_dry_run_in_terminal() {
         term.wait(shows("No repository"));
         match repo {
             None => {
-                term.press_until("1", on("Mode"));
+                term.press_until("0", on("Mode"));
             }
             Some(repo) => {
-                term.press_until("2", on("Clone from URL"));
+                term.press_until("9", on("Clone from URL"));
                 term.press(&format!("\x1b[200~{repo}\x1b[201~"));
                 term.press_until(ENTER, on("Mode"));
             }
@@ -340,7 +340,7 @@ fn test_arrow_keys_navigate_and_special_keys_never_reach_the_filter() {
         term.press(key);
     }
     // Left cleared the filter; nothing else was typed into it.
-    term.wait(|t| t.line(1) == "\u{203a} 1. No repository");
+    term.wait(|t| t.line(1) == "\u{203a} 1. gpu-kernels");
     assert!(!term.lines()[..2].iter().any(|line| line.contains('[')));
     let latency = term.press_until(RIGHT, on("Mode"));
     assert!(latency < Duration::from_secs(1), "Right took {latency:?}");
@@ -348,6 +348,7 @@ fn test_arrow_keys_navigate_and_special_keys_never_reach_the_filter() {
         term.press(key);
     }
     term.press_until(LEFT, on("Repository"));
+    term.press(DOWN);
     term.press(DOWN);
     term.press_until(RIGHT, on("Clone from URL"));
     for c in ["o", "/", "r"] {

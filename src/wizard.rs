@@ -40,6 +40,7 @@ impl Picks {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Choice {
     Repo(Repo),
+    AllRepos,
     CloneUrl,
     Text(String),
     Mode(String),
@@ -223,33 +224,58 @@ impl LaunchWizard {
         }
     }
 
+    fn repo_options(&self, all: bool, searching: bool) -> Vec<Opt<Choice>> {
+        let s = &self.state;
+        let names = if s.repos.state() == JobState::Done {
+            s.repos.result()
+        } else {
+            s.cached.clone()
+        }
+        .unwrap_or_default();
+        let count = names.len();
+        let mut options: Vec<_> = names
+            .into_iter()
+            .take(if all || searching { usize::MAX } else { 7 })
+            .enumerate()
+            .map(|(i, n)| {
+                let option = Opt::new(Choice::Repo(Repo::Named(n.clone())), n);
+                if all || searching {
+                    option
+                } else {
+                    option.digit((i + 1) as u8)
+                }
+            })
+            .collect();
+        if !all {
+            if count > 7 && !searching {
+                options.push(Opt::new(Choice::AllRepos, "All repositories...").digit(8));
+            }
+            options.push(Opt::new(Choice::CloneUrl, "Clone from URL...").digit(9));
+            options.push(Opt::new(Choice::Repo(Repo::NoRepo), "No repository").digit(0));
+        }
+        options
+    }
+
     fn repo_screen(&self, picks: Picks, notice: String) -> WizardScreen {
+        self.repo_list_screen(picks, notice, false)
+    }
+
+    fn repo_list_screen(&self, picks: Picks, notice: String, all: bool) -> WizardScreen {
         let s = &self.state;
         s.entered_repo_screen.set(true);
         let wizard = self.clone();
-        let options = move || {
-            let s = &wizard.state;
-            let mut options = vec![
-                Opt::new(Choice::Repo(Repo::NoRepo), "No repository"),
-                Opt::new(Choice::CloneUrl, "Clone from URL..."),
-            ];
-            let names = if s.repos.state() == JobState::Done {
-                s.repos.result()
-            } else {
-                s.cached.clone()
-            };
-            options.extend(
-                names
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|n| Opt::new(Choice::Repo(Repo::Named(n.clone())), n)),
-            );
-            options
-        };
+        let options = move || wizard.repo_options(all, false);
         let wizard = self.clone();
         let select = move |choice: Choice| -> Step {
             let s = &wizard.state;
             let repo = match choice {
+                Choice::AllRepos => {
+                    return Next::Screen(wizard.repo_list_screen(
+                        picks.clone(),
+                        String::new(),
+                        true,
+                    ))
+                }
                 Choice::CloneUrl => return Next::Screen(wizard.url_screen(picks.clone())),
                 Choice::Repo(repo) => repo,
                 _ => return Next::Done(picks.clone()),
@@ -266,13 +292,23 @@ impl LaunchWizard {
             })
         };
         let wizard = self.clone();
-        Screen::new("Repository", options, select)
-            .load(s.repos.clone())
-            .load_required(false)
-            .wait_initial(s.cached.is_none())
-            .loading("Loading repositories...")
-            .notice(notice)
-            .on_settled(move || wizard.sync_result().map(Next::Screen))
+        let search_wizard = self.clone();
+        Screen::new(
+            if all {
+                "All repositories"
+            } else {
+                "Repository"
+            },
+            options,
+            select,
+        )
+        .search(move || search_wizard.repo_options(all, true))
+        .load(s.repos.clone())
+        .load_required(false)
+        .wait_initial(s.cached.is_none())
+        .loading("Loading repositories...")
+        .notice(notice)
+        .on_settled(move || wizard.sync_result().map(Next::Screen))
     }
 
     fn url_screen(&self, picks: Picks) -> WizardScreen {

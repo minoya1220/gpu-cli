@@ -27,6 +27,8 @@ use crate::pyfmt::{casefold, is_printable, is_printable_str};
 pub struct Opt<V> {
     pub value: V,
     pub label: String,
+    /// Explicit digit on unfiltered menus; otherwise numbering is positional.
+    pub digit: Option<u8>,
 }
 
 impl<V> Opt<V> {
@@ -34,7 +36,13 @@ impl<V> Opt<V> {
         Opt {
             value,
             label: label.into(),
+            digit: None,
         }
+    }
+
+    pub fn digit(mut self, digit: u8) -> Self {
+        self.digit = Some(digit);
+        self
     }
 }
 
@@ -77,7 +85,7 @@ pub struct Screen<V, R> {
     pub empty: String,
     /// F2 starts it; `options` should read its result.
     pub prices: Option<Box<dyn AnyJob>>,
-    /// Digits 1-9 choose directly on short, unfiltered lists instead of filtering.
+    /// Digits choose directly on unfiltered lists with explicit digits or at most nine rows.
     pub quick_select: bool,
     /// Optional background load: static choices remain usable while it runs or fails.
     pub load_required: bool,
@@ -219,7 +227,9 @@ impl<V: PickValue, R: 'static> View<V, R> {
     }
 
     fn quick_select(&self, entries: &[Opt<V>]) -> bool {
-        self.screen.quick_select && self.filter.is_empty() && (1..=9).contains(&entries.len())
+        self.screen.quick_select
+            && self.filter.is_empty()
+            && (entries.iter().any(|o| o.digit.is_some()) || (1..=9).contains(&entries.len()))
     }
 
     fn load_failed_required(&self) -> bool {
@@ -454,12 +464,18 @@ impl<V: PickValue, R: 'static> Core<V, R> {
         if !is_printable(c) {
             return;
         }
-        if let Some(digit) = c.to_digit(10).filter(|d| (1..=9).contains(d)) {
+        if let Some(digit) = c.to_digit(10) {
             let entries = self.view().entries();
-            if self.view().quick_select(&entries) && digit as usize <= entries.len() {
-                let value = entries[digit as usize - 1].value.clone();
-                self.choose(value);
-                return;
+            if self.view().quick_select(&entries) {
+                let option = if entries.iter().any(|o| o.digit.is_some()) {
+                    entries.iter().find(|o| o.digit == Some(digit as u8))
+                } else {
+                    digit.checked_sub(1).and_then(|i| entries.get(i as usize))
+                };
+                if let Some(option) = option {
+                    self.choose(option.value.clone());
+                    return;
+                }
             }
         }
         let filter = format!("{}{c}", self.view().filter);
@@ -544,7 +560,12 @@ impl<V: PickValue, R: 'static> Core<V, R> {
         }
         let mut cursor_line = None;
         for (index, option) in entries.iter().enumerate() {
-            let number = format!("{:>width$}", index + 1);
+            let number = if view.filter.is_empty() {
+                option.digit.map(usize::from).unwrap_or(index + 1)
+            } else {
+                index + 1
+            };
+            let number = format!("{number:>width$}");
             let label_lines: Vec<&str> = option.label.split('\n').collect();
             if index == current {
                 // Scrolls the list so the selected line stays visible.
@@ -590,7 +611,11 @@ impl<V: PickValue, R: 'static> Core<V, R> {
                 "Enter/\u{2192} select".into(),
             ];
             if view.quick_select(&view.entries()) {
-                hints.push("1-9 select".into());
+                hints.push(if view.entries().iter().any(|o| o.digit == Some(0)) {
+                    "0-9 select".into()
+                } else {
+                    "1-9 select".into()
+                });
             }
             hints
         };

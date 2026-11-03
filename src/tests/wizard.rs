@@ -119,7 +119,7 @@ fn test_back_walks_every_screen_without_refetching_or_quitting() {
     let flow = wizard(&t, &search, &repo_calls, &[], true);
     let watched = search.clone();
     let result = run(&flow, Picks::default(), move |keys| {
-        keys.wait(|s| s.labels == ["No repository", "Clone from URL...", "gpu-kernels", "other"]);
+        keys.wait(|s| s.labels == ["gpu-kernels", "other", "Clone from URL...", "No repository"]);
         keys.press_until(ENTER, on("Mode"));
         keys.press_until(ENTER, on("GPU"));
         keys.press_until(ENTER, on("Datacenter Blackwell/Hopper"));
@@ -128,7 +128,7 @@ fn test_back_walks_every_screen_without_refetching_or_quitting() {
             assert!(keys.press_until(BACK, on(title)) < quick());
         }
         // Forward again with different choices; earlier picks must not leak.
-        keys.press_until("4", on("Mode"));
+        keys.press_until("2", on("Mode"));
         keys.press(DOWN);
         keys.press_until(ENTER, on("GPU"));
         keys.type_text("4090");
@@ -147,6 +147,124 @@ fn test_back_walks_every_screen_without_refetching_or_quitting() {
     };
     assert_eq!(result, Outcome::Done(expected));
     assert_eq!(repo_calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn test_repository_shortcuts_full_list_and_global_filter() {
+    for action in ["0", "1", "7", "8", "9", "filter"] {
+        let t = TestEnv::new();
+        let flow = LaunchWizard::new(
+            &t.env(),
+            WizardOptions {
+                repos: Job::new(|| Ok((1..=12).map(|i| format!("project-{i}")).collect())),
+                search: None,
+                models: MODELS.map(String::from).to_vec(),
+                recent_gpus: Vec::new(),
+                choose_offer: false,
+                owner: "minoya1220".into(),
+            },
+        );
+        let result = run(
+            &flow,
+            Picks::new(None, Some("container"), Some("B200")),
+            move |keys| {
+                keys.wait(|s| s.labels.len() == 10);
+                assert_eq!(
+                    keys.labels(),
+                    [
+                        "project-1",
+                        "project-2",
+                        "project-3",
+                        "project-4",
+                        "project-5",
+                        "project-6",
+                        "project-7",
+                        "All repositories...",
+                        "Clone from URL...",
+                        "No repository"
+                    ]
+                );
+                let body = keys.snapshot().body;
+                assert!(body[0].starts_with("›  1. project-1"));
+                assert!(body.last().unwrap().contains("0. No repository"));
+                match action {
+                    "8" => {
+                        keys.press_until("8", on("All repositories"));
+                        assert_eq!(keys.labels().len(), 12);
+                        keys.type_text("project-12");
+                        assert_eq!(keys.labels(), ["project-12"]);
+                        keys.press(BACK); // clear filter before returning
+                        keys.press_until(BACK, on("Repository"));
+                        keys.press_until("8", on("All repositories"));
+                        keys.type_text("project-12");
+                        keys.press(ENTER);
+                    }
+                    "9" => {
+                        keys.press_until("9", on("Clone from URL"));
+                        keys.type_text("owner/external");
+                        keys.press(ENTER);
+                    }
+                    "filter" => {
+                        keys.type_text("project-12");
+                        assert_eq!(keys.labels(), ["project-12"]);
+                        keys.press(ENTER);
+                    }
+                    digit => keys.press(digit),
+                }
+            },
+        );
+        let repo = match action {
+            "0" => Repo::NoRepo,
+            "1" => Repo::from_arg("project-1"),
+            "7" => Repo::from_arg("project-7"),
+            "9" => Repo::from_arg("owner/external"),
+            _ => Repo::from_arg("project-12"),
+        };
+        assert_eq!(
+            result,
+            Outcome::Done(Picks::new(Some(repo), Some("container"), Some("B200")))
+        );
+    }
+}
+
+#[test]
+fn test_short_repository_lists_keep_static_digits_and_omit_all() {
+    for count in [0, 7] {
+        let t = TestEnv::new();
+        let flow = LaunchWizard::new(
+            &t.env(),
+            WizardOptions {
+                repos: Job::new(move || Ok((1..=count).map(|i| format!("project-{i}")).collect())),
+                search: None,
+                models: Vec::new(),
+                recent_gpus: Vec::new(),
+                choose_offer: false,
+                owner: "minoya1220".into(),
+            },
+        );
+        let result = run(
+            &flow,
+            Picks::new(None, Some("container"), Some("B200")),
+            move |keys| {
+                keys.wait(|s| s.labels.len() == count + 2);
+                assert!(!keys.labels().contains(&"All repositories...".into()));
+                keys.press_until("9", on("Clone from URL"));
+                keys.press_until(BACK, on("Repository"));
+                keys.type_text("No repository");
+                assert_eq!(keys.labels(), ["No repository"]);
+                keys.press(BACK);
+                keys.press("0");
+            },
+        );
+        assert_eq!(
+            result,
+            Outcome::Done(Picks::new(
+                Some(Repo::NoRepo),
+                Some("container"),
+                Some("B200")
+            ))
+        );
+    }
 }
 
 #[test]
@@ -218,7 +336,7 @@ fn test_f2_prices_are_shared_by_gpu_screens_and_loaded_once_per_mode() {
     let (watched, labels) = (search.clone(), gpu_labels.clone());
     let result = run(&flow, Picks::default(), move |keys| {
         keys.wait(|s| s.labels.contains(&"gpu-kernels".to_string()));
-        keys.press_until(ENTER, on("Mode"));
+        keys.press_until("0", on("Mode"));
         keys.press_until(ENTER, on("GPU"));
         keys.press(F2);
         keys.wait_for("container prices", || {

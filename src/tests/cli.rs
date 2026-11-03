@@ -270,7 +270,7 @@ fn test_non_string_image_is_printed_raw_and_never_reaches_vastai() {
     let err = launch(&ctx, &args, &cfg, None).unwrap_err();
     assert_eq!(
         err.text(),
-        "Request argument must be text, got NoneType. Check image and repository config."
+        "Request argument must be text, got null. Check image and repository config."
     );
     assert!(runner.argvs().iter().all(|argv| argv[1] != "create"));
 }

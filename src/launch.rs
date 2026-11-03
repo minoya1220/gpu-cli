@@ -89,7 +89,7 @@ fn github_names(output: &str) -> Result<Vec<String>> {
         other => {
             return Err(Error::msg(format!(
                 "GitHub returned {}; expected a repository list. Check: gh auth status",
-                crate::pyfmt::type_name(&other)
+                other.kind()
             )))
         }
     };
@@ -101,8 +101,8 @@ fn github_names(output: &str) -> Result<Vec<String>> {
                 .map(py_str)
                 .ok_or_else(|| Error::key("name")),
             other => Err(Error::msg(format!(
-                "GitHub returned a {} repository entry; expected an object. Check: gh auth status",
-                crate::pyfmt::type_name(other)
+                "GitHub returned a repository entry that is {}; expected an object. Check: gh auth status",
+                other.kind()
             ))),
         })
         .collect()
@@ -381,9 +381,14 @@ pub fn launch(ctx: &Ctx, args: &UpArgs, cfg: &Dict, deadline: Option<Timestamp>)
         };
         match expire_instance(ctx, instance_id, "arm", deadline) {
             Err(Error::Msg(text)) => {
+                let next = if text.contains(&format!("gpu expire {instance_id} show")) {
+                    format!("Or stop billing: gpu down {instance_id}.")
+                } else {
+                    format!("Run gpu expire {instance_id} show or gpu down {instance_id}.")
+                };
                 return Err(Error::msg(format!(
-                    "Instance {instance_id} created but expiry NOT verified; billing continues. {text}\nRun gpu expire {instance_id} show."
-                )))
+                    "Instance {instance_id} created but expiry NOT verified; billing continues. {text}\n{next}"
+                )));
             }
             Err(other) => return Err(other),
             Ok(()) => {}

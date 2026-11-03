@@ -142,8 +142,8 @@ pub fn offer_dicts(value: Value) -> Result<Vec<Dict>> {
             .map(|item| match item {
                 Value::Dict(dict) => Ok(dict),
                 other => Err(Error::msg(format!(
-                    "Vast returned a {} entry; expected an instance or offer object. Retry the command.",
-                    crate::pyfmt::type_name(&other)
+                    "Vast returned an entry that is {}; expected an instance or offer object. Retry the command.",
+                    other.kind()
                 ))),
             })
             .collect(),
@@ -153,7 +153,7 @@ pub fn offer_dicts(value: Value) -> Result<Vec<Dict>> {
         )),
         other => Err(Error::msg(format!(
             "Vast returned {}; expected a list of instances or offers. Retry the command.",
-            crate::pyfmt::type_name(&other)
+            other.kind()
         ))),
     }
 }

@@ -78,6 +78,18 @@ impl Value {
         Value::Str(s.into())
     }
 
+    /// A plain-language noun phrase for the value's kind, for error messages.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Value::Null => "null",
+            Value::Bool(_) => "a boolean",
+            Value::Int(_) | Value::BigInt(_) | Value::Float(_) => "a number",
+            Value::Str(_) => "text",
+            Value::List(_) => "a list",
+            Value::Dict(_) => "an object",
+        }
+    }
+
     pub fn as_str(&self) -> Option<&str> {
         match self {
             Value::Str(s) => Some(s),

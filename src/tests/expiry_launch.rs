@@ -117,7 +117,16 @@ fn test_up_arming_failure_leaves_instance_and_warns() {
     let error = err(&ctx);
     assert!(error.contains("123 created but expiry NOT verified"));
     assert!(error.contains("billing continues"));
-    assert!(error.contains("gpu expire 123 show"));
+    assert_eq!(error.matches("gpu expire 123 show").count(), 1);
+    assert!(error.contains("Or stop billing: gpu down 123."));
+}
+
+#[test]
+fn test_up_arming_failure_without_command_names_show_and_down() {
+    let l = launch(CREATED, r#"{"error": "credentials"}"#);
+    let ctx = l.t.ctx().runner(&l.runner).clock(&l.clock).build();
+    assert_eq!(main(&ctx, &ARGV[..11]), 1);
+    assert!(err(&ctx).contains("expiry NOT armed.\nRun gpu expire 123 show or gpu down 123."));
 }
 
 #[test]

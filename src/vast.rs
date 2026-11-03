@@ -5,7 +5,7 @@ use crate::config::{self, CONTAINER_ENV};
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use crate::process::run;
-use crate::pyfmt::{float_repr, py_float, py_str, type_name};
+use crate::pyfmt::{float_repr, py_float, py_str};
 use crate::pyjson::{self, Dict, Value};
 use crate::repos::{resolve_repo, Repo};
 use crate::startup::startup_script;
@@ -115,7 +115,7 @@ pub fn argv(request: &[Value]) -> Result<Vec<String>> {
             Value::Str(s) => Ok(s.clone()),
             other => Err(Error::msg(format!(
                 "Request argument must be text, got {}. Check image and repository config.",
-                type_name(other)
+                other.kind()
             ))),
         })
         .collect()

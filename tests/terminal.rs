@@ -212,31 +212,28 @@ fn test_backtick_from_the_deepest_screen_steps_back_to_the_first_then_quits() {
     let sandbox = Sandbox::new();
     let mut term = gpu_up(&sandbox);
     term.wait(shows("gpu-kernels"));
-    assert_eq!(term.title(), "Choose repository");
-    term.press_until(ENTER, |t: &Terminal| t.title().starts_with("Choose mode: "));
-    term.press_until(ENTER, on("Choose GPU"));
+    assert_eq!(term.title(), "Repository");
+    term.press_until(ENTER, on("Mode"));
+    term.press_until(ENTER, on("GPU"));
     for c in ["4", "0", "9", "0"] {
         term.press(c);
     }
     term.wait(|t| t.line(1) == "Filter: 4090");
-    term.press_until(ENTER, on("Choose offer: RTX 4090"));
+    term.press_until(ENTER, on("Offer: RTX 4090"));
     term.wait(shows("id=100"));
 
     type Shown = Box<dyn Fn(&Terminal) -> bool>;
     let steps: [(&str, Shown); 4] = [
         (
-            "Choose GPU",
-            Box::new(|t: &Terminal| t.title() == "Choose GPU" && t.line(1) == "Filter: 4090"),
+            "GPU",
+            Box::new(|t: &Terminal| t.title() == "GPU" && t.line(1) == "Filter: 4090"),
         ),
         (
-            "Choose GPU",
-            Box::new(|t: &Terminal| t.title() == "Choose GPU" && !t.line(1).starts_with("Filter:")),
+            "GPU",
+            Box::new(|t: &Terminal| t.title() == "GPU" && !t.line(1).starts_with("Filter:")),
         ),
-        (
-            "Mode",
-            Box::new(|t: &Terminal| t.title().starts_with("Choose mode: ")),
-        ),
-        ("Choose repository", Box::new(on("Choose repository"))),
+        ("Mode", Box::new(on("Mode"))),
+        ("Repository", Box::new(on("Repository"))),
     ];
     for (title, shown) in steps {
         let latency = term.press_until(BACK, shown);
@@ -265,16 +262,16 @@ fn test_keyboard_dry_run_launch_after_going_back() {
     let sandbox = Sandbox::new();
     let mut term = gpu_up(&sandbox);
     term.wait(shows("other-repo"));
-    term.press_until(ENTER, |t: &Terminal| t.title().starts_with("Choose mode: "));
-    term.press_until(ENTER, on("Choose GPU"));
-    term.press_until(BACK, |t: &Terminal| t.title().starts_with("Choose mode: "));
-    term.press_until(BACK, on("Choose repository"));
-    term.press_until("4", |t: &Terminal| t.title().starts_with("Choose mode: ")); // digits pick on short lists
-    term.press_until("2", on("Choose GPU"));
+    term.press_until(ENTER, on("Mode"));
+    term.press_until(ENTER, on("GPU"));
+    term.press_until(BACK, on("Mode"));
+    term.press_until(BACK, on("Repository"));
+    term.press_until("4", on("Mode")); // digits pick on short lists
+    term.press_until("2", on("GPU"));
     for c in ["t", "4"] {
         term.press(c);
     }
-    term.press_until(ENTER, on("Choose offer: Tesla T4"));
+    term.press_until(ENTER, on("Offer: Tesla T4"));
     term.wait(shows("id=100"));
     term.press(ENTER);
     assert_eq!(term.exit_status(), 0);
@@ -293,19 +290,19 @@ fn test_new_repository_choices_dry_run_in_terminal() {
         term.wait(shows("No repository"));
         match repo {
             None => {
-                term.press_until("1", |t: &Terminal| t.title().starts_with("Choose mode: "));
+                term.press_until("1", on("Mode"));
             }
             Some(repo) => {
-                term.press_until("2", on("Enter repository URL or owner/name"));
+                term.press_until("2", on("Clone from URL"));
                 term.press(&format!("\x1b[200~{repo}\x1b[201~"));
-                term.press_until(ENTER, |t: &Terminal| t.title().starts_with("Choose mode: "));
+                term.press_until(ENTER, on("Mode"));
             }
         }
-        term.press_until("1", on("Choose GPU"));
+        term.press_until("1", on("GPU"));
         for c in ["t", "4"] {
             term.press(c);
         }
-        term.press_until(ENTER, on("Choose offer: Tesla T4"));
+        term.press_until(ENTER, on("Offer: Tesla T4"));
         term.wait(shows("id=100"));
         term.press(ENTER);
         assert_eq!(term.exit_status(), 0);
@@ -345,14 +342,14 @@ fn test_arrow_keys_navigate_and_special_keys_never_reach_the_filter() {
     // Left cleared the filter; nothing else was typed into it.
     term.wait(|t| t.line(1) == "\u{203a} 1. No repository");
     assert!(!term.lines()[..2].iter().any(|line| line.contains('[')));
-    let latency = term.press_until(RIGHT, |t: &Terminal| t.title().starts_with("Choose mode: "));
+    let latency = term.press_until(RIGHT, on("Mode"));
     assert!(latency < Duration::from_secs(1), "Right took {latency:?}");
     for key in SPECIAL_KEYS {
         term.press(key);
     }
-    term.press_until(LEFT, on("Choose repository"));
+    term.press_until(LEFT, on("Repository"));
     term.press(DOWN);
-    term.press_until(RIGHT, on("Enter repository URL or owner/name"));
+    term.press_until(RIGHT, on("Clone from URL"));
     for c in ["o", "/", "r"] {
         term.press(c);
     }
@@ -361,7 +358,7 @@ fn test_arrow_keys_navigate_and_special_keys_never_reach_the_filter() {
     }
     term.wait(|t| t.line(1) == "Repository: o/r");
     term.press_until(LEFT, |t| !t.line(1).starts_with("Repository:"));
-    term.press_until(LEFT, on("Choose repository"));
+    term.press_until(LEFT, on("Repository"));
 
     term.press_until(LEFT, |t| t.last_line().contains("again to quit"));
     term.press_until(DOWN, |t| !t.last_line().contains("again to quit"));
@@ -389,12 +386,12 @@ fn test_ctrl_c_quits_while_an_offer_search_is_still_running() {
     let sandbox = Sandbox::new();
     let mut term = gpu_up(&sandbox);
     term.wait(shows("gpu-kernels"));
-    term.press_until(ENTER, |t: &Terminal| t.title().starts_with("Choose mode: "));
-    term.press_until(ENTER, on("Choose GPU"));
+    term.press_until(ENTER, on("Mode"));
+    term.press_until(ENTER, on("GPU"));
     for c in ["4", "0", "9", "0"] {
         term.press(c);
     }
-    term.press_until(ENTER, on("Choose offer: RTX 4090"));
+    term.press_until(ENTER, on("Offer: RTX 4090"));
     let start = term.press("\x03");
     assert_eq!(term.exit_status(), 130);
     assert!(start.elapsed() < Duration::from_secs(1));

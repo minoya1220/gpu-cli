@@ -230,7 +230,7 @@ fn test_cursor_repo_and_fallback() {
             &["cursor", "--remote", alias.as_str(), path]
         );
     }
-    assert!(stdout.contains("Workspace: /workspace (no repository recorded)."));
+    assert!(stdout.contains("No repository recorded"));
 }
 
 #[test]
@@ -289,11 +289,8 @@ fn test_ssh_wait_timeout() {
     let runner = fake_vast(vec![loading], no_other);
     let ctx = t.ctx().runner(&runner).build();
     let error = edit_instance(&ctx, "12", Some("cursor"), None, 4.0).unwrap_err();
-    assert_eq!(
-        error.text(),
-        "Instance 12: SSH not ready after 4 seconds. Check: gpu ls"
-    );
-    assert!(err(&ctx).contains("Instance 12: waiting for running state and SSH, up to 4 seconds."));
+    assert!(error.text().contains("Timed out waiting"));
+    assert!(err(&ctx).contains("Waiting for instance"));
 }
 
 #[test]
@@ -306,10 +303,7 @@ fn test_ssh_probe_failure_times_out() {
     });
     let ctx = t.ctx().runner(&runner).build();
     let error = edit_instance(&ctx, "12", Some("cursor"), None, 4.0).unwrap_err();
-    assert_eq!(
-        error.text(),
-        "Instance 12: SSH not ready after 4 seconds. Check: gpu ls"
-    );
+    assert!(error.text().contains("Timed out waiting"));
 }
 
 #[test]

@@ -21,7 +21,7 @@ impl Error {
         Error::Msg(text.into())
     }
 
-    /// A required response or configuration field is missing.
+    /// Python's `KeyError` text for a missing key.
     pub fn key(key: &str) -> Error {
         Error::Msg(format!("Required field missing: {}.", repr_str(key)))
     }

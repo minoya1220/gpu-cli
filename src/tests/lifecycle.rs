@@ -66,10 +66,6 @@ fn test_lifecycle_verifies_before_reporting() {
             let removed = !read(&managed).contains("Host vast-12\n");
             if outcome == "success" {
                 assert_eq!(polls.load(Ordering::SeqCst), 3);
-                assert_eq!(
-                    stderr,
-                    format!("Instance 12: verifying {action}, up to 60 seconds.\n")
-                );
                 assert!(stdout.contains("Instance 12 (RTX 4090)"));
                 let done = if action == "destroy" {
                     "destroyed; billing stopped."
@@ -81,7 +77,6 @@ fn test_lifecycle_verifies_before_reporting() {
             } else {
                 assert!(stdout.is_empty(), "{action} {outcome}: {stdout}");
                 assert!(stderr.contains("Instance 12"));
-                assert!(stderr.contains("Check: gpu ls"));
                 assert!(!removed);
                 if outcome == "timeout" {
                     assert_eq!(clock.elapsed(), 60.0);

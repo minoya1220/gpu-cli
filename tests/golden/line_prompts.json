@@ -33,7 +33,7 @@
     ]
    },
    "result": "b",
-   "stdout": "Recent choices:\n  1. a\n  2. b\nRepository (page 1/1)\n1. a\n2. b\nSelect number, text to filter, n/p page, Enter = b: "
+   "stdout": "Recent/frequent:\n  1. a\n  2. b\nRepository (page 1/1)\n1. a\n2. b\nSelect number, text to filter, n/p page, Enter = b: "
   },
   {
    "options": [
@@ -151,7 +151,7 @@
     ]
    },
    "result": "three",
-   "stdout": "Recent choices:\n  1. three\n  2. one\nMode (page 1/1)\n1. one\n2. two\n3. three\nSelect number, text to filter, n/p page, Enter = three: Mode (page 1/1) filter='T'\n1. two\n2. three\nSelect number, text to filter, n/p page, Enter = three: "
+   "stdout": "Recent/frequent:\n  1. three\n  2. one\nMode (page 1/1)\n1. one\n2. two\n3. three\nSelect number, text to filter, n/p page, Enter = three: Mode (page 1/1) filter='T'\n1. two\n2. three\nSelect number, text to filter, n/p page, Enter = three: "
   },
   {
    "options": [
@@ -270,7 +270,7 @@
     ],
     "history": null,
     "result": "B200",
-    "stdout": "1. Datacenter Blackwell/Hopper (2 models, from $1.735/hr)\n2. Datacenter Ampere/Ada/older (2 models)\n3. Consumer RTX 40 series (1 model, from $0.300/hr)\n4. Consumer RTX 30 and older (1 model)\n5. Other (1 model)\nType a GPU name to filter, or select a category number.\nGPU: Datacenter Blackwell/Hopper (page 1/1)\n1. B200  $1.735/hr (1 offer)\n2. H100 SXM  $2.000/hr (3 offers)\n3. H100 PCIE\nSelect number, text to filter, n/p page, Enter = B200  $1.735/hr (1 offer): "
+    "stdout": "1. Datacenter Blackwell/Hopper (2 models, from $1.735/hr)\n2. Datacenter Ampere/Ada/older (2 models)\n3. Consumer RTX 40 series (1 model, from $0.300/hr)\n4. Consumer RTX 30 and older (1 model)\n5. Other (1 model)\nType a model substring to filter all GPUs, or choose a category.\nGPU: Datacenter Blackwell/Hopper (page 1/1)\n1. B200  $1.735/hr (1 offer)\n2. H100 SXM  $2.000/hr (3 offers)\n3. H100 PCIE\nSelect number, text to filter, n/p page, Enter = B200  $1.735/hr (1 offer): "
    },
    {
     "answers": [
@@ -280,7 +280,7 @@
     ],
     "history": null,
     "result": "H100 PCIE",
-    "stdout": "1. Datacenter Blackwell/Hopper (2 models, from $1.735/hr)\n2. Datacenter Ampere/Ada/older (2 models)\n3. Consumer RTX 40 series (1 model, from $0.300/hr)\n4. Consumer RTX 30 and older (1 model)\n5. Other (1 model)\nType a GPU name to filter, or select a category number.\nGPU: No matching GPU. Enter a listed number or part of a GPU name.\n1. Datacenter Blackwell/Hopper (2 models, from $1.735/hr)\n2. Datacenter Ampere/Ada/older (2 models)\n3. Consumer RTX 40 series (1 model, from $0.300/hr)\n4. Consumer RTX 30 and older (1 model)\n5. Other (1 model)\nType a GPU name to filter, or select a category number.\nGPU: GPU model filter (page 1/1)\n1. H100 SXM  $2.000/hr (3 offers)\n2. H100 PCIE\nSelect number, text to filter, n/p page, Enter = H100 SXM  $2.000/hr (3 offers): "
+    "stdout": "1. Datacenter Blackwell/Hopper (2 models, from $1.735/hr)\n2. Datacenter Ampere/Ada/older (2 models)\n3. Consumer RTX 40 series (1 model, from $0.300/hr)\n4. Consumer RTX 30 and older (1 model)\n5. Other (1 model)\nType a model substring to filter all GPUs, or choose a category.\nGPU: Choose a listed category or type a matching model substring.\n1. Datacenter Blackwell/Hopper (2 models, from $1.735/hr)\n2. Datacenter Ampere/Ada/older (2 models)\n3. Consumer RTX 40 series (1 model, from $0.300/hr)\n4. Consumer RTX 30 and older (1 model)\n5. Other (1 model)\nType a model substring to filter all GPUs, or choose a category.\nGPU: GPU model filter (page 1/1)\n1. H100 SXM  $2.000/hr (3 offers)\n2. H100 PCIE\nSelect number, text to filter, n/p page, Enter = H100 SXM  $2.000/hr (3 offers): "
    },
    {
     "answers": [
@@ -294,7 +294,7 @@
      ]
     },
     "result": "RTX 4090",
-    "stdout": "Recent GPUs:\n1. RTX 4090  $0.300/hr (12 offers)\n2. B200  $1.735/hr (1 offer)\n3. Datacenter Blackwell/Hopper (2 models, from $1.735/hr)\n4. Datacenter Ampere/Ada/older (2 models)\n5. Consumer RTX 40 series (1 model, from $0.300/hr)\n6. Consumer RTX 30 and older (1 model)\n7. Other (1 model)\nType a GPU name to filter, or select a category number.\nGPU [Enter = RTX 4090]: "
+    "stdout": "Recent/frequent GPU models:\n1. RTX 4090  $0.300/hr (12 offers)\n2. B200  $1.735/hr (1 offer)\n3. Datacenter Blackwell/Hopper (2 models, from $1.735/hr)\n4. Datacenter Ampere/Ada/older (2 models)\n5. Consumer RTX 40 series (1 model, from $0.300/hr)\n6. Consumer RTX 30 and older (1 model)\n7. Other (1 model)\nType a model substring to filter all GPUs, or choose a category.\nGPU [Enter = RTX 4090]: "
    },
    {
     "answers": [
@@ -308,7 +308,7 @@
      ]
     },
     "result": "B200",
-    "stdout": "Recent GPUs:\n1. RTX 4090  $0.300/hr (12 offers)\n2. B200  $1.735/hr (1 offer)\n3. Datacenter Blackwell/Hopper (2 models, from $1.735/hr)\n4. Datacenter Ampere/Ada/older (2 models)\n5. Consumer RTX 40 series (1 model, from $0.300/hr)\n6. Consumer RTX 30 and older (1 model)\n7. Other (1 model)\nType a GPU name to filter, or select a category number.\nGPU [Enter = RTX 4090]: "
+    "stdout": "Recent/frequent GPU models:\n1. RTX 4090  $0.300/hr (12 offers)\n2. B200  $1.735/hr (1 offer)\n3. Datacenter Blackwell/Hopper (2 models, from $1.735/hr)\n4. Datacenter Ampere/Ada/older (2 models)\n5. Consumer RTX 40 series (1 model, from $0.300/hr)\n6. Consumer RTX 30 and older (1 model)\n7. Other (1 model)\nType a model substring to filter all GPUs, or choose a category.\nGPU [Enter = RTX 4090]: "
    },
    {
     "answers": [
@@ -316,7 +316,7 @@
     ],
     "history": null,
     "result": "Mystery",
-    "stdout": "1. Datacenter Blackwell/Hopper (2 models, from $1.735/hr)\n2. Datacenter Ampere/Ada/older (2 models)\n3. Consumer RTX 40 series (1 model, from $0.300/hr)\n4. Consumer RTX 30 and older (1 model)\n5. Other (1 model)\nType a GPU name to filter, or select a category number.\nGPU: "
+    "stdout": "1. Datacenter Blackwell/Hopper (2 models, from $1.735/hr)\n2. Datacenter Ampere/Ada/older (2 models)\n3. Consumer RTX 40 series (1 model, from $0.300/hr)\n4. Consumer RTX 30 and older (1 model)\n5. Other (1 model)\nType a model substring to filter all GPUs, or choose a category.\nGPU: "
    },
    {
     "answers": [
@@ -324,7 +324,7 @@
     ],
     "history": null,
     "result": "RTX 4090",
-    "stdout": "1. Datacenter Blackwell/Hopper (2 models, from $1.735/hr)\n2. Datacenter Ampere/Ada/older (2 models)\n3. Consumer RTX 40 series (1 model, from $0.300/hr)\n4. Consumer RTX 30 and older (1 model)\n5. Other (1 model)\nType a GPU name to filter, or select a category number.\nGPU: "
+    "stdout": "1. Datacenter Blackwell/Hopper (2 models, from $1.735/hr)\n2. Datacenter Ampere/Ada/older (2 models)\n3. Consumer RTX 40 series (1 model, from $0.300/hr)\n4. Consumer RTX 30 and older (1 model)\n5. Other (1 model)\nType a model substring to filter all GPUs, or choose a category.\nGPU: "
    },
    {
     "answers": [
@@ -334,7 +334,7 @@
     ],
     "history": null,
     "result": "RTX 4090",
-    "stdout": "1. Datacenter Blackwell/Hopper (2 models, from $1.735/hr)\n2. Datacenter Ampere/Ada/older (2 models)\n3. Consumer RTX 40 series (1 model, from $0.300/hr)\n4. Consumer RTX 30 and older (1 model)\n5. Other (1 model)\nType a GPU name to filter, or select a category number.\nGPU: No matching GPU. Enter a listed number or part of a GPU name.\n1. Datacenter Blackwell/Hopper (2 models, from $1.735/hr)\n2. Datacenter Ampere/Ada/older (2 models)\n3. Consumer RTX 40 series (1 model, from $0.300/hr)\n4. Consumer RTX 30 and older (1 model)\n5. Other (1 model)\nType a GPU name to filter, or select a category number.\nGPU: GPU model filter (page 1/1)\n1. RTX 4090  $0.300/hr (12 offers)\n2. RTX 3090\nSelect number, text to filter, n/p page, Enter = RTX 4090  $0.300/hr (12 offers): "
+    "stdout": "1. Datacenter Blackwell/Hopper (2 models, from $1.735/hr)\n2. Datacenter Ampere/Ada/older (2 models)\n3. Consumer RTX 40 series (1 model, from $0.300/hr)\n4. Consumer RTX 30 and older (1 model)\n5. Other (1 model)\nType a model substring to filter all GPUs, or choose a category.\nGPU: Choose a listed category or type a matching model substring.\n1. Datacenter Blackwell/Hopper (2 models, from $1.735/hr)\n2. Datacenter Ampere/Ada/older (2 models)\n3. Consumer RTX 40 series (1 model, from $0.300/hr)\n4. Consumer RTX 30 and older (1 model)\n5. Other (1 model)\nType a model substring to filter all GPUs, or choose a category.\nGPU: GPU model filter (page 1/1)\n1. RTX 4090  $0.300/hr (12 offers)\n2. RTX 3090\nSelect number, text to filter, n/p page, Enter = RTX 4090  $0.300/hr (12 offers): "
    },
    {
     "answers": [
@@ -344,7 +344,7 @@
     ],
     "history": null,
     "result": "H100 SXM",
-    "stdout": "1. Datacenter Blackwell/Hopper (2 models, from $1.735/hr)\n2. Datacenter Ampere/Ada/older (2 models)\n3. Consumer RTX 40 series (1 model, from $0.300/hr)\n4. Consumer RTX 30 and older (1 model)\n5. Other (1 model)\nType a GPU name to filter, or select a category number.\nGPU: Consumer RTX 40 series (page 1/1)\n1. RTX 4090  $0.300/hr (12 offers)\nSelect number, text to filter, n/p page, Enter = RTX 4090  $0.300/hr (12 offers): GPU model filter (page 1/1)\n1. H100 SXM  $2.000/hr (3 offers)\n2. H100 PCIE\nSelect number, text to filter, n/p page, Enter = H100 SXM  $2.000/hr (3 offers): "
+    "stdout": "1. Datacenter Blackwell/Hopper (2 models, from $1.735/hr)\n2. Datacenter Ampere/Ada/older (2 models)\n3. Consumer RTX 40 series (1 model, from $0.300/hr)\n4. Consumer RTX 30 and older (1 model)\n5. Other (1 model)\nType a model substring to filter all GPUs, or choose a category.\nGPU: Consumer RTX 40 series (page 1/1)\n1. RTX 4090  $0.300/hr (12 offers)\nSelect number, text to filter, n/p page, Enter = RTX 4090  $0.300/hr (12 offers): GPU model filter (page 1/1)\n1. H100 SXM  $2.000/hr (3 offers)\n2. H100 PCIE\nSelect number, text to filter, n/p page, Enter = H100 SXM  $2.000/hr (3 offers): "
    },
    {
     "answers": [
@@ -354,13 +354,13 @@
     ],
     "history": null,
     "result": "B200",
-    "stdout": "1. Datacenter Blackwell/Hopper (2 models, from $1.735/hr)\n2. Datacenter Ampere/Ada/older (2 models)\n3. Consumer RTX 40 series (1 model, from $0.300/hr)\n4. Consumer RTX 30 and older (1 model)\n5. Other (1 model)\nType a GPU name to filter, or select a category number.\nGPU: Consumer RTX 40 series (page 1/1)\n1. RTX 4090  $0.300/hr (12 offers)\nSelect number, text to filter, n/p page, Enter = RTX 4090  $0.300/hr (12 offers): No GPU models match that filter.\nConsumer RTX 40 series (page 1/1)\n1. RTX 4090  $0.300/hr (12 offers)\nSelect number, text to filter, n/p page, Enter = RTX 4090  $0.300/hr (12 offers): "
+    "stdout": "1. Datacenter Blackwell/Hopper (2 models, from $1.735/hr)\n2. Datacenter Ampere/Ada/older (2 models)\n3. Consumer RTX 40 series (1 model, from $0.300/hr)\n4. Consumer RTX 30 and older (1 model)\n5. Other (1 model)\nType a model substring to filter all GPUs, or choose a category.\nGPU: Consumer RTX 40 series (page 1/1)\n1. RTX 4090  $0.300/hr (12 offers)\nSelect number, text to filter, n/p page, Enter = RTX 4090  $0.300/hr (12 offers): No GPU models match that filter.\nConsumer RTX 40 series (page 1/1)\n1. RTX 4090  $0.300/hr (12 offers)\nSelect number, text to filter, n/p page, Enter = RTX 4090  $0.300/hr (12 offers): "
    },
    {
     "answers": [],
     "history": null,
     "error": "Input ended at GPU selection. Pass --gpu 'RTX 4090' to choose without a prompt.",
-    "stdout": "1. Datacenter Blackwell/Hopper (2 models, from $1.735/hr)\n2. Datacenter Ampere/Ada/older (2 models)\n3. Consumer RTX 40 series (1 model, from $0.300/hr)\n4. Consumer RTX 30 and older (1 model)\n5. Other (1 model)\nType a GPU name to filter, or select a category number.\nGPU: "
+    "stdout": "1. Datacenter Blackwell/Hopper (2 models, from $1.735/hr)\n2. Datacenter Ampere/Ada/older (2 models)\n3. Consumer RTX 40 series (1 model, from $0.300/hr)\n4. Consumer RTX 30 and older (1 model)\n5. Other (1 model)\nType a model substring to filter all GPUs, or choose a category.\nGPU: "
    },
    {
     "answers": [
@@ -369,7 +369,7 @@
     ],
     "history": null,
     "error": "Input ended at GPU model filter. Pass --gpu to choose without a prompt.",
-    "stdout": "1. Datacenter Blackwell/Hopper (2 models, from $1.735/hr)\n2. Datacenter Ampere/Ada/older (2 models)\n3. Consumer RTX 40 series (1 model, from $0.300/hr)\n4. Consumer RTX 30 and older (1 model)\n5. Other (1 model)\nType a GPU name to filter, or select a category number.\nGPU: Datacenter Ampere/Ada/older (page 1/1)\n1. A100 PCIE\n2. Tesla T4\nSelect number, text to filter, n/p page, Enter = A100 PCIE: GPU model filter (page 1/1)\n1. H100 SXM  $2.000/hr (3 offers)\n2. RTX 4090  $0.300/hr (12 offers)\n3. RTX 3090\nSelect number, text to filter, n/p page, Enter = H100 SXM  $2.000/hr (3 offers): "
+    "stdout": "1. Datacenter Blackwell/Hopper (2 models, from $1.735/hr)\n2. Datacenter Ampere/Ada/older (2 models)\n3. Consumer RTX 40 series (1 model, from $0.300/hr)\n4. Consumer RTX 30 and older (1 model)\n5. Other (1 model)\nType a model substring to filter all GPUs, or choose a category.\nGPU: Datacenter Ampere/Ada/older (page 1/1)\n1. A100 PCIE\n2. Tesla T4\nSelect number, text to filter, n/p page, Enter = A100 PCIE: GPU model filter (page 1/1)\n1. H100 SXM  $2.000/hr (3 offers)\n2. RTX 4090  $0.300/hr (12 offers)\n3. RTX 3090\nSelect number, text to filter, n/p page, Enter = H100 SXM  $2.000/hr (3 offers): "
    }
   ]
  }

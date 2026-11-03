@@ -233,15 +233,15 @@ impl Runner for RealRunner {
 }
 
 /// Run a CLI and return its stripped stdout. It never reads the terminal,
-/// which the picker owns. Dependency diagnostics are redacted.
+/// which the picker owns. Failures keep Python's messages, redacted.
 pub fn run<S: AsRef<str>>(ctx: &Ctx, argv: &[S], timeout: Option<f64>) -> Result<String> {
     let cmd = Cmd::new(argv).timeout(timeout);
     let program = cmd.program().to_string();
     match ctx.runner.run(&cmd) {
         Err(RunError::TimedOut) => Err(Error::msg(format!("Timed out running {program}"))),
-        Err(RunError::NotFound) => Err(Error::msg(format!(
-            "Required command not found: {program}. Install it and add it to PATH."
-        ))),
+        Err(RunError::NotFound) => {
+            Err(Error::msg(format!("Required command not found: {program}")))
+        }
         Err(RunError::Os(text)) => Err(Error::msg(text)),
         Ok(output) if output.code != 0 => {
             let detail = if output.stderr.is_empty() {
@@ -251,7 +251,7 @@ pub fn run<S: AsRef<str>>(ctx: &Ctx, argv: &[S], timeout: Option<f64>) -> Result
             };
             let detail = redact_text(detail.trim());
             Err(Error::msg(if detail.is_empty() {
-                format!("{program} failed (exit {}).", output.code)
+                format!("Command failed: {program}")
             } else {
                 detail
             }))

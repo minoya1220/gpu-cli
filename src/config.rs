@@ -53,7 +53,7 @@ pub fn load_config(env: &Env) -> Result<Dict> {
     }
 }
 
-/// `cfg[key]`, or a missing-field error.
+/// `cfg[key]`, or Python's `KeyError`.
 pub fn get<'a>(cfg: &'a Dict, key: &str) -> Result<&'a Value> {
     cfg.get(key).ok_or_else(|| Error::key(key))
 }

@@ -57,7 +57,7 @@ fn test_cached_display_and_wait_before_launch() {
     let result = super::wizard::run(&flow(&t, job), b200(), move |keys| {
         assert_eq!(keys.labels(), ["No repository", "Clone from URL...", "old"]);
         keys.wait_for("the sync to run", || observer.state() == JobState::Running);
-        keys.press_until("3", on("Choose mode: old"));
+        keys.press_until("3", on("Mode"));
         keys.press_until("1", on("Checking repositories"));
         assert!(!keys.snapshot().done);
         release.set();
@@ -83,13 +83,13 @@ fn test_invalid_cache_resets_with_message_and_never_launches() {
         &flow(&t, gated(&gate, Ok(vec!["new"]))),
         b200(),
         move |keys| {
-            keys.press_until("3", |s| s.title.starts_with("Choose mode: "));
+            keys.press_until("3", on("Mode"));
             keys.press_until("1", on("Checking repositories"));
             release.set();
-            keys.wait(on("Choose repository"));
+            keys.wait(on("Repository"));
             assert_eq!(
                 keys.snapshot().notice,
-                "Repository deleted is unavailable. Choose another repository or enter its URL."
+                "Repository not available or deleted: deleted"
             );
             assert_eq!(keys.labels(), ["No repository", "Clone from URL...", "new"]);
             keys.press(CTRL_C);
@@ -109,10 +109,10 @@ fn test_sync_error_resets_without_launch() {
         &flow(&t, gated(&gate, Err("GitHub unavailable"))),
         b200(),
         move |keys| {
-            keys.press_until("3", |s| s.title.starts_with("Choose mode: "));
+            keys.press_until("3", on("Mode"));
             keys.press_until("1", on("Checking repositories"));
             release.set();
-            keys.wait(on("Choose repository"));
+            keys.wait(on("Repository"));
             assert!(keys.snapshot().notice.contains("GitHub unavailable"));
             keys.press(CTRL_C);
         },

@@ -76,13 +76,13 @@ pub fn choose<T: Clone + PartialEq>(
             .map(|(i, _)| i)
             .collect();
         if !filter.is_empty() && filtered.len() == 1 {
-            ctx.println(&format!("Selected: {}", labels[filtered[0]]))?;
+            ctx.println(&format!("Unique match: {}", labels[filtered[0]]))?;
             return Ok(options[filtered[0]].clone());
         }
         let pages = filtered.len().div_ceil(PAGE_SIZE).max(1);
         page = page.min(pages - 1);
         if !recent.is_empty() && filter.is_empty() {
-            ctx.println("Recent choices:")?;
+            ctx.println("Recent/frequent:")?;
             for (i, option) in recent.iter().enumerate() {
                 ctx.println(&format!("  {}. {}", i + 1, labels[index_of(option)]))?;
             }
@@ -188,7 +188,7 @@ pub fn choose_gpu(ctx: &Ctx, models: &[String], stats: &Stats) -> Result<String>
     );
     loop {
         if !recent.is_empty() {
-            ctx.println("Recent GPUs:")?;
+            ctx.println("Recent/frequent GPU models:")?;
             for (n, model) in recent.iter().enumerate() {
                 ctx.println(&format!("{}. {}", n + 1, model_label(model, stats)))?;
             }
@@ -200,7 +200,7 @@ pub fn choose_gpu(ctx: &Ctx, models: &[String], stats: &Stats) -> Result<String>
                 category_label(name, members, stats)
             ))?;
         }
-        ctx.println("Type a GPU name to filter, or select a category number.")?;
+        ctx.println("Type a model substring to filter all GPUs, or choose a category.")?;
         let has_default = history.first().is_some_and(|h| models.contains(h));
         let prompt = if has_default {
             format!("GPU [Enter = {}]: ", history[0])
@@ -252,7 +252,7 @@ pub fn choose_gpu(ctx: &Ctx, models: &[String], stats: &Stats) -> Result<String>
                 None,
             );
         }
-        ctx.println("No matching GPU. Enter a listed number or part of a GPU name.")?;
+        ctx.println("Choose a listed category or type a matching model substring.")?;
     }
 }
 

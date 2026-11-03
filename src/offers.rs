@@ -17,7 +17,7 @@ use crate::pyjson::{Dict, Value};
 use crate::vast::Vast;
 
 pub const NO_OFFERS: &str =
-    "No matching offers. Choose another GPU or relax --max-price, --reliability, or --disk.";
+    "No matching offers found; try a different model, GPU count, reliability, or disk size";
 pub const CATEGORY_ORDER: [&str; 7] = [
     "Datacenter Blackwell/Hopper",
     "Datacenter Ampere/Ada/older",
@@ -134,7 +134,7 @@ impl OfferSearch {
     }
 }
 
-/// The search result as offer dicts, or a malformed-response error.
+/// The search result as offer dicts, or Python's error for other shapes.
 pub fn offer_dicts(value: Value) -> Result<Vec<Dict>> {
     match value {
         Value::List(items) => items
@@ -158,7 +158,7 @@ pub fn offer_dicts(value: Value) -> Result<Vec<Dict>> {
     }
 }
 
-/// `offer[key]`, or a missing-field error.
+/// `offer[key]`, or Python's `KeyError`.
 pub fn field<'a>(offer: &'a Dict, key: &str) -> Result<&'a Value> {
     offer.get(key).ok_or_else(|| Error::key(key))
 }

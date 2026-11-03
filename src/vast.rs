@@ -106,7 +106,8 @@ pub fn request(offer: &Dict, args: &RequestArgs, cfg: &Dict) -> Result<Vec<Value
     Ok(command)
 }
 
-/// The request as process arguments; reject non-string items before starting a process.
+/// The request as process arguments; a non-string item fails with the
+/// `TypeError` text `subprocess.run` raises before starting anything.
 pub fn argv(request: &[Value]) -> Result<Vec<String>> {
     request
         .iter()

@@ -104,7 +104,7 @@ pub fn select_instance(ctx: &Ctx, instances: &[Dict], action: &str) -> Result<Op
     }
     // Even a single instance must be explicitly selected.
     let screen = Screen::new(
-        format!("Choose instance: gpu {action}"),
+        format!("Instance to {action}"),
         move || options.clone(),
         Next::Done,
     )

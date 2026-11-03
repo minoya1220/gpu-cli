@@ -1,5 +1,5 @@
 //! Data-driven parity tables generated from the Python reference (see
-//! tests/golden/README.md). Formatting stays pinned; human copy has deliberate updates.
+//! tests/golden/README.md). Every row must match what Python produced.
 
 use std::sync::Arc;
 
@@ -425,7 +425,7 @@ fn python_gpu_models() {
     }
 }
 
-/// Datetime parser error categories whose internal details can differ (plan 9.1.2).
+/// Messages Python's `datetime` writes itself; the Rust text differs (plan 9.1.2).
 fn python_internal(message: &str) -> bool {
     [
         "Invalid datetime",

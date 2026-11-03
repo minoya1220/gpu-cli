@@ -8,7 +8,7 @@ Each `*.json` file here was generated once from the Python reference implementat
 - Interpreter: CPython 3.13.17 with the reference's locked dependencies (`uv sync`), `TZ=UTC`.
 - Method: a one-off script, run from outside the repository, imported `reference/python/src/gpu` and called the functions below directly with the inputs listed, writing each result (or the exception text) next to its input. Lists are written one row per line.
 
-To regenerate the original reference data, check out 5767d70, run the reference with `uv`, and call the same functions with the inputs stored in each file. Human-copy expectations now deliberately differ: line prompts name defaults and recovery flags, empty instance lists point to `gpu up`, startup warns how to set `GH_TOKEN`, missing fields and malformed responses name their cause, and expiry errors give supported inputs. Preserve these copy changes when regenerating; numeric formats, serialized values, tables, and request structure remain pinned.
+To regenerate, check out 5767d70, run the reference with `uv`, and call the same functions with the inputs stored in each file. Preserve the deliberate human-copy updates: actual Enter defaults, input-ended flag hints, `gpu up` for empty instance lists, and plain-language exception messages. Numeric formats, serialized values, tables, and request structure remain pinned.
 
 ## Tables
 

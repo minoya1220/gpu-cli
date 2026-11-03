@@ -72,9 +72,9 @@ fn test_missing_cli() {
         let ctx = t.ctx().build();
         let error = launch_editor(&ctx, editor, "vast-12", "/workspace", None).unwrap_err();
         let text = error.text();
-        assert!(text.contains("is not on PATH"), "{text}");
+        assert!(text.contains("not found on PATH"), "{text}");
         assert!(
-            text.split("is not on PATH")
+            text.split("not found on PATH")
                 .nth(1)
                 .unwrap()
                 .to_lowercase()
@@ -241,7 +241,7 @@ fn test_after_up_real_keys() {
             }
             keys.press(ENTER);
             if (last.is_some() && choice == 1) || (choice == 0 && last.is_none()) {
-                keys.wait(on("Choose editor"));
+                keys.wait(on("Editor"));
                 keys.press(ENTER);
             }
         });
@@ -257,7 +257,7 @@ fn test_after_up_real_keys() {
 fn test_editor_real_keys() {
     for (index, (expected, _)) in EDITORS.iter().enumerate() {
         let result = drive(editor_screen(), move |keys| {
-            keys.wait(on("Choose editor"));
+            keys.wait(on("Editor"));
             for _ in 0..index {
                 keys.press(DOWN);
             }
@@ -547,7 +547,5 @@ fn test_invalid_local_config_does_not_run_ssh() {
         Some(missing.to_str().unwrap()),
     )
     .unwrap_err();
-    assert!(error
-        .text()
-        .contains("--nvim-config to an existing directory or a git URL"));
+    assert!(error.text().contains("existing local directory"));
 }

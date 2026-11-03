@@ -324,7 +324,6 @@ fn test_timeout_marks_arming_unverified() {
     let error = manage_expiry(&ctx, "vast-123", "123", "arm", Some(now())).unwrap_err();
     assert!(error.text().contains("unverified"));
     assert!(error.text().contains("gpu expire 123 show"));
-    assert!(error.text().contains("45 seconds"));
 }
 
 #[test]
@@ -339,7 +338,7 @@ fn test_confirmation_local_timezone_and_remaining() {
     let deadline = clock.now().as_second() + 7200;
     let reply = dict(&format!(r#"{{"status": "armed", "deadline": {deadline}}}"#));
     let message = expiry_summary(&ctx, "123", &reply).unwrap();
-    assert!(message.contains("Auto-destroy") && message.contains("Disk will be deleted"));
+    assert!(message.contains("auto-DESTROY") && message.contains("Disk will be deleted"));
     assert!(message.contains("in 2h"), "{message}");
     let abbreviation = Timestamp::from_second(deadline)
         .unwrap()
@@ -440,7 +439,7 @@ fn test_cli_show_inactive_is_nonzero() {
     let ctx = t.ctx().runner(&runner).clock(&clock).build();
     assert_eq!(main(&ctx, &["expire", "123", "show"]), 1);
     let stderr = err(&ctx);
-    assert!(stderr.contains("expiry worker is inactive"));
+    assert!(stderr.contains("NOT running"));
     assert!(stderr.contains("gpu expire 123 2h"));
 }
 

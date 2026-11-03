@@ -25,7 +25,7 @@ static CLOCK_12: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^([0-9]{1,2})(?::([0-9]{2}))?([aApP][mM])$").unwrap());
 static CLOCK_24: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[0-9]{1,2}:[0-9]{2}$").unwrap());
 
-const OUT_OF_RANGE: &str = "Expiry is out of range. Use a shorter duration, such as 2h.";
+const OUT_OF_RANGE: &str = "Expiry is out of range.";
 
 /// Seconds in a duration such as `1h30m`. Values too large for any date
 /// still parse; turning them into a deadline reports them as out of range.
@@ -45,7 +45,7 @@ pub fn parse_duration(value: &str) -> std::result::Result<u128, String> {
         }
     }
     if seconds == 0 {
-        return Err("Expiry duration must be positive. Use 30m or 2h.".into());
+        return Err("Expiry duration must be positive.".into());
     }
     Ok(seconds)
 }
@@ -188,10 +188,7 @@ fn parse_deadline_at(
         return Err("No next occurrence found; use an ISO datetime with UTC offset.".into());
     }
     if !at.contains('T') && !at.contains(' ') {
-        return Err(
-            "Use a duration (2h), local clock time (18:30), or ISO datetime with a UTC offset."
-                .into(),
-        );
+        return Err("Use HH:MM or an ISO datetime, preferably with UTC offset.".into());
     }
     let text = at.replace('Z', "+00:00");
     let parsed = fromisoformat(&text)?;
@@ -210,9 +207,7 @@ fn parse_deadline_at(
         }
     };
     if value <= now {
-        return Err(
-            "Expiry time is in the past. Use a future time or a duration such as 2h.".into(),
-        );
+        return Err("Expiry time must be in the future.".into());
     }
     Ok(value)
 }
@@ -536,7 +531,7 @@ pub fn manage_expiry(
         match ctx.runner.run(&cmd) {
             Ok(result) => result,
             Err(RunError::TimedOut) => return Err(Error::msg(
-                format!("Expiry SSH timed out after 45 seconds; arming/cancellation is unverified. Check: gpu expire {instance_id} show"),
+                format!("Expiry SSH timed out; arming/cancellation is unverified. Run gpu expire {instance_id} show."),
             )),
             Err(other) => return Err(Error::msg(other.python_text("ssh"))),
         };
@@ -544,10 +539,10 @@ pub fn manage_expiry(
     let reply = pyjson::loads(&result.stdout).unwrap_or(Value::Dict(Dict::new()));
     let message = |code: &str| {
         match code {
-        "credentials" => "Expiry not armed: instance-scoped CONTAINER_ID/CONTAINER_API_KEY missing or mismatched. Use an image with Vast-injected instance credentials.".to_string(),
-        "past" => format!("Expiry not armed: deadline passed before SSH was ready. Set a new deadline: gpu expire {instance_id} 2h"),
-        "verification" => format!("Expiry not armed: worker startup verification failed; previous deadline unchanged. Check: gpu expire {instance_id} show"),
-        _ => format!("Remote expiry failed. Check bash, curl, flock, setsid and writable ~/.local/state/gpu-expire. Verify the timer: gpu expire {instance_id} show"),
+        "credentials" => "Instance-scoped CONTAINER_ID/CONTAINER_API_KEY missing or mismatched; expiry NOT armed.".to_string(),
+        "past" => format!("Deadline passed before SSH was ready; expiry NOT armed. Run gpu expire {instance_id} 2h."),
+        "verification" => format!("Timer startup verification failed; new expiry NOT armed (previous deadline unchanged). Run gpu expire {instance_id} show."),
+        _ => format!("Remote expiry operation failed; check bash, curl, flock and writable ~/.local/state/gpu-expire; run gpu expire {instance_id} show."),
     }
     };
     let error = reply.get("error").filter(|e| crate::pyfmt::truthy(e));
@@ -563,9 +558,9 @@ pub fn manage_expiry(
         status,
         "armed" | "retrying" | "inactive" | "none" | "cancelled" | "destroy-request-accepted"
     ) {
-        return Err(Error::msg(
-            format!("Unreadable expiry response; completion unverified. Check: gpu expire {instance_id} show"),
-        ));
+        return Err(Error::msg(format!(
+            "Invalid expiry response; completion unverified. Run gpu expire {instance_id} show."
+        )));
     }
     if action == "arm" && status != "armed" {
         return Err(Error::msg(message("verification")));
@@ -620,15 +615,7 @@ pub fn expiry_summary(ctx: &Ctx, instance_id: &str, reply: &Dict) -> Result<Stri
     };
     let (hours, rest) = (total / 3600, total % 3600);
     let (minutes, secs) = (rest / 60, rest % 60);
-    let detail = match status.as_str() {
-        "retrying" => "Destruction failed; retries run every 30 seconds. Check: gpu ls",
-        "destroy-request-accepted" => {
-            "Vast accepted destruction; completion unverified. Check: gpu ls"
-        }
-        "inactive" => "Worker is not running; this deadline will not be enforced.",
-        _ => "Disk will be deleted; billing ends when destruction completes.",
-    };
     Ok(format!(
-        "Instance {instance_id}: timer {status}. Auto-destroy at {text} (in {hours}h {minutes}m {secs}s).\n{detail}"
+        "Instance {instance_id}: auto-DESTROY at {text} (in {hours}h {minutes}m {secs}s); timer {status}. Disk will be deleted; all billing stops on destruction."
     ))
 }

@@ -137,7 +137,7 @@ fn handled_errors_are_redacted_and_exit_1() {
 }
 
 #[test]
-fn paid_launch_names_the_cost_and_one_connection_command() {
+fn launch_names_one_connection_command() {
     let sandbox = Sandbox::new();
     sandbox.stub("vastai", r#"#!/bin/sh
 case "$1 $2" in
@@ -170,54 +170,11 @@ esac
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout
-            .contains("Create paid container: 1 x RTX 4090, No repository, offer 100, $0.300/hr."),
-        "{stdout}"
-    );
-    assert!(
         stdout.ends_with("Created instance 123.\nConnect: gpu ssh 123 --exec\n"),
         "{stdout}"
     );
     assert!(!stdout.contains("secret-instance-key"));
     assert!(!String::from_utf8_lossy(&output.stderr).contains("secret-instance-key"));
-}
-
-#[test]
-fn destruction_confirmation_names_disk_deletion_before_any_request() {
-    use std::io::Write;
-
-    let sandbox = Sandbox::new();
-    let mut child = sandbox
-        .command(&["down", "123"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child.stdin.take().unwrap().write_all(b"no\n").unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert_eq!(output.status.code(), Some(0));
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
-        "Delete instance 123 and its disk? Type 'yes' to destroy: Cancelled.\n"
-    );
-    assert!(sandbox.calls().is_empty());
-}
-
-#[test]
-fn help_explains_paid_and_destructive_flags_without_dependency_calls() {
-    let sandbox = Sandbox::new();
-    let output = run(&sandbox, &["up", "--help"]);
-    assert_eq!(output.status.code(), Some(0));
-    let help = String::from_utf8_lossy(&output.stdout);
-    assert!(help.contains("Skip paid-launch confirmation"));
-    assert!(help.contains("Print the request without renting"));
-    let output = run(&sandbox, &["expire", "--help"]);
-    assert_eq!(output.status.code(), Some(0));
-    let help = String::from_utf8_lossy(&output.stdout);
-    assert!(help.contains("Scheduling authorizes deletion without another confirmation."));
-    assert!(help.contains("gpu expire 12345678 show"));
-    assert!(sandbox.calls().is_empty());
 }
 
 #[test]

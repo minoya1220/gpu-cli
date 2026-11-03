@@ -63,10 +63,9 @@ pub fn nvim_config(cfg: &Dict) -> Result<Option<Value>> {
     match cfg.get("editor") {
         None => Ok(None),
         Some(Value::Dict(editor)) => Ok(editor.get("nvim_config").cloned()),
-        Some(other) => Err(Error::msg(format!(
-            "'{}' object has no attribute 'get'",
-            crate::pyfmt::type_name(other)
-        ))),
+        Some(_) => Err(Error::msg(
+            "Config 'editor' must be a JSON object, such as {\"nvim_config\": \"~/.config/nvim\"}.",
+        )),
     }
 }
 
@@ -76,9 +75,8 @@ pub fn nvim_config_text(value: Option<&Value>) -> Result<Option<String>> {
         None | Some(Value::Null) => Ok(None),
         Some(Value::Str(s)) => Ok(Some(s.clone())),
         Some(other) if !crate::pyfmt::truthy(other) => Ok(None),
-        Some(other) => Err(Error::msg(format!(
-            "'{}' object has no attribute 'startswith'",
-            crate::pyfmt::type_name(other)
-        ))),
+        Some(_) => Err(Error::msg(
+            "Config 'editor.nvim_config' must be a git URL or directory path string.",
+        )),
     }
 }

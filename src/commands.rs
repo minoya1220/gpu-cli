@@ -31,7 +31,7 @@ pub fn ls(ctx: &Ctx, json: bool) -> Result<()> {
 
 pub fn render_instances(ctx: &Ctx, instances: &Value) -> Result<()> {
     if !truthy(instances) {
-        return ctx.println("No instances.");
+        return ctx.println("No instances. Launch one: gpu up");
     }
     let items = offer_dicts(instances.clone())?;
     let columns = [
@@ -234,7 +234,7 @@ pub fn edit_instance(
         None => {
             if !ctx.interactive() {
                 return Err(Error::msg(
-                    "No previous editor; specify --editor cursor|code|zed|nvim",
+                    format!("No previous editor; specify --editor cursor|code|zed|nvim. Example: gpu edit {instance_id} --editor code"),
                 ));
             }
             pick(ctx, editor_screen())?
@@ -266,7 +266,7 @@ pub fn expire_instance(
     ctx.println(&expiry_summary(ctx, instance_id, &result)?)?;
     if result.get("status") == Some(&Value::str("inactive")) {
         return Err(Error::msg(format!(
-            "Timer is NOT running; re-arm with gpu expire {instance_id} WHEN."
+            "Timer is NOT running; re-arm with gpu expire {instance_id} 2h."
         )));
     }
     Ok(())

@@ -4,8 +4,9 @@
 use crate::config::{self, CONTAINER_ENV};
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
+use crate::offers::{offer_number, price_field};
 use crate::process::run;
-use crate::pyfmt::{float_repr, py_float, py_str, type_name};
+use crate::pyfmt::{float_repr, py_str};
 use crate::pyjson::{self, Dict, Value};
 use crate::repos::{resolve_repo, Repo};
 use crate::startup::startup_script;
@@ -64,15 +65,12 @@ pub fn request(offer: &Dict, args: &RequestArgs, cfg: &Dict) -> Result<Vec<Value
     let mode = args.mode;
     let script = startup_script(args.repo, mode, cfg)?;
     let none = Value::Null;
-    let price = if args.interruptible {
-        offer.get("min_bid").unwrap_or(&none)
+    let (key, price) = if args.interruptible {
+        ("min_bid", offer.get("min_bid").unwrap_or(&none))
     } else {
-        offer
-            .get("dph_total")
-            .or_else(|| offer.get("dph"))
-            .unwrap_or(&Value::Int(0))
+        price_field(offer).unwrap_or(("dph_total", &Value::Int(0)))
     };
-    let hourly = py_float(price)?;
+    let hourly = offer_number(key, price)?;
     let disk = match args.disk {
         Some(disk) if disk != 0 => disk.to_string(),
         _ => py_str(config::get(
@@ -114,8 +112,8 @@ pub fn argv(request: &[Value]) -> Result<Vec<String>> {
         .map(|item| match item {
             Value::Str(s) => Ok(s.clone()),
             other => Err(Error::msg(format!(
-                "expected str, bytes or os.PathLike object, not {}",
-                type_name(other)
+                "Request argument must be text, got {}. Check image and repository config.",
+                other.kind()
             ))),
         })
         .collect()

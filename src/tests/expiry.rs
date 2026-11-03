@@ -323,7 +323,7 @@ fn test_timeout_marks_arming_unverified() {
     let ctx = t.ctx().runner(&runner).build();
     let error = manage_expiry(&ctx, "vast-123", "123", "arm", Some(now())).unwrap_err();
     assert!(error.text().contains("unverified"));
-    assert!(error.text().contains("gpu expire ID show"));
+    assert!(error.text().contains("gpu expire 123 show"));
 }
 
 #[test]
@@ -438,7 +438,9 @@ fn test_cli_show_inactive_is_nonzero() {
     );
     let ctx = t.ctx().runner(&runner).clock(&clock).build();
     assert_eq!(main(&ctx, &["expire", "123", "show"]), 1);
-    assert!(err(&ctx).contains("NOT running"));
+    let stderr = err(&ctx);
+    assert!(stderr.contains("NOT running"));
+    assert!(stderr.contains("gpu expire 123 2h"));
 }
 
 #[test]

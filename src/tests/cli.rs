@@ -212,11 +212,8 @@ fn test_non_string_git_identity_is_quoted_like_shlex() {
         ("0", Ok("''")),
         ("false", Ok("''")),
         ("[]", Ok("''")),
-        ("5", Err("expected string or bytes-like object, got 'int'")),
-        (
-            "true",
-            Err("expected string or bytes-like object, got 'bool'"),
-        ),
+        ("5", Err("must be a string, got a number.")),
+        ("true", Err("must be a string, got a boolean.")),
     ];
     for key in ["git_name", "git_email"] {
         let line = if key == "git_name" {
@@ -236,7 +233,11 @@ fn test_non_string_git_identity_is_quoted_like_shlex() {
                         "{key}={value}"
                     );
                 }
-                Err(text) => assert_eq!(result.unwrap_err().text(), *text, "{key}={value}"),
+                Err(text) => assert_eq!(
+                    result.unwrap_err().text(),
+                    format!("Config '{key}' {text}"),
+                    "{key}={value}"
+                ),
             }
         }
     }
@@ -270,7 +271,7 @@ fn test_non_string_image_is_printed_raw_and_never_reaches_vastai() {
     let err = launch(&ctx, &args, &cfg, None).unwrap_err();
     assert_eq!(
         err.text(),
-        "expected str, bytes or os.PathLike object, not NoneType"
+        "Request argument must be text, got null. Check image and repository config."
     );
     assert!(runner.argvs().iter().all(|argv| argv[1] != "create"));
 }
@@ -407,7 +408,7 @@ fn test_ls_table_and_json_output() {
     let empty = FakeRunner::new(|_| ok("[]"));
     let ctx = t.ctx().runner(&empty).build();
     assert_eq!(main(&ctx, &["ls"]), 0);
-    assert_eq!(out(&ctx).trim(), "No instances.");
+    assert_eq!(out(&ctx).trim(), "No instances. Launch one: gpu up");
 }
 
 #[test]
@@ -466,7 +467,7 @@ fn test_gpu_default_hint_only_appears_when_recent_pick_exists() {
     assert!(
         output.contains("Type a model substring to filter all GPUs, or choose a category.\nGPU: ")
     );
-    assert!(!output.contains("Enter = most recent"));
+    assert!(!output.contains("GPU [Enter ="));
     assert!(output.contains("(1 offer)"));
     crate::history::record_picks(&t.env(), &[("gpu", "H100 SXM")]).unwrap();
     let ctx = t.ctx().input(&[""]).build();
@@ -474,7 +475,7 @@ fn test_gpu_default_hint_only_appears_when_recent_pick_exists() {
         choose_gpu(&ctx, &["H100 SXM".into()], &stats).unwrap(),
         "H100 SXM"
     );
-    assert!(out(&ctx).contains("\nGPU [Enter = most recent]: "));
+    assert!(out(&ctx).contains("\nGPU [Enter = H100 SXM]: "));
 }
 
 #[test]
@@ -631,8 +632,7 @@ fn test_up_never_prints_instance_api_key() {
         assert_eq!(status, 0);
         assert!(!captured.contains(FAKE_INSTANCE_KEY));
         if response.starts_with('{') {
-            assert!(captured.contains("Created instance 31337"));
-            assert!(captured.contains("gpu ssh 31337"));
+            assert!(captured.ends_with("Created instance 31337.\nConnect: gpu ssh 31337 --exec\n"));
         } else {
             assert!(captured.contains("gpu ls"));
         }

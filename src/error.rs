@@ -23,7 +23,7 @@ impl Error {
 
     /// Python's `KeyError` text for a missing key.
     pub fn key(key: &str) -> Error {
-        Error::Msg(repr_str(key))
+        Error::Msg(format!("Required field missing: {}.", repr_str(key)))
     }
 
     /// Message text for handled errors (empty for the other kinds).

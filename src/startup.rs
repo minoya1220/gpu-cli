@@ -6,6 +6,16 @@ use crate::pyfmt::{py_str, shell_quote, shell_quote_value};
 use crate::pyjson::Dict;
 use crate::repos::{resolve_repo, Repo};
 
+fn git_identity(cfg: &Dict, key: &str) -> Result<String> {
+    let value = config::get(cfg, key)?;
+    shell_quote_value(value).map_err(|_| {
+        Error::msg(format!(
+            "Config '{key}' must be a string, got {}.",
+            value.kind()
+        ))
+    })
+}
+
 pub fn startup_script(repo: &Repo, mode: &str, cfg: &Dict) -> Result<String> {
     if mode != "container" && mode != "vm" {
         return Err(Error::msg(format!("Unsupported mode: {mode}")));
@@ -37,11 +47,11 @@ pub fn startup_script(repo: &Repo, mode: &str, cfg: &Dict) -> Result<String> {
     lines.push("mkdir -p /workspace".into());
     lines.push(format!(
         "git config --global user.name {}",
-        shell_quote_value(config::get(cfg, "git_name")?)?
+        git_identity(cfg, "git_name")?
     ));
     lines.push(format!(
         "git config --global user.email {}",
-        shell_quote_value(config::get(cfg, "git_email")?)?
+        git_identity(cfg, "git_email")?
     ));
     lines.push(r#"if [ -n "${GH_TOKEN:-}" ]; then gh auth setup-git; else echo "WARNING: GH_TOKEN is not set in Vast account environment; private GitHub repos may not clone." >&2; fi"#.into());
     if *repo != Repo::NoRepo {

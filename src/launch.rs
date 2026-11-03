@@ -88,8 +88,8 @@ fn github_names(output: &str) -> Result<Vec<String>> {
         Value::List(items) => items,
         other => {
             return Err(Error::msg(format!(
-                "'{}' object is not iterable",
-                crate::pyfmt::type_name(&other)
+                "GitHub returned {}; expected a repository list. Check: gh auth status",
+                other.kind()
             )))
         }
     };
@@ -101,8 +101,8 @@ fn github_names(output: &str) -> Result<Vec<String>> {
                 .map(py_str)
                 .ok_or_else(|| Error::key("name")),
             other => Err(Error::msg(format!(
-                "{} indices must be integers or slices, not str",
-                crate::pyfmt::type_name(other)
+                "GitHub returned a repository entry that is {}; expected an object. Check: gh auth status",
+                other.kind()
             ))),
         })
         .collect()
@@ -280,7 +280,7 @@ pub fn created_summary(output: &str) -> Result<String> {
         Some(instance) => {
             let instance = py_str(instance);
             Ok(format!(
-                "Created instance {instance}. Next: `gpu ls` or `gpu ssh {instance}`."
+                "Created instance {instance}.\nConnect: gpu ssh {instance} --exec"
             ))
         }
     }
@@ -381,9 +381,14 @@ pub fn launch(ctx: &Ctx, args: &UpArgs, cfg: &Dict, deadline: Option<Timestamp>)
         };
         match expire_instance(ctx, instance_id, "arm", deadline) {
             Err(Error::Msg(text)) => {
+                let next = if text.contains(&format!("gpu expire {instance_id} ")) {
+                    format!("Or stop billing: gpu down {instance_id}.")
+                } else {
+                    format!("Run gpu expire {instance_id} show or gpu down {instance_id}.")
+                };
                 return Err(Error::msg(format!(
-                    "Instance {instance_id} created but expiry NOT verified; billing continues. Run gpu expire {instance_id} show or gpu down {instance_id}. {text}"
-                )))
+                    "Instance {instance_id} created but expiry NOT verified; billing continues. {text}\n{next}"
+                )));
             }
             Err(other) => return Err(other),
             Ok(()) => {}

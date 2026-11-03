@@ -382,7 +382,10 @@ fn parse_hms(s: &[u8], start: usize, end: usize) -> Option<([i64; 4], bool)> {
 }
 
 fn invalid_iso(text: &str) -> String {
-    format!("Invalid isoformat string: {}", crate::pyfmt::repr_str(text))
+    format!(
+        "Invalid datetime {}. Use YYYY-MM-DDTHH:MM:SS+HH:MM.",
+        crate::pyfmt::repr_str(text)
+    )
 }
 
 /// `datetime.fromisoformat` as in CPython 3.11+.
@@ -423,7 +426,9 @@ pub fn fromisoformat(text: &str) -> std::result::Result<IsoDateTime, String> {
             let micros =
                 (tz_values[0] * 3600 + tz_values[1] * 60 + tz_values[2]) * 1_000_000 + tz_values[3];
             if micros >= 86_400_000_000 {
-                return Err("offset must be a timedelta strictly between -timedelta(hours=24) and timedelta(hours=24).".into());
+                return Err(
+                    "UTC offset must be between -24 and +24 hours, excluding both limits.".into(),
+                );
             }
             if micros % 1_000_000 != 0 {
                 return Err(invalid());
@@ -526,7 +531,7 @@ pub fn manage_expiry(
         match ctx.runner.run(&cmd) {
             Ok(result) => result,
             Err(RunError::TimedOut) => return Err(Error::msg(
-                "Expiry SSH timed out; arming/cancellation is unverified. Run gpu expire ID show.",
+                format!("Expiry SSH timed out; arming/cancellation is unverified. Run gpu expire {instance_id} show."),
             )),
             Err(other) => return Err(Error::msg(other.python_text("ssh"))),
         };
@@ -534,10 +539,10 @@ pub fn manage_expiry(
     let reply = pyjson::loads(&result.stdout).unwrap_or(Value::Dict(Dict::new()));
     let message = |code: &str| {
         match code {
-        "credentials" => "Instance-scoped CONTAINER_ID/CONTAINER_API_KEY missing or mismatched; expiry NOT armed.",
-        "past" => "Deadline passed before SSH was ready; expiry NOT armed.",
-        "verification" => "Timer startup verification failed; new expiry NOT armed (previous deadline unchanged).",
-        _ => "Remote expiry operation failed; check bash, curl, flock and writable ~/.local/state/gpu-expire; run gpu expire ID show.",
+        "credentials" => "Instance-scoped CONTAINER_ID/CONTAINER_API_KEY missing or mismatched; expiry NOT armed.".to_string(),
+        "past" => format!("Deadline passed before SSH was ready; expiry NOT armed. Run gpu expire {instance_id} 2h."),
+        "verification" => format!("Timer startup verification failed; new expiry NOT armed (previous deadline unchanged). Run gpu expire {instance_id} show."),
+        _ => format!("Remote expiry operation failed; check bash, curl, flock and writable ~/.local/state/gpu-expire; run gpu expire {instance_id} show."),
     }
     };
     let error = reply.get("error").filter(|e| crate::pyfmt::truthy(e));
@@ -553,9 +558,9 @@ pub fn manage_expiry(
         status,
         "armed" | "retrying" | "inactive" | "none" | "cancelled" | "destroy-request-accepted"
     ) {
-        return Err(Error::msg(
-            "Invalid expiry response; completion unverified. Run gpu expire ID show.",
-        ));
+        return Err(Error::msg(format!(
+            "Invalid expiry response; completion unverified. Run gpu expire {instance_id} show."
+        )));
     }
     if action == "arm" && status != "armed" {
         return Err(Error::msg(message("verification")));
@@ -586,11 +591,15 @@ pub fn expiry_summary(ctx: &Ctx, instance_id: &str, reply: &Dict) -> Result<Stri
             "Instance {instance_id}: no auto-destroy deadline{suffix}"
         ));
     }
-    let seconds = py_float(
-        reply
-            .get("deadline")
-            .ok_or_else(|| Error::key("deadline"))?,
-    )?;
+    let deadline = reply
+        .get("deadline")
+        .ok_or_else(|| Error::key("deadline"))?;
+    let seconds = py_float(deadline).map_err(|_| {
+        Error::msg(format!(
+            "Expiry deadline must be a number, got {}. Run gpu expire {instance_id} show.",
+            deadline.kind()
+        ))
+    })?;
     let micros = (seconds * 1e6).round_ties_even();
     let deadline = Timestamp::from_microsecond(micros as i64)
         .map_err(|_| Error::msg("year is out of range"))?;

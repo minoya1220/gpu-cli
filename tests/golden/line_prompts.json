@@ -12,7 +12,7 @@
    ],
    "history": null,
    "result": "b",
-   "stdout": "Repository (page 1/1)\n1. a\n2. b\nSelect number, text to filter, n/p page, Enter default: "
+   "stdout": "Repository (page 1/1)\n1. a\n2. b\nSelect number, text to filter, n/p page, Enter = a: "
   },
   {
    "options": [
@@ -33,7 +33,7 @@
     ]
    },
    "result": "b",
-   "stdout": "Recent/frequent:\n  1. a\n  2. b\nRepository (page 1/1)\n1. a\n2. b\nSelect number, text to filter, n/p page, Enter default: "
+   "stdout": "Recent/frequent:\n  1. a\n  2. b\nRepository (page 1/1)\n1. a\n2. b\nSelect number, text to filter, n/p page, Enter = b: "
   },
   {
    "options": [
@@ -80,7 +80,7 @@
    ],
    "history": null,
    "result": "GPU 2",
-   "stdout": "GPU (page 1/3)\n1. GPU 0\n2. GPU 1\n3. GPU 2\n4. GPU 3\n5. GPU 4\n6. GPU 5\n7. GPU 6\n8. GPU 7\n9. GPU 8\n10. GPU 9\n11. GPU 10\n12. GPU 11\nSelect number, text to filter, n/p page, Enter default: GPU (page 2/3)\n1. GPU 12\n2. GPU 13\n3. GPU 14\n4. GPU 15\n5. GPU 16\n6. GPU 17\n7. GPU 18\n8. GPU 19\n9. GPU 20\n10. GPU 21\n11. GPU 22\n12. GPU 23\nSelect number, text to filter, n/p page, Enter default: GPU (page 3/3)\n1. GPU 24\n2. GPU 25\n3. GPU 26\n4. GPU 27\n5. GPU 28\n6. GPU 29\nSelect number, text to filter, n/p page, Enter default: GPU (page 1/1) filter='n'\nSelect number, text to filter, n/p page: GPU (page 1/3) filter='p'\n1. GPU 0\n2. GPU 1\n3. GPU 2\n4. GPU 3\n5. GPU 4\n6. GPU 5\n7. GPU 6\n8. GPU 7\n9. GPU 8\n10. GPU 9\n11. GPU 10\n12. GPU 11\nSelect number, text to filter, n/p page, Enter default: GPU (page 1/1) filter='GPU 2'\n1. GPU 2\n2. GPU 20\n3. GPU 21\n4. GPU 22\n5. GPU 23\n6. GPU 24\n7. GPU 25\n8. GPU 26\n9. GPU 27\n10. GPU 28\n11. GPU 29\nSelect number, text to filter, n/p page, Enter default: "
+   "stdout": "GPU (page 1/3)\n1. GPU 0\n2. GPU 1\n3. GPU 2\n4. GPU 3\n5. GPU 4\n6. GPU 5\n7. GPU 6\n8. GPU 7\n9. GPU 8\n10. GPU 9\n11. GPU 10\n12. GPU 11\nSelect number, text to filter, n/p page, Enter = GPU 0: GPU (page 2/3)\n1. GPU 12\n2. GPU 13\n3. GPU 14\n4. GPU 15\n5. GPU 16\n6. GPU 17\n7. GPU 18\n8. GPU 19\n9. GPU 20\n10. GPU 21\n11. GPU 22\n12. GPU 23\nSelect number, text to filter, n/p page, Enter = GPU 0: GPU (page 3/3)\n1. GPU 24\n2. GPU 25\n3. GPU 26\n4. GPU 27\n5. GPU 28\n6. GPU 29\nSelect number, text to filter, n/p page, Enter = GPU 0: GPU (page 1/1) filter='n'\nSelect number, text to filter, n/p page: GPU (page 1/3) filter='p'\n1. GPU 0\n2. GPU 1\n3. GPU 2\n4. GPU 3\n5. GPU 4\n6. GPU 5\n7. GPU 6\n8. GPU 7\n9. GPU 8\n10. GPU 9\n11. GPU 10\n12. GPU 11\nSelect number, text to filter, n/p page, Enter = GPU 0: GPU (page 1/1) filter='GPU 2'\n1. GPU 2\n2. GPU 20\n3. GPU 21\n4. GPU 22\n5. GPU 23\n6. GPU 24\n7. GPU 25\n8. GPU 26\n9. GPU 27\n10. GPU 28\n11. GPU 29\nSelect number, text to filter, n/p page, Enter = GPU 2: "
   },
   {
    "options": [
@@ -128,7 +128,7 @@
    ],
    "history": null,
    "result": "GPU 1",
-   "stdout": "GPU (page 1/3)\n1. GPU 0\n2. GPU 1\n3. GPU 2\n4. GPU 3\n5. GPU 4\n6. GPU 5\n7. GPU 6\n8. GPU 7\n9. GPU 8\n10. GPU 9\n11. GPU 10\n12. GPU 11\nSelect number, text to filter, n/p page, Enter default: GPU (page 1/1) filter='GPU 1'\n1. GPU 1\n2. GPU 10\n3. GPU 11\n4. GPU 12\n5. GPU 13\n6. GPU 14\n7. GPU 15\n8. GPU 16\n9. GPU 17\n10. GPU 18\n11. GPU 19\nSelect number, text to filter, n/p page, Enter default: "
+   "stdout": "GPU (page 1/3)\n1. GPU 0\n2. GPU 1\n3. GPU 2\n4. GPU 3\n5. GPU 4\n6. GPU 5\n7. GPU 6\n8. GPU 7\n9. GPU 8\n10. GPU 9\n11. GPU 10\n12. GPU 11\nSelect number, text to filter, n/p page, Enter = GPU 0: GPU (page 1/1) filter='GPU 1'\n1. GPU 1\n2. GPU 10\n3. GPU 11\n4. GPU 12\n5. GPU 13\n6. GPU 14\n7. GPU 15\n8. GPU 16\n9. GPU 17\n10. GPU 18\n11. GPU 19\nSelect number, text to filter, n/p page, Enter = GPU 1: "
   },
   {
    "options": [
@@ -151,7 +151,7 @@
     ]
    },
    "result": "three",
-   "stdout": "Recent/frequent:\n  1. three\n  2. one\nMode (page 1/1)\n1. one\n2. two\n3. three\nSelect number, text to filter, n/p page, Enter default: Mode (page 1/1) filter='T'\n1. two\n2. three\nSelect number, text to filter, n/p page, Enter default: "
+   "stdout": "Recent/frequent:\n  1. three\n  2. one\nMode (page 1/1)\n1. one\n2. two\n3. three\nSelect number, text to filter, n/p page, Enter = three: Mode (page 1/1) filter='T'\n1. two\n2. three\nSelect number, text to filter, n/p page, Enter = three: "
   },
   {
    "options": [
@@ -167,8 +167,8 @@
    "history": {
     "mode": "notalist"
    },
-   "error": "Input unavailable while choosing mode; pass the corresponding flag",
-   "stdout": "Mode (page 1/1)\n1. one\n2. two\nSelect number, text to filter, n/p page, Enter default: Mode (page 1/1) filter='zzz'\nSelect number, text to filter, n/p page: No default in this filter; choose a listed number.\nMode (page 1/1) filter='zzz'\nSelect number, text to filter, n/p page: "
+   "error": "Input ended at Mode. Pass --mode to choose without a prompt.",
+   "stdout": "Mode (page 1/1)\n1. one\n2. two\nSelect number, text to filter, n/p page, Enter = one: Mode (page 1/1) filter='zzz'\nSelect number, text to filter, n/p page: No default in this filter; choose a listed number.\nMode (page 1/1) filter='zzz'\nSelect number, text to filter, n/p page: "
   },
   {
    "options": [
@@ -181,8 +181,8 @@
     "N"
    ],
    "history": null,
-   "error": "Input unavailable while choosing offer; pass the corresponding flag",
-   "stdout": "Offer (page 1/1)\n1. alpha\n2. beta\nSelect number, text to filter, n/p page, Enter default: Offer (page 1/1) filter='N'\nSelect number, text to filter, n/p page: "
+   "error": "Input ended at Offer. Pass --offer to choose without a prompt.",
+   "stdout": "Offer (page 1/1)\n1. alpha\n2. beta\nSelect number, text to filter, n/p page, Enter = alpha: Offer (page 1/1) filter='N'\nSelect number, text to filter, n/p page: "
   },
   {
    "options": [
@@ -198,7 +198,7 @@
    ],
    "history": null,
    "result": "alpha",
-   "stdout": "Offer (page 1/1)\n1. alpha\n2. beta\nSelect number, text to filter, n/p page, Enter default: Choose a listed number, filter text, n, or p.\nOffer (page 1/1)\n1. alpha\n2. beta\nSelect number, text to filter, n/p page, Enter default: Choose a listed number, filter text, n, or p.\nOffer (page 1/1)\n1. alpha\n2. beta\nSelect number, text to filter, n/p page, Enter default: "
+   "stdout": "Offer (page 1/1)\n1. alpha\n2. beta\nSelect number, text to filter, n/p page, Enter = alpha: Choose a listed number, filter text, n, or p.\nOffer (page 1/1)\n1. alpha\n2. beta\nSelect number, text to filter, n/p page, Enter = alpha: Choose a listed number, filter text, n, or p.\nOffer (page 1/1)\n1. alpha\n2. beta\nSelect number, text to filter, n/p page, Enter = alpha: "
   },
   {
    "options": [],
@@ -218,8 +218,8 @@
    "step": null,
    "answers": [],
    "history": null,
-   "error": "Input unavailable while choosing mode; pass the corresponding flag",
-   "stdout": "Mode (page 1/1)\n1. x\n2. y\nSelect number, text to filter, n/p page, Enter default: "
+   "error": "Input ended at Mode. Pass --mode to choose without a prompt.",
+   "stdout": "Mode (page 1/1)\n1. x\n2. y\nSelect number, text to filter, n/p page, Enter = x: "
   },
   {
    "options": [
@@ -233,8 +233,8 @@
     "1"
    ],
    "history": null,
-   "error": "Input unavailable while choosing mode; pass the corresponding flag",
-   "stdout": "Mode (page 1/1)\n1. x\n2. y\nSelect number, text to filter, n/p page, Enter default: Mode (page 1/1) filter=\"ab'c\"\nSelect number, text to filter, n/p page: Choose a listed number, filter text, n, or p.\nMode (page 1/1) filter=\"ab'c\"\nSelect number, text to filter, n/p page: "
+   "error": "Input ended at Mode. Pass --mode to choose without a prompt.",
+   "stdout": "Mode (page 1/1)\n1. x\n2. y\nSelect number, text to filter, n/p page, Enter = x: Mode (page 1/1) filter=\"ab'c\"\nSelect number, text to filter, n/p page: Choose a listed number, filter text, n, or p.\nMode (page 1/1) filter=\"ab'c\"\nSelect number, text to filter, n/p page: "
   }
  ],
  "choose_gpu": {
@@ -270,7 +270,7 @@
     ],
     "history": null,
     "result": "B200",
-    "stdout": "1. Datacenter Blackwell/Hopper (2 models, from $1.735/hr)\n2. Datacenter Ampere/Ada/older (2 models)\n3. Consumer RTX 40 series (1 model, from $0.300/hr)\n4. Consumer RTX 30 and older (1 model)\n5. Other (1 model)\nType a model substring to filter all GPUs, or choose a category.\nGPU: Datacenter Blackwell/Hopper (page 1/1)\n1. B200  $1.735/hr (1 offer)\n2. H100 SXM  $2.000/hr (3 offers)\n3. H100 PCIE\nSelect number, text to filter, n/p page, Enter default: "
+    "stdout": "1. Datacenter Blackwell/Hopper (2 models, from $1.735/hr)\n2. Datacenter Ampere/Ada/older (2 models)\n3. Consumer RTX 40 series (1 model, from $0.300/hr)\n4. Consumer RTX 30 and older (1 model)\n5. Other (1 model)\nType a model substring to filter all GPUs, or choose a category.\nGPU: Datacenter Blackwell/Hopper (page 1/1)\n1. B200  $1.735/hr (1 offer)\n2. H100 SXM  $2.000/hr (3 offers)\n3. H100 PCIE\nSelect number, text to filter, n/p page, Enter = B200  $1.735/hr (1 offer): "
    },
    {
     "answers": [
@@ -280,7 +280,7 @@
     ],
     "history": null,
     "result": "H100 PCIE",
-    "stdout": "1. Datacenter Blackwell/Hopper (2 models, from $1.735/hr)\n2. Datacenter Ampere/Ada/older (2 models)\n3. Consumer RTX 40 series (1 model, from $0.300/hr)\n4. Consumer RTX 30 and older (1 model)\n5. Other (1 model)\nType a model substring to filter all GPUs, or choose a category.\nGPU: Choose a listed category or type a matching model substring.\n1. Datacenter Blackwell/Hopper (2 models, from $1.735/hr)\n2. Datacenter Ampere/Ada/older (2 models)\n3. Consumer RTX 40 series (1 model, from $0.300/hr)\n4. Consumer RTX 30 and older (1 model)\n5. Other (1 model)\nType a model substring to filter all GPUs, or choose a category.\nGPU: GPU model filter (page 1/1)\n1. H100 SXM  $2.000/hr (3 offers)\n2. H100 PCIE\nSelect number, text to filter, n/p page, Enter default: "
+    "stdout": "1. Datacenter Blackwell/Hopper (2 models, from $1.735/hr)\n2. Datacenter Ampere/Ada/older (2 models)\n3. Consumer RTX 40 series (1 model, from $0.300/hr)\n4. Consumer RTX 30 and older (1 model)\n5. Other (1 model)\nType a model substring to filter all GPUs, or choose a category.\nGPU: Choose a listed category or type a matching model substring.\n1. Datacenter Blackwell/Hopper (2 models, from $1.735/hr)\n2. Datacenter Ampere/Ada/older (2 models)\n3. Consumer RTX 40 series (1 model, from $0.300/hr)\n4. Consumer RTX 30 and older (1 model)\n5. Other (1 model)\nType a model substring to filter all GPUs, or choose a category.\nGPU: GPU model filter (page 1/1)\n1. H100 SXM  $2.000/hr (3 offers)\n2. H100 PCIE\nSelect number, text to filter, n/p page, Enter = H100 SXM  $2.000/hr (3 offers): "
    },
    {
     "answers": [
@@ -294,7 +294,7 @@
      ]
     },
     "result": "RTX 4090",
-    "stdout": "Recent/frequent GPU models:\n1. RTX 4090  $0.300/hr (12 offers)\n2. B200  $1.735/hr (1 offer)\n3. Datacenter Blackwell/Hopper (2 models, from $1.735/hr)\n4. Datacenter Ampere/Ada/older (2 models)\n5. Consumer RTX 40 series (1 model, from $0.300/hr)\n6. Consumer RTX 30 and older (1 model)\n7. Other (1 model)\nType a model substring to filter all GPUs, or choose a category.\nGPU [Enter = most recent]: "
+    "stdout": "Recent/frequent GPU models:\n1. RTX 4090  $0.300/hr (12 offers)\n2. B200  $1.735/hr (1 offer)\n3. Datacenter Blackwell/Hopper (2 models, from $1.735/hr)\n4. Datacenter Ampere/Ada/older (2 models)\n5. Consumer RTX 40 series (1 model, from $0.300/hr)\n6. Consumer RTX 30 and older (1 model)\n7. Other (1 model)\nType a model substring to filter all GPUs, or choose a category.\nGPU [Enter = RTX 4090]: "
    },
    {
     "answers": [
@@ -308,7 +308,7 @@
      ]
     },
     "result": "B200",
-    "stdout": "Recent/frequent GPU models:\n1. RTX 4090  $0.300/hr (12 offers)\n2. B200  $1.735/hr (1 offer)\n3. Datacenter Blackwell/Hopper (2 models, from $1.735/hr)\n4. Datacenter Ampere/Ada/older (2 models)\n5. Consumer RTX 40 series (1 model, from $0.300/hr)\n6. Consumer RTX 30 and older (1 model)\n7. Other (1 model)\nType a model substring to filter all GPUs, or choose a category.\nGPU [Enter = most recent]: "
+    "stdout": "Recent/frequent GPU models:\n1. RTX 4090  $0.300/hr (12 offers)\n2. B200  $1.735/hr (1 offer)\n3. Datacenter Blackwell/Hopper (2 models, from $1.735/hr)\n4. Datacenter Ampere/Ada/older (2 models)\n5. Consumer RTX 40 series (1 model, from $0.300/hr)\n6. Consumer RTX 30 and older (1 model)\n7. Other (1 model)\nType a model substring to filter all GPUs, or choose a category.\nGPU [Enter = RTX 4090]: "
    },
    {
     "answers": [
@@ -334,7 +334,7 @@
     ],
     "history": null,
     "result": "RTX 4090",
-    "stdout": "1. Datacenter Blackwell/Hopper (2 models, from $1.735/hr)\n2. Datacenter Ampere/Ada/older (2 models)\n3. Consumer RTX 40 series (1 model, from $0.300/hr)\n4. Consumer RTX 30 and older (1 model)\n5. Other (1 model)\nType a model substring to filter all GPUs, or choose a category.\nGPU: Choose a listed category or type a matching model substring.\n1. Datacenter Blackwell/Hopper (2 models, from $1.735/hr)\n2. Datacenter Ampere/Ada/older (2 models)\n3. Consumer RTX 40 series (1 model, from $0.300/hr)\n4. Consumer RTX 30 and older (1 model)\n5. Other (1 model)\nType a model substring to filter all GPUs, or choose a category.\nGPU: GPU model filter (page 1/1)\n1. RTX 4090  $0.300/hr (12 offers)\n2. RTX 3090\nSelect number, text to filter, n/p page, Enter default: "
+    "stdout": "1. Datacenter Blackwell/Hopper (2 models, from $1.735/hr)\n2. Datacenter Ampere/Ada/older (2 models)\n3. Consumer RTX 40 series (1 model, from $0.300/hr)\n4. Consumer RTX 30 and older (1 model)\n5. Other (1 model)\nType a model substring to filter all GPUs, or choose a category.\nGPU: Choose a listed category or type a matching model substring.\n1. Datacenter Blackwell/Hopper (2 models, from $1.735/hr)\n2. Datacenter Ampere/Ada/older (2 models)\n3. Consumer RTX 40 series (1 model, from $0.300/hr)\n4. Consumer RTX 30 and older (1 model)\n5. Other (1 model)\nType a model substring to filter all GPUs, or choose a category.\nGPU: GPU model filter (page 1/1)\n1. RTX 4090  $0.300/hr (12 offers)\n2. RTX 3090\nSelect number, text to filter, n/p page, Enter = RTX 4090  $0.300/hr (12 offers): "
    },
    {
     "answers": [
@@ -344,7 +344,7 @@
     ],
     "history": null,
     "result": "H100 SXM",
-    "stdout": "1. Datacenter Blackwell/Hopper (2 models, from $1.735/hr)\n2. Datacenter Ampere/Ada/older (2 models)\n3. Consumer RTX 40 series (1 model, from $0.300/hr)\n4. Consumer RTX 30 and older (1 model)\n5. Other (1 model)\nType a model substring to filter all GPUs, or choose a category.\nGPU: Consumer RTX 40 series (page 1/1)\n1. RTX 4090  $0.300/hr (12 offers)\nSelect number, text to filter, n/p page, Enter default: GPU model filter (page 1/1)\n1. H100 SXM  $2.000/hr (3 offers)\n2. H100 PCIE\nSelect number, text to filter, n/p page, Enter default: "
+    "stdout": "1. Datacenter Blackwell/Hopper (2 models, from $1.735/hr)\n2. Datacenter Ampere/Ada/older (2 models)\n3. Consumer RTX 40 series (1 model, from $0.300/hr)\n4. Consumer RTX 30 and older (1 model)\n5. Other (1 model)\nType a model substring to filter all GPUs, or choose a category.\nGPU: Consumer RTX 40 series (page 1/1)\n1. RTX 4090  $0.300/hr (12 offers)\nSelect number, text to filter, n/p page, Enter = RTX 4090  $0.300/hr (12 offers): GPU model filter (page 1/1)\n1. H100 SXM  $2.000/hr (3 offers)\n2. H100 PCIE\nSelect number, text to filter, n/p page, Enter = H100 SXM  $2.000/hr (3 offers): "
    },
    {
     "answers": [
@@ -354,12 +354,12 @@
     ],
     "history": null,
     "result": "B200",
-    "stdout": "1. Datacenter Blackwell/Hopper (2 models, from $1.735/hr)\n2. Datacenter Ampere/Ada/older (2 models)\n3. Consumer RTX 40 series (1 model, from $0.300/hr)\n4. Consumer RTX 30 and older (1 model)\n5. Other (1 model)\nType a model substring to filter all GPUs, or choose a category.\nGPU: Consumer RTX 40 series (page 1/1)\n1. RTX 4090  $0.300/hr (12 offers)\nSelect number, text to filter, n/p page, Enter default: No GPU models match that filter.\nConsumer RTX 40 series (page 1/1)\n1. RTX 4090  $0.300/hr (12 offers)\nSelect number, text to filter, n/p page, Enter default: "
+    "stdout": "1. Datacenter Blackwell/Hopper (2 models, from $1.735/hr)\n2. Datacenter Ampere/Ada/older (2 models)\n3. Consumer RTX 40 series (1 model, from $0.300/hr)\n4. Consumer RTX 30 and older (1 model)\n5. Other (1 model)\nType a model substring to filter all GPUs, or choose a category.\nGPU: Consumer RTX 40 series (page 1/1)\n1. RTX 4090  $0.300/hr (12 offers)\nSelect number, text to filter, n/p page, Enter = RTX 4090  $0.300/hr (12 offers): No GPU models match that filter.\nConsumer RTX 40 series (page 1/1)\n1. RTX 4090  $0.300/hr (12 offers)\nSelect number, text to filter, n/p page, Enter = RTX 4090  $0.300/hr (12 offers): "
    },
    {
     "answers": [],
     "history": null,
-    "error": "Input unavailable while choosing GPU model; pass --gpu",
+    "error": "Input ended at GPU selection. Pass --gpu 'RTX 4090' to choose without a prompt.",
     "stdout": "1. Datacenter Blackwell/Hopper (2 models, from $1.735/hr)\n2. Datacenter Ampere/Ada/older (2 models)\n3. Consumer RTX 40 series (1 model, from $0.300/hr)\n4. Consumer RTX 30 and older (1 model)\n5. Other (1 model)\nType a model substring to filter all GPUs, or choose a category.\nGPU: "
    },
    {
@@ -368,8 +368,8 @@
      "x"
     ],
     "history": null,
-    "error": "Input unavailable while choosing gpu model filter; pass the corresponding flag",
-    "stdout": "1. Datacenter Blackwell/Hopper (2 models, from $1.735/hr)\n2. Datacenter Ampere/Ada/older (2 models)\n3. Consumer RTX 40 series (1 model, from $0.300/hr)\n4. Consumer RTX 30 and older (1 model)\n5. Other (1 model)\nType a model substring to filter all GPUs, or choose a category.\nGPU: Datacenter Ampere/Ada/older (page 1/1)\n1. A100 PCIE\n2. Tesla T4\nSelect number, text to filter, n/p page, Enter default: GPU model filter (page 1/1)\n1. H100 SXM  $2.000/hr (3 offers)\n2. RTX 4090  $0.300/hr (12 offers)\n3. RTX 3090\nSelect number, text to filter, n/p page, Enter default: "
+    "error": "Input ended at GPU model filter. Pass --gpu to choose without a prompt.",
+    "stdout": "1. Datacenter Blackwell/Hopper (2 models, from $1.735/hr)\n2. Datacenter Ampere/Ada/older (2 models)\n3. Consumer RTX 40 series (1 model, from $0.300/hr)\n4. Consumer RTX 30 and older (1 model)\n5. Other (1 model)\nType a model substring to filter all GPUs, or choose a category.\nGPU: Datacenter Ampere/Ada/older (page 1/1)\n1. A100 PCIE\n2. Tesla T4\nSelect number, text to filter, n/p page, Enter = A100 PCIE: GPU model filter (page 1/1)\n1. H100 SXM  $2.000/hr (3 offers)\n2. RTX 4090  $0.300/hr (12 offers)\n3. RTX 3090\nSelect number, text to filter, n/p page, Enter = H100 SXM  $2.000/hr (3 offers): "
    }
   ]
  }

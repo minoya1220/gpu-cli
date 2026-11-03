@@ -199,7 +199,10 @@ fn test_nvim_config_type_only_matters_for_nvim() {
     let config = Value::Int(5);
     edit_instance(&ctx, "12", Some("code"), Some(&config), 120.0).unwrap();
     let error = edit_instance(&ctx, "12", Some("nvim"), Some(&config), 120.0).unwrap_err();
-    assert_eq!(error.text(), "'int' object has no attribute 'startswith'");
+    assert_eq!(
+        error.text(),
+        "Config 'editor.nvim_config' must be a git URL or directory path string."
+    );
     assert!(!runner
         .calls()
         .iter()
@@ -212,7 +215,7 @@ fn test_no_history_noninteractive() {
     let t = TestEnv::new();
     let ctx = t.ctx().interactive(false).build();
     let error = edit_instance(&ctx, "12", None, None, 120.0).unwrap_err();
-    assert!(error.text().contains("specify --editor"));
+    assert!(error.text().contains("gpu edit 12 --editor code"));
 }
 
 #[test]

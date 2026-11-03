@@ -107,16 +107,22 @@ pub fn choose<T: Clone + PartialEq>(
         });
         let default = latest.or_else(|| filtered.first().copied());
         let usable_default = default.filter(|d| filter.is_empty() || filtered.contains(d));
-        let hint = if usable_default.is_some() {
-            ", Enter default"
-        } else {
-            ""
+        let hint = match usable_default {
+            Some(index) => format!(", Enter = {}", labels[index]),
+            None => String::new(),
         };
         let prompt_text = format!("Select number, text to filter, n/p page{hint}: ");
         let answer = ctx.console.input(&prompt_text)?.ok_or_else(|| {
+            let flag = match step {
+                Some("gpu") => "--gpu",
+                Some("mode") => "--mode",
+                _ if prompt.to_lowercase().contains("repository") => "--repo or --no-repo",
+                _ if prompt.to_lowercase().contains("offer") => "--offer",
+                _ if prompt.to_lowercase().contains("mode") => "--mode",
+                _ => "the corresponding flag",
+            };
             Error::msg(format!(
-                "Input unavailable while choosing {}; pass the corresponding flag",
-                prompt.to_lowercase()
+                "Input ended at {prompt}. Pass {flag} to choose without a prompt."
             ))
         })?;
         let answer = answer.trim();
@@ -197,14 +203,15 @@ pub fn choose_gpu(ctx: &Ctx, models: &[String], stats: &Stats) -> Result<String>
         ctx.println("Type a model substring to filter all GPUs, or choose a category.")?;
         let has_default = history.first().is_some_and(|h| models.contains(h));
         let prompt = if has_default {
-            "GPU [Enter = most recent]: "
+            format!("GPU [Enter = {}]: ", history[0])
         } else {
-            "GPU: "
+            "GPU: ".into()
         };
-        let answer = ctx
-            .console
-            .input(prompt)?
-            .ok_or_else(|| Error::msg("Input unavailable while choosing GPU model; pass --gpu"))?;
+        let answer = ctx.console.input(&prompt)?.ok_or_else(|| {
+            Error::msg(
+                "Input ended at GPU selection. Pass --gpu 'RTX 4090' to choose without a prompt.",
+            )
+        })?;
         let answer = answer.trim();
         if answer.is_empty() && has_default {
             return Ok(history[0].clone());

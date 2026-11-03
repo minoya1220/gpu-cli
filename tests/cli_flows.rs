@@ -37,7 +37,7 @@ fn test_ctrl_c_at_a_line_prompt_cancels_without_traceback() {
         }
     });
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !String::from_utf8_lossy(&stdout.lock().unwrap()).contains("Enter default: ") {
+    while !String::from_utf8_lossy(&stdout.lock().unwrap()).contains("Enter = No repository: ") {
         assert!(
             Instant::now() < deadline,
             "no prompt: {}",
@@ -134,6 +134,47 @@ fn handled_errors_are_redacted_and_exit_1() {
         String::from_utf8_lossy(&output.stderr),
         "gpu: failure token=REDACTED\n"
     );
+}
+
+#[test]
+fn launch_names_one_connection_command() {
+    let sandbox = Sandbox::new();
+    sandbox.stub("vastai", r#"#!/bin/sh
+case "$1 $2" in
+    'search offers')
+        echo '[{"id": 100, "gpu_name": "RTX 4090", "num_gpus": 1, "dph_total": 0.3, "reliability": 0.99, "geolocation": "Test, XX", "verification": "verified"}]'
+        ;;
+    'create instance')
+        echo '{"success": true, "new_contract": 123, "instance_api_key": "secret-instance-key"}'
+        ;;
+    *) exit 97 ;;
+esac
+"#);
+    let output = run(
+        &sandbox,
+        &[
+            "up",
+            "--no-repo",
+            "--mode",
+            "container",
+            "--gpu",
+            "RTX 4090",
+            "--yes",
+        ],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.ends_with("Created instance 123.\nConnect: gpu ssh 123 --exec\n"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("secret-instance-key"));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("secret-instance-key"));
 }
 
 #[test]

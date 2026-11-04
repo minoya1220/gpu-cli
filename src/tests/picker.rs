@@ -54,6 +54,32 @@ pub fn menu<R: 'static>(
     )
 }
 
+#[test]
+fn selection_notice_stays_visible_until_back_without_changing_hidden_choices() {
+    let first = menu("Hardware", &["TPU", "GPU"], |value| {
+        if value == "TPU" {
+            Next::Notice("Set up Google Cloud. Press back to return.".into())
+        } else {
+            Next::Done(value)
+        }
+    });
+    let result = drive(first, |keys| {
+        keys.press_until(ENTER, |s| s.body.join(" ").contains("Set up Google Cloud"));
+        let body = keys.snapshot().body;
+        assert!(keys.snapshot().footer.contains("return to choices"));
+        assert!(!keys.snapshot().footer.contains("select"));
+        for key in [ENTER, DOWN, "x", F2] {
+            keys.press(key);
+            assert_eq!(keys.snapshot().body, body);
+        }
+        keys.press_until(BACK, |s| !s.body.join(" ").contains("Set up Google Cloud"));
+        assert!(keys.snapshot().body[0].contains("TPU"));
+        keys.press(DOWN);
+        keys.press(ENTER);
+    });
+    assert_eq!(result, Outcome::Done("GPU".into()));
+}
+
 type Three = (String, String, String);
 
 /// Three screens; the result records the value chosen on each.

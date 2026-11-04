@@ -44,6 +44,62 @@ fn gcp_dry_run_is_offline_and_outputs_only_json_requests_after_banner() {
 }
 
 #[test]
+fn config_lookup_and_setup_errors_use_xdg_or_dot_config_on_every_platform() {
+    for xdg in [None, Some(""), Some("override")] {
+        let s = Sandbox::new();
+        let path = if xdg == Some("override") {
+            s.root.join("config/gpu/config.json")
+        } else {
+            s.home.join(".config/gpu/config.json")
+        };
+        // A macOS Application Support file must not override the documented
+        // XDG lookup; run the real binary to prove which config is consumed.
+        let mac_path = s.home.join("Library/Application Support/gpu");
+        std::fs::create_dir_all(&mac_path).unwrap();
+        std::fs::write(mac_path.join("config.json"), "not the active config").unwrap();
+        let launch = || {
+            let mut cmd = s.command(&[
+                "up",
+                "--tpu",
+                "v6e-1",
+                "--no-repo",
+                "--expire",
+                "2h",
+                "--dry-run",
+            ]);
+            match xdg {
+                None => {
+                    cmd.env_remove("XDG_CONFIG_HOME");
+                }
+                Some("") => {
+                    cmd.env("XDG_CONFIG_HOME", "");
+                }
+                _ => {}
+            }
+            cmd.stdin(Stdio::null()).output().unwrap()
+        };
+        let missing = launch();
+        assert_eq!(missing.status.code(), Some(1));
+        let error = String::from_utf8_lossy(&missing.stderr);
+        assert!(error.contains("Set up Google Cloud before renting TPUs"));
+        assert!(
+            error.contains(&format!("Config file: {}", path.display())),
+            "{error}"
+        );
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, r#"{"gcp":{"project":"test-project","zone":"us-east5-b","runtime":"v2-alpha-tpuv6e","expiry":{"queue":"gpu-expiry","location":"us-central1","service_account":"reaper@test-project.iam.gserviceaccount.com"}}}"#).unwrap();
+        let configured = launch();
+        assert!(
+            configured.status.success(),
+            "{}",
+            String::from_utf8_lossy(&configured.stderr)
+        );
+        assert!(String::from_utf8_lossy(&configured.stdout).contains("--project=test-project"));
+        assert!(s.calls().is_empty());
+    }
+}
+
+#[test]
 fn gcp_list_and_non_executing_ssh_never_use_vast() {
     let s = configured();
     s.stub("gcloud", r#"#!/bin/sh

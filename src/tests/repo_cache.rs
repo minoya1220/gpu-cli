@@ -18,6 +18,7 @@ pub fn flow(t: &TestEnv, job: Job<Vec<String>>) -> LaunchWizard {
             models: Vec::new(),
             recent_gpus: Vec::new(),
             choose_offer: false,
+            tpu_setup_error: None,
             owner: "minoya1220".into(),
         },
     )

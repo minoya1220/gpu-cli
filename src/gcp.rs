@@ -271,6 +271,23 @@ pub fn list(ctx: &Ctx, settings: &Settings) -> Result<Vec<Dict>> {
     Ok(items)
 }
 
+/// Validate launch configuration locally, before leaving the hardware picker.
+/// This does not call gcloud or verify remote IAM/queue readiness.
+pub fn launch_setup(ctx: &Ctx, cfg: &Dict) -> Result<(Settings, crate::gcp_expiry::Queue)> {
+    let load = || {
+        let settings = Settings::load(cfg)?;
+        let queue = crate::gcp_expiry::Queue::load(&settings)?;
+        Ok((settings, queue))
+    };
+    load().map_err(|error: Error| {
+        Error::msg(format!(
+            "{}\nConfig file: {}",
+            error.text(),
+            crate::config::config_path(&ctx.env).display()
+        ))
+    })
+}
+
 /// Carry the normal wizard's repository and TPU choice into the cloud flow.
 /// Only the mode chosen *in the UI* is dropped: explicit Vast-only flags remain
 /// present so the TPU adapter can reject them rather than silently ignore them.
@@ -316,7 +333,7 @@ pub fn launch_from_picker(
 }
 
 pub fn launch(ctx: &Ctx, flags: &UpFlags, cfg: &Dict, deadline: Option<Timestamp>) -> Result<()> {
-    let settings = Settings::load(cfg)?;
+    let (settings, queue) = launch_setup(ctx, cfg)?;
     if flags.mode.is_some()
         || flags.gpu.is_some()
         || flags.num_gpus != 1
@@ -331,7 +348,6 @@ pub fn launch(ctx: &Ctx, flags: &UpFlags, cfg: &Dict, deadline: Option<Timestamp
             "Vast GPU/offer/disk flags do not apply to TPUs. Next: gpu up --provider gcp --help",
         ));
     }
-    let queue = crate::gcp_expiry::Queue::load(&settings)?;
     let picks = crate::gcp_wizard::choose(ctx, flags, &settings, cfg)?;
     // Ask last, so selection time is not taken from an interactive duration.
     let deadline = match deadline {

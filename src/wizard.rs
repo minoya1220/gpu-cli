@@ -6,7 +6,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::ctx::{Ctx, Env};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::offers::{
     category_label, group_by_category, model_label, offer_rows, OfferSearch, Stats, NO_OFFERS,
 };
@@ -103,6 +103,7 @@ struct State {
     categories: Vec<(String, Vec<String>)>,
     recent_gpus: Vec<String>,
     choose_offer: bool,
+    tpu_setup_error: Option<String>,
     prices: RefCell<HashMap<String, Job<Stats>>>,
 }
 
@@ -122,6 +123,8 @@ pub struct WizardOptions {
     pub models: Vec<String>,
     pub recent_gpus: Vec<String>,
     pub choose_offer: bool,
+    /// Local config preflight only; no cloud calls on a screen transition.
+    pub tpu_setup_error: Option<String>,
     pub owner: String,
 }
 
@@ -148,6 +151,7 @@ impl LaunchWizard {
                 models: options.models,
                 recent_gpus,
                 choose_offer: options.choose_offer,
+                tpu_setup_error: options.tpu_setup_error,
                 prices: RefCell::new(HashMap::new()),
             }),
         }
@@ -156,6 +160,7 @@ impl LaunchWizard {
     pub fn run(&self, ctx: &Ctx, picks: Picks) -> Result<Picks> {
         match self.next(picks) {
             Next::Screen(first) => pick(ctx, first),
+            Next::Notice(message) => Err(Error::msg(message)),
             Next::Done(picks) => Ok(picks),
         }
     }
@@ -422,10 +427,16 @@ impl LaunchWizard {
         let wizard = self.clone();
         let select = move |choice: Choice| match choice {
             Choice::Category(name) => Next::Screen(wizard.category_screen(picks.clone(), name)),
-            Choice::Tpu(tpu) => wizard.next(Picks {
-                tpu: Some(tpu),
-                ..picks.clone()
-            }),
+            Choice::Tpu(tpu) => match &wizard.state.tpu_setup_error {
+                Some(message) => {
+                    let hint = "No TPU created. Press \u{2190} or ` to return; Ctrl-C quits.";
+                    Next::Notice(format!("{message}\n\n{hint}"))
+                }
+                None => wizard.next(Picks {
+                    tpu: Some(tpu),
+                    ..picks.clone()
+                }),
+            },
             Choice::Gpu(gpu) => wizard.next(Picks {
                 gpu: Some(gpu),
                 ..picks.clone()

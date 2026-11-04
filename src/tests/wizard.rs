@@ -88,6 +88,7 @@ fn wizard(
             models: MODELS.map(String::from).to_vec(),
             recent_gpus: recent.iter().map(|s| s.to_string()).collect(),
             choose_offer,
+            tpu_setup_error: None,
             owner: "minoya1220".into(),
         },
     )
@@ -100,6 +101,7 @@ pub fn run(
 ) -> Outcome<Picks> {
     match flow.next(picks) {
         Next::Screen(first) => drive(first, script),
+        Next::Notice(message) => panic!("unexpected initial notice: {message}"),
         Next::Done(picks) => Outcome::Done(picks),
     }
 }
@@ -162,6 +164,7 @@ fn test_repository_shortcuts_full_list_and_global_filter() {
                 models: MODELS.map(String::from).to_vec(),
                 recent_gpus: Vec::new(),
                 choose_offer: false,
+                tpu_setup_error: None,
                 owner: "minoya1220".into(),
             },
         );
@@ -240,6 +243,7 @@ fn test_short_repository_lists_keep_static_digits_and_omit_all() {
                 models: Vec::new(),
                 recent_gpus: Vec::new(),
                 choose_offer: false,
+                tpu_setup_error: None,
                 owner: "minoya1220".into(),
             },
         );

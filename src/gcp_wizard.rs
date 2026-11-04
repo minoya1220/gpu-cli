@@ -165,6 +165,7 @@ pub fn choose(ctx: &Ctx, flags: &UpFlags, settings: &Settings, cfg: &Dict) -> Re
     let selected = if ctx.interactive() {
         match next(ctx.clone(), settings.clone(), selected) {
             Next::Screen(first) => pick(ctx, first)?,
+            Next::Notice(message) => return Err(Error::msg(message)),
             Next::Done(done) => done,
         }
     } else {
@@ -207,6 +208,7 @@ pub fn choose(ctx: &Ctx, flags: &UpFlags, settings: &Settings, cfg: &Dict) -> Re
                 models: Vec::new(),
                 recent_gpus: Vec::new(),
                 choose_offer: false,
+                tpu_setup_error: None,
                 owner: owner.clone(),
             },
         );

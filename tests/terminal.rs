@@ -328,25 +328,48 @@ fn test_new_repository_choices_dry_run_in_terminal() {
 }
 
 #[test]
-fn test_tpu_category_without_config_explains_setup_without_cloud_calls() {
-    let sandbox = Sandbox::new();
-    let mut term = Terminal::start(&sandbox, &["up", "--no-repo", "--dry-run"]);
-    term.wait(on("Mode"));
-    term.press_until("1", on("GPU"));
-    assert!(shows("TPU (Google Cloud)")(&term));
-    term.press_until("tpu", shows("Filter: tpu"));
-    assert!(!shows("No matches")(&term));
-    term.press(ENTER);
-    assert_eq!(term.exit_status(), 1);
-    let output = term.output_text();
-    assert!(
-        output.contains("Set up Google Cloud before renting TPUs"),
-        "{output}"
-    );
-    assert!(output.contains("gpu/config.json"));
-    assert!(output.contains("Next: gpu up --provider gcp --help"));
-    assert_eq!(output.matches("Next:").count(), 1);
-    assert!(sandbox.calls().is_empty());
+fn test_tpu_without_config_keeps_setup_visible_and_returns_to_gpu_choices() {
+    for (repo_key, query) in [("0", "tpu"), ("1", "v5e")] {
+        let sandbox = Sandbox::new();
+        // Match the owner's bare invocation, not --no-repo or a flags-only
+        // dry run. PATH stubs forbid every real lifecycle operation.
+        let mut term = Terminal::start(&sandbox, &["up"]);
+        term.wait(shows("gpu-kernels"));
+        term.press_until(repo_key, on("Mode"));
+        term.press_until("1", on("GPU"));
+        assert!(shows("TPU (Google Cloud)")(&term));
+        term.press_until(query, |t| t.line(1) == format!("Filter: {query}"));
+        term.press_until(ENTER, shows("Set up Google Cloud before renting TPUs"));
+        assert!(term.running(), "setup must remain visible until dismissed");
+        let screen = term.lines().join("\n");
+        assert!(screen.contains("No TPU created."), "{screen}");
+        assert!(
+            screen.contains("Next: gpu up --provider gcp --help"),
+            "{screen}"
+        );
+        let config = sandbox.root.join("config/gpu/config.json");
+        assert!(
+            term.lines()
+                .join("")
+                .contains(&config.display().to_string()),
+            "{screen}"
+        );
+        assert_eq!(screen.matches("Next:").count(), 1);
+        assert!(tools(&sandbox).iter().all(|tool| tool == "gh"));
+        // Dismiss the notice without losing the previous filter/selection.
+        term.press_until(BACK, |t| t.title() == "GPU" && !shows("No TPU created.")(t));
+        assert_eq!(term.line(1), format!("Filter: {query}"));
+        term.press_until(BACK, |t| !t.line(1).starts_with("Filter:"));
+        term.press("4090");
+        term.press_until(ENTER, on("Offer: RTX 4090"));
+        term.wait(shows("id=100"));
+        term.press("\x03");
+        assert_eq!(term.exit_status(), 130);
+        assert!(sandbox
+            .calls()
+            .iter()
+            .all(|call| { call[1..3] == ["repo", "list"] || call[1..3] == ["search", "offers"] }));
+    }
 }
 
 #[test]

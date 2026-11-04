@@ -32,7 +32,7 @@ In the terminal picker:
 
 - Type to filter, use ↑/↓ to move, and Enter or → to select.
 - Press backtick (`) or ← to clear the filter, then go back. On the first screen, press twice to quit. Ctrl-C or Ctrl-D quits from any screen; Esc does nothing.
-- The GPU screen shows at most **three Recent** rows, GPU categories, and **TPU (Google Cloud)**. Type `tpu` to find the TPU category, or `v5e` / `v6e-1` to pick a common TPU type directly. TPU discovery is visible even before Google Cloud is configured; selecting it explains the required setup.
+- The GPU screen shows at most **three Recent** rows, GPU categories, and **TPU (Google Cloud)**. Type `tpu` to find the TPU category, or `v5e` / `v6e-1` to pick a common TPU type directly. TPU discovery is visible even before Google Cloud is configured. Without launch configuration, selecting it keeps a setup message on screen, including the exact config file path; no TPU is created. Press ← or backtick to return to the GPU choices, or Ctrl-C to quit.
 - Press F2 on a GPU screen to load Vast prices. Digits filter GPU/TPU names; on short, unfiltered lists, 1-9 select directly.
 - On the Repository screen, **1–7** select the first seven repos, **8** opens **All repositories...** (when there are more than seven), **9** opens **Clone from URL...**, and **0** selects **No repository** at the bottom. Type to filter across all repos, including those not initially shown.
 - Choose **No repository** or **Clone from URL...** without waiting for GitHub. Paste a URL or `owner/name`, then Enter. Backspace edits; arrows select or go back, not move the text cursor.
@@ -171,7 +171,7 @@ This adapter uses `gcloud compute tpus tpu-vm` (the Cloud TPU v2 API), not Compu
    ```
 
    The launcher also needs TPU create/list/get/update/stop/delete permissions (for example `roles/tpu.admin`), service-account `actAs` for the VM, and the SSH/OS Login permissions required by the project. Existing project owners may already have these. Cloud Tasks' Google-managed service agent must retain `roles/cloudtasks.serviceAgent` so it can mint the reaper's OAuth token. These permissions are **not** verified by merely creating a task; perform the disposable acceptance check below before relying on expiry. Keep the queue dedicated to `gpu`: HTTP target/auth overrides are rejected. Queue pause, deletion, IAM changes and disabled billing/APIs can all defeat expiry.
-3. Merge this into `~/.config/gpu/config.json` (or its XDG location):
+3. Merge this into `~/.config/gpu/config.json` on **both macOS and Linux**, or `$XDG_CONFIG_HOME/gpu/config.json` when `XDG_CONFIG_HOME` is nonempty. macOS does **not** use `~/Library/Application Support/gpu`. The TPU setup message prints the exact path read by the running process:
 
    ```json
    {
@@ -257,7 +257,7 @@ Sources: [TPU node scheduling fields](https://cloud.google.com/tpu/docs/referenc
 
 ## Configuration
 
-Edit `~/.config/gpu/config.json`, or `$XDG_CONFIG_HOME/gpu/config.json`. Only supplied keys override defaults:
+Edit `~/.config/gpu/config.json` on macOS or Linux, or `$XDG_CONFIG_HOME/gpu/config.json` when `XDG_CONFIG_HOME` is nonempty. An unset or empty XDG variable falls back to `$HOME/.config`; no config file is created automatically. Only supplied keys override defaults:
 
 ```json
 {

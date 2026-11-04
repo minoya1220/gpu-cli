@@ -57,10 +57,12 @@ impl PickValue for String {
     }
 }
 
-/// What selecting leads to: another screen, or the flow's result.
+/// What selecting leads to: a screen, an inline notice, or the flow's result.
 #[allow(clippy::large_enum_variant)] // Built once per key press; boxing buys nothing.
 pub enum Next<V, R> {
     Screen(Screen<V, R>),
+    /// Keep the current screen and show an actionable message until dismissed.
+    Notice(String),
     Done(R),
 }
 
@@ -185,6 +187,7 @@ struct View<V, R> {
     filter: String,
     cursor: usize,
     error: String,
+    selection_notice: Option<String>,
 }
 
 impl<V: PickValue, R: 'static> View<V, R> {
@@ -194,6 +197,7 @@ impl<V: PickValue, R: 'static> View<V, R> {
             filter: String::new(),
             cursor: 0,
             error: String::new(),
+            selection_notice: None,
         }
     }
 
@@ -362,6 +366,9 @@ impl<V: PickValue, R: 'static> Core<V, R> {
                 core.stack = vec![View::new(replacement)];
                 core.open(false);
             }
+            Some(Next::Notice(message)) => {
+                core.borrow_mut().view_mut().selection_notice = Some(message)
+            }
             Some(Next::Done(result)) => core.borrow_mut().exit(Outcome::Done(result)),
             None => {}
         }
@@ -374,6 +381,7 @@ impl<V: PickValue, R: 'static> Core<V, R> {
                 self.stack.push(View::new(screen));
                 self.open(false);
             }
+            Next::Notice(message) => self.view_mut().selection_notice = Some(message),
             Next::Done(result) => self.exit(Outcome::Done(result)),
         }
     }
@@ -391,6 +399,13 @@ impl<V: PickValue, R: 'static> Core<V, R> {
         if self.outcome.is_some() {
             return;
         }
+        // A selection notice is modal: don't change hidden choices or let
+        // buffered Enter presses dismiss setup instructions before they are read.
+        if self.view().selection_notice.is_some()
+            && !matches!(key, Key::Left | Key::Char('`') | Key::CtrlC | Key::CtrlD)
+        {
+            return;
+        }
         // Any key but a back key disarms the first-screen quit, including ignored keys.
         let back = matches!(key, Key::Left | Key::Char('`'));
         if !back {
@@ -401,7 +416,9 @@ impl<V: PickValue, R: 'static> Core<V, R> {
             Key::Down => self.move_cursor(1),
             Key::Enter | Key::Right => self.enter(),
             Key::Left | Key::Char('`') => {
-                if !self.view().filter.is_empty() {
+                if self.view().selection_notice.is_some() {
+                    self.view_mut().selection_notice = None;
+                } else if !self.view().filter.is_empty() {
                     self.view_mut().set_filter(String::new());
                 } else if self.stack.len() > 1 {
                     self.stack.pop();
@@ -519,6 +536,9 @@ impl<V: PickValue, R: 'static> Core<V, R> {
                 .map(|l| vec![(style, l.to_string())])
                 .collect()
         };
+        if let Some(message) = &view.selection_notice {
+            return (one(Style::Error, message.clone()), None);
+        }
         if screen.text_input {
             return if view.error.is_empty() {
                 (
@@ -599,6 +619,9 @@ impl<V: PickValue, R: 'static> Core<V, R> {
 
     pub fn footer(&self) -> String {
         let view = self.view();
+        if view.selection_notice.is_some() {
+            return "`/\u{2190} return to choices  Ctrl-C quit".into();
+        }
         let screen = &view.screen;
         let load = screen.load.as_deref();
         let mut hints: Vec<String> = if screen.text_input {

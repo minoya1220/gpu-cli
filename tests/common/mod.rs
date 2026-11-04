@@ -1,7 +1,7 @@
 //! Runs the real `gpu` binary under a temp HOME and XDG directories with
 //! stub executables first on PATH. Every stub logs its argv and fails on an
 //! unexpected call, so a missing fake can never fall through to a real
-//! `vastai`, `gh`, `ssh`, `rsync` or editor installed on the machine.
+//! `vastai`, `gcloud`, `gh`, `ssh`, `rsync` or editor installed on the machine.
 
 #![allow(dead_code)]
 
@@ -76,7 +76,7 @@ impl Sandbox {
         for tool in ["gh", "vastai"] {
             sandbox.stub(tool, FAKE_CLI);
         }
-        for tool in ["ssh", "rsync", "cursor", "code", "zed", "curl"] {
+        for tool in ["ssh", "rsync", "cursor", "code", "zed", "curl", "gcloud"] {
             sandbox.stub(tool, FORBIDDEN);
         }
         sandbox

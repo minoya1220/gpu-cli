@@ -8,7 +8,7 @@ pub const VERSION: &str = "0.1.0";
 #[derive(Parser, Debug)]
 #[command(
     name = "gpu",
-    about = "Launch GPU workspaces on Vast.ai",
+    about = "Launch GPU workspaces on Vast.ai or TPU VMs on Google Cloud",
     disable_version_flag = true,
     infer_long_args = true,
     args_override_self = true
@@ -24,13 +24,16 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    /// Launch a GPU workspace with an optional repository
+    /// Launch a GPU or TPU workspace with an optional repository
     Up(UpFlags),
     /// List rented instances
     Ls {
         /// print raw JSON for scripts
         #[arg(long)]
         json: bool,
+        /// Limit listing to one provider
+        #[arg(long, value_parser = ["vast", "gcp"])]
+        provider: Option<String>,
     },
     /// Print or execute the SSH command
     Ssh {
@@ -57,14 +60,14 @@ pub enum Command {
         #[arg(long)]
         yes: bool,
     },
-    /// Schedule instance-side destruction, show or cancel it
+    /// Schedule destruction, show or cancel it
     #[command(
         override_usage = "gpu expire [ID] WHEN|cancel|show",
         long_about = "Auto-destroy (disk deleted). WHEN: 2h, 1h30m, 18:30, 6:30PM, 6pm, or ISO datetime. Clock times use the next local occurrence; bare numbers are instance IDs.",
         after_help = "Examples: gpu expire 2h; gpu expire 12345678 6:30pm; gpu expire 12345678 cancel; gpu expire show"
     )]
     Expire {
-        /// Optional digits-only ID, then deadline, cancel, or show
+        /// Optional Vast ID or gcp:PROJECT:ZONE:NAME, then deadline, cancel, or show
         #[arg(value_name = "ID/WHEN", num_args = 0..)]
         expiry_args: Vec<String>,
     },
@@ -72,6 +75,24 @@ pub enum Command {
 
 #[derive(clap::Args, Debug)]
 pub struct UpFlags {
+    /// Provider (Vast by default; configured GCP enables the provider picker)
+    #[arg(long, value_parser = ["vast", "gcp"])]
+    pub provider: Option<String>,
+    /// TPU accelerator type, e.g. v5e-1 or v6e-1
+    #[arg(long)]
+    pub tpu: Option<String>,
+    /// Google Cloud zone (overrides gcp.zone)
+    #[arg(long)]
+    pub zone: Option<String>,
+    /// TPU runtime image/version (overrides gcp.runtime)
+    #[arg(long)]
+    pub runtime: Option<String>,
+    /// Rent a Spot TPU instead of on-demand
+    #[arg(long, conflicts_with = "on_demand")]
+    pub spot: bool,
+    /// Rent an on-demand TPU
+    #[arg(long)]
+    pub on_demand: bool,
     /// Clone HTTPS/git@ URL, GitHub owner/name, or a name under configured owner
     #[arg(long, conflicts_with = "no_repo")]
     pub repo: Option<String>,
@@ -108,7 +129,7 @@ pub struct UpFlags {
 
 /// What argument parsing produced.
 pub enum Parsed {
-    Run(Command),
+    Run(Box<Command>),
     /// Print `text` (stdout when `to_stdout`) and exit with `code`.
     Exit {
         code: i32,
@@ -127,7 +148,7 @@ pub fn parse(argv: &[String]) -> Parsed {
         Ok(Cli {
             command: Some(command),
             ..
-        }) => Parsed::Run(command),
+        }) => Parsed::Run(Box::new(command)),
         Ok(Cli { command: None, .. }) => {
             let mut cmd = Cli::command();
             let err = cmd.error(

@@ -5,6 +5,7 @@ mod cli;
 mod editors;
 mod expiry;
 mod expiry_launch;
+mod gcp;
 mod instances;
 mod lifecycle;
 mod picker;

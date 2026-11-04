@@ -55,7 +55,10 @@ pub fn parse_expire_arguments(
     values: &[String],
 ) -> std::result::Result<(Option<String>, String), String> {
     let mut values = values.to_vec();
-    let id = if values.first().is_some_and(|v| is_digits(v)) {
+    let id = if values
+        .first()
+        .is_some_and(|v| is_digits(v) || v.starts_with("gcp:"))
+    {
         Some(values.remove(0))
     } else {
         None

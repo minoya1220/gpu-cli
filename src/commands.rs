@@ -30,6 +30,14 @@ pub fn ls(ctx: &Ctx, json: bool) -> Result<()> {
 }
 
 pub fn render_instances(ctx: &Ctx, instances: &Value) -> Result<()> {
+    render_instances_with_accelerator(ctx, instances, "GPU")
+}
+
+pub fn render_instances_with_accelerator(
+    ctx: &Ctx,
+    instances: &Value,
+    accelerator: &str,
+) -> Result<()> {
     if !truthy(instances) {
         return ctx.println("No instances. Launch one: gpu up");
     }
@@ -37,7 +45,7 @@ pub fn render_instances(ctx: &Ctx, instances: &Value) -> Result<()> {
     let columns = [
         ("ID", "id"),
         ("Label", "label"),
-        ("GPU", "gpu_name"),
+        (accelerator, "gpu_name"),
         ("Status", "actual_status"),
         ("$/hr", "dph_total"),
         ("Uptime", "duration"),

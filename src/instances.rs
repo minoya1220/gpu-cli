@@ -100,7 +100,13 @@ pub fn select_instance(ctx: &Ctx, instances: &[Dict], action: &str) -> Result<Op
     let mut options = Vec::new();
     for item in instances {
         let id = py_str(item.get("id").ok_or_else(|| Error::key("id"))?);
-        options.push(Opt::new(id, instance_label(item)?));
+        let label = instance_label(item)?;
+        let label = match item.get("provider") {
+            Some(Value::Str(p)) if p == "vast" => format!("Vast.ai  {label}"),
+            Some(Value::Str(p)) if p == "gcp" => format!("Google Cloud  {label}"),
+            _ => label,
+        };
+        options.push(Opt::new(id, label));
     }
     // Even a single instance must be explicitly selected.
     let screen = Screen::new(

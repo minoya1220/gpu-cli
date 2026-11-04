@@ -98,6 +98,7 @@ pub enum RunError {
     NotFound,
     TimedOut,
     Os(String),
+    Denied(String),
 }
 
 impl RunError {
@@ -109,7 +110,7 @@ impl RunError {
                 crate::pyfmt::repr_str(program)
             ),
             RunError::TimedOut => format!("Command '{program}' timed out"),
-            RunError::Os(text) => text.clone(),
+            RunError::Os(text) | RunError::Denied(text) => text.clone(),
         }
     }
 }
@@ -237,12 +238,12 @@ impl Runner for RealRunner {
 pub fn run<S: AsRef<str>>(ctx: &Ctx, argv: &[S], timeout: Option<f64>) -> Result<String> {
     let cmd = Cmd::new(argv).timeout(timeout);
     let program = cmd.program().to_string();
-    match ctx.runner.run(&cmd) {
+    match ctx.run(&cmd) {
         Err(RunError::TimedOut) => Err(Error::msg(format!("Timed out running {program}"))),
         Err(RunError::NotFound) => {
             Err(Error::msg(format!("Required command not found: {program}")))
         }
-        Err(RunError::Os(text)) => Err(Error::msg(text)),
+        Err(RunError::Os(text) | RunError::Denied(text)) => Err(Error::msg(text)),
         Ok(output) if output.code != 0 => {
             let detail = if output.stderr.is_empty() {
                 &output.stdout

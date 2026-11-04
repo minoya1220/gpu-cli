@@ -201,7 +201,7 @@ pub fn wait_for_ssh(ctx: &Ctx, instance_id: &str, timeout: f64) -> Result<(Strin
                             "true",
                         ])
                         .timeout(Some(remaining.min(6.0)));
-                        match ctx.runner.run(&probe) {
+                        match ctx.run(&probe) {
                             Ok(output) if output.code == 0 => {
                                 let repo = repo_name(instance);
                                 let directory = match &repo {
@@ -286,7 +286,7 @@ pub fn ssh(ctx: &Ctx, instance_id: &str, exec: bool) -> Result<()> {
         let words = shlex::split(&url).ok_or_else(|| Error::msg("No closing quotation"))?;
         let mut argv = vec!["ssh".to_string()];
         argv.extend(words);
-        return Err(Error::msg(ctx.runner.exec(&argv)));
+        return Err(Error::msg(ctx.exec(&argv)));
     }
     ctx.println(&redact_text(&url))
 }

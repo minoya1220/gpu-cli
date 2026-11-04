@@ -6,7 +6,7 @@ use crate::pyjson::{self, Dict, Value};
 use crate::testing::*;
 use std::sync::{Arc, Mutex};
 
-const CONFIG: &str = r#"{"gcp":{"project":"test-project","zone":"us-east5-b","runtime":"v2-alpha-tpuv6e","expiry":{"queue":"gpu-expiry","location":"us-central1","service_account":"reaper@test-project.iam.gserviceaccount.com"}}}"#;
+const CONFIG: &str = r#"{"gcp":{"setup":{"version":1,"project":"test-project"},"project":"test-project","zone":"us-east5-b","runtime":"v2-alpha-tpuv6e","expiry":{"queue":"gpu-expiry","location":"us-central1","service_account":"reaper@test-project.iam.gserviceaccount.com"}}}"#;
 const ID: &str = "gcp:test-project:us-east5-b:test-tpu";
 const QUEUE: &str = "projects/test-project/locations/us-central1/queues/gpu-expiry";
 const UP: &[&str] = &[
@@ -621,7 +621,7 @@ fn declining_creation_or_destruction_never_calls_a_provider() {
 
 #[test]
 fn malformed_node_list_never_verifies_destruction() {
-    let env = TestEnv::new();
+    let (env, _, _, _) = fixture();
     let runner = FakeRunner::new(|cmd| {
         assert_eq!(cmd.argv[4], "list");
         ok(r#"[{"state":"READY"}]"#)

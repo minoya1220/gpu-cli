@@ -210,13 +210,13 @@ impl CtxBuilder {
             .input
             .as_ref()
             .map(|lines| lines.iter().map(String::as_str).collect());
-        Ctx {
-            env: Arc::new(self.env),
-            runner: self.runner,
-            clock: self.clock,
-            console: Arc::new(Console::buffer(input, self.interactive)),
-            ui: Arc::new(Ui::scripted(&self.ui)),
-        }
+        Ctx::new(
+            Arc::new(self.env),
+            self.runner,
+            self.clock,
+            Arc::new(Console::buffer(input, self.interactive)),
+            Arc::new(Ui::scripted(&self.ui)),
+        )
     }
 }
 

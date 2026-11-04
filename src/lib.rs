@@ -24,6 +24,7 @@ pub mod pyfmt;
 pub mod pyjson;
 pub mod redact;
 pub mod repos;
+pub mod setup;
 pub mod ssh_config;
 pub mod startup;
 pub mod vast;
@@ -130,6 +131,7 @@ fn dispatch(ctx: &Ctx, command: Command) -> Result<()> {
     }
     let cfg = config::load_config(&ctx.env)?;
     match command {
+        Command::Setup(flags) => setup::run(ctx, &cfg, &flags),
         Command::Up(flags) => {
             let tpu_flags = flags.tpu.is_some()
                 || flags.zone.is_some()

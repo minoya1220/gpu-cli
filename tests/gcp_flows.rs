@@ -3,10 +3,13 @@ mod common;
 use common::Sandbox;
 use std::process::Stdio;
 
+// Fixture equivalent to a completed setup record, never a real cloud project.
+const CONFIG: &str = r#"{"gcp":{"setup":{"version":1,"project":"test-project","project_number":"123456","enabled_apis":[],"created_queue":false,"removing":false},"project":"test-project","zone":"us-east5-b","runtime":"v2-alpha-tpuv6e","service_account":"123456-compute@developer.gserviceaccount.com","expiry":{"queue":"gpu-expiry","location":"us-central1","service_account":"123456-compute@developer.gserviceaccount.com"}}}"#;
+
 fn configured() -> Sandbox {
     let s = Sandbox::new();
     std::fs::create_dir_all(s.root.join("config/gpu")).unwrap();
-    std::fs::write(s.root.join("config/gpu/config.json"), r#"{"gcp":{"project":"test-project","zone":"us-east5-b","runtime":"v2-alpha-tpuv6e","expiry":{"queue":"gpu-expiry","location":"us-central1","service_account":"reaper@test-project.iam.gserviceaccount.com"}}}"#).unwrap();
+    std::fs::write(s.root.join("config/gpu/config.json"), CONFIG).unwrap();
     s
 }
 
@@ -87,7 +90,7 @@ fn config_lookup_and_setup_errors_use_xdg_or_dot_config_on_every_platform() {
             "{error}"
         );
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, r#"{"gcp":{"project":"test-project","zone":"us-east5-b","runtime":"v2-alpha-tpuv6e","expiry":{"queue":"gpu-expiry","location":"us-central1","service_account":"reaper@test-project.iam.gserviceaccount.com"}}}"#).unwrap();
+        std::fs::write(&path, CONFIG).unwrap();
         let configured = launch();
         assert!(
             configured.status.success(),

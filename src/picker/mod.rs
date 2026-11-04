@@ -93,6 +93,7 @@ pub struct Screen<V, R> {
     pub load_required: bool,
     /// Text entry shares the same loop and stack; validation gives an inline error.
     pub text_input: bool,
+    pub input_label: String,
     pub validate: Option<Validate>,
     pub on_settled: Option<Settled<V, R>>,
     pub notice: String,
@@ -117,6 +118,7 @@ impl<V: PickValue, R: 'static> Screen<V, R> {
             quick_select: true,
             load_required: true,
             text_input: false,
+            input_label: "Repository".into(),
             validate: None,
             on_settled: None,
             notice: String::new(),
@@ -162,6 +164,11 @@ impl<V: PickValue, R: 'static> Screen<V, R> {
     pub fn text_input(mut self, validate: Option<Validate>) -> Self {
         self.text_input = true;
         self.validate = validate;
+        self
+    }
+
+    pub fn input_label(mut self, label: impl Into<String>) -> Self {
+        self.input_label = label.into();
         self
     }
 
@@ -517,7 +524,7 @@ impl<V: PickValue, R: 'static> Core<V, R> {
         let mut header = vec![vec![(Style::Title, view.screen.title.clone())]];
         if !view.filter.is_empty() {
             let prefix = if view.screen.text_input {
-                "Repository"
+                &view.screen.input_label
             } else {
                 "Filter"
             };

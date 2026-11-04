@@ -165,7 +165,6 @@ pub fn nvim_session(directory: &str) -> String {
 fn checked(ctx: &Ctx, cmd: Cmd) -> Result<()> {
     let program = cmd.program().to_string();
     let output = ctx
-        .runner
         .run(&cmd)
         .map_err(|e| Error::msg(e.python_text(&program)))?;
     if output.code != 0 {
@@ -228,7 +227,6 @@ pub fn launch_editor(
         };
         // Wait for the CLI handoff, not the editor window; a failed handoff must not enter history.
         let output = ctx
-            .runner
             .run(&Cmd::new(&argv))
             .map_err(|e| Error::msg(e.python_text(editor)))?;
         if output.code != 0 {

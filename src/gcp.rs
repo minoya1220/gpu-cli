@@ -91,11 +91,10 @@ fn optional(d: &Dict, key: &str) -> Result<Option<String>> {
 }
 impl Settings {
     pub fn load(cfg: &Dict) -> Result<Self> {
-        let d = cfg.get("gcp").and_then(Value::as_dict).ok_or_else(|| {
-            Error::msg(
-                "Set up Google Cloud before renting TPUs: add a \"gcp\" section with project, zone, runtime and expiry (queue, location, service_account) to gpu/config.json, as in README \"Google Cloud TPUs\".\nNext: gpu up --provider gcp --help",
-            )
-        })?;
+        let d = cfg
+            .get("gcp")
+            .and_then(Value::as_dict)
+            .ok_or_else(|| Error::msg(crate::setup::GCP_NOT_SETUP))?;
         let project = optional(d, "project")?.filter(|s| component(s)).ok_or_else(|| Error::msg(
             "Set gcp.project in gpu/config.json; no ambient gcloud project is used. Next: gpu up --help"))?;
         let zone = optional(d, "zone")?;
@@ -123,7 +122,8 @@ impl Settings {
 
 /// Never relay gcloud stderr: it may contain credentials, URLs or tracebacks.
 pub fn run(ctx: &Ctx, args: &[String], next: &str) -> Result<String> {
-    match ctx.runner.run(&Cmd::new(args).timeout(Some(600.0))) {
+    match ctx.run(&Cmd::new(args).timeout(Some(600.0))) {
+        Err(RunError::Denied(message)) => Err(Error::msg(message)),
         Ok(out) if out.code == 0 => Ok(out.stdout.trim().into()),
         result => {
             let reason = match result {
@@ -275,6 +275,7 @@ pub fn list(ctx: &Ctx, settings: &Settings) -> Result<Vec<Dict>> {
 /// This does not call gcloud or verify remote IAM/queue readiness.
 pub fn launch_setup(ctx: &Ctx, cfg: &Dict) -> Result<(Settings, crate::gcp_expiry::Queue)> {
     let load = || {
+        ctx.require_gcloud()?;
         let settings = Settings::load(cfg)?;
         let queue = crate::gcp_expiry::Queue::load(&settings)?;
         Ok((settings, queue))

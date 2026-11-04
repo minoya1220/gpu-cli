@@ -39,7 +39,8 @@ fn inventory(ctx: &Ctx, cfg: &Dict, only: Option<&str>) -> Result<(Vec<Dict>, Ve
             Err(_) => failed.push("Vast.ai".to_string()),
         }
     }
-    if only == Some("gcp") || (only.is_none() && cfg.get("gcp").is_some()) {
+    if only == Some("gcp") || (only.is_none() && crate::setup::gcp_ready(cfg)) {
+        ctx.require_gcloud()?;
         match crate::gcp::Settings::load(cfg).and_then(|settings| crate::gcp::list(ctx, &settings))
         {
             Ok(gcp) => items.extend(gcp),
@@ -56,7 +57,7 @@ pub fn selected_id(
     id: Option<&str>,
     action: &str,
 ) -> Result<Option<String>> {
-    if id.is_some() || cfg.get("gcp").is_none() {
+    if id.is_some() || !crate::setup::gcp_ready(cfg) {
         return crate::commands::selected_id(ctx, id, action);
     }
     let (items, failed) = inventory(ctx, cfg, None)?;
@@ -73,7 +74,7 @@ pub fn selected_id(
 }
 
 pub fn ls(ctx: &Ctx, cfg: &Dict, json: bool, only: Option<&str>) -> Result<()> {
-    if only != Some("gcp") && (only == Some("vast") || cfg.get("gcp").is_none()) {
+    if only != Some("gcp") && (only == Some("vast") || !crate::setup::gcp_ready(cfg)) {
         return crate::commands::ls(ctx, json);
     }
     let (items, failed) = inventory(ctx, cfg, only)?;

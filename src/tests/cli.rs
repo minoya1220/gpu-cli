@@ -680,8 +680,10 @@ fn test_run_redacts_secrets_from_a_real_failing_process() {
             "#!/bin/sh\necho \"'instance_api_key': '{FAKE_INSTANCE_KEY}', id 7\" >&2\nexit 1\n"
         ),
     );
-    let mut ctx = t.ctx().build();
-    ctx.runner = std::sync::Arc::new(crate::process::RealRunner);
+    let ctx = t
+        .ctx()
+        .build()
+        .with_runner(std::sync::Arc::new(crate::process::RealRunner));
     let err = run(&ctx, &[script.to_str().unwrap()], None).unwrap_err();
     assert!(!err.text().contains(FAKE_INSTANCE_KEY));
     assert!(err.text().contains("id 7"));

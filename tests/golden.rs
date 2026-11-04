@@ -78,13 +78,13 @@ fn ctx(env: Env, input: Option<Vec<&str>>) -> Ctx {
             panic!("unexpected exec: {argv:?}")
         }
     }
-    Ctx {
-        env: Arc::new(env),
-        runner: Arc::new(NoRunner),
-        clock: Arc::new(NoClock),
-        console: Arc::new(Console::buffer(input, false)),
-        ui: Arc::new(Ui::scripted::<&[u8]>(&[])),
-    }
+    Ctx::new(
+        Arc::new(env),
+        Arc::new(NoRunner),
+        Arc::new(NoClock),
+        Arc::new(Console::buffer(input, false)),
+        Arc::new(Ui::scripted::<&[u8]>(&[])),
+    )
 }
 
 #[test]

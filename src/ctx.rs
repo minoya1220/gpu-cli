@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::error::{Error, Result};
-use crate::process::{RealRunner, Runner};
+use crate::process::{Cmd, Output, RealRunner, RunError, Runner};
 
 const ENV_KEYS: [&str; 6] = [
     "HOME",
@@ -259,7 +259,8 @@ impl Ui {
 #[derive(Clone)]
 pub struct Ctx {
     pub env: Arc<Env>,
-    pub runner: Arc<dyn Runner>,
+    runner: Arc<dyn Runner>,
+    gcp_setup_session: bool,
     pub clock: Arc<dyn Clock>,
     pub console: Arc<Console>,
     pub ui: Arc<Ui>,
@@ -270,12 +271,79 @@ impl Ctx {
         Ctx {
             env: Arc::new(Env::from_process()),
             runner: Arc::new(RealRunner),
+            gcp_setup_session: false,
             clock: Arc::new(RealClock {
                 start: Instant::now(),
             }),
             console: Arc::new(Console::real()),
             ui: Arc::new(Ui::Terminal),
         }
+    }
+
+    pub fn new(
+        env: Arc<Env>,
+        runner: Arc<dyn Runner>,
+        clock: Arc<dyn Clock>,
+        console: Arc<Console>,
+        ui: Arc<Ui>,
+    ) -> Self {
+        Self {
+            env,
+            runner,
+            clock,
+            console,
+            ui,
+            gcp_setup_session: false,
+        }
+    }
+
+    /// Only setup, after explicit provider selection, may use this scoped copy.
+    pub(crate) fn for_gcp_setup(&self) -> Self {
+        Self {
+            gcp_setup_session: true,
+            ..self.clone()
+        }
+    }
+
+    pub fn require_gcloud(&self) -> Result<()> {
+        if self.gcp_setup_session
+            || crate::config::load_config(&self.env).is_ok_and(|cfg| crate::setup::gcp_ready(&cfg))
+        {
+            Ok(())
+        } else {
+            Err(Error::msg(crate::setup::GCP_NOT_SETUP))
+        }
+    }
+
+    /// The single process boundary: the underlying runner is private so no
+    /// cloud adapter, catalog Job, or exec path can bypass the opt-in gate.
+    fn authorize(&self, program: &str) -> std::result::Result<(), RunError> {
+        if std::path::Path::new(program)
+            .file_name()
+            .is_some_and(|n| n == "gcloud")
+        {
+            self.require_gcloud()
+                .map_err(|e| RunError::Denied(e.text().into()))?;
+        }
+        Ok(())
+    }
+
+    pub fn run(&self, cmd: &Cmd) -> std::result::Result<Output, RunError> {
+        self.authorize(cmd.program())?;
+        self.runner.run(cmd)
+    }
+
+    pub fn exec(&self, argv: &[String]) -> String {
+        if let Err(error) = self.authorize(argv.first().map(String::as_str).unwrap_or("")) {
+            return error.python_text("gcloud");
+        }
+        self.runner.exec(argv)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_runner(mut self, runner: Arc<dyn Runner>) -> Self {
+        self.runner = runner;
+        self
     }
 
     pub fn println(&self, text: &str) -> Result<()> {

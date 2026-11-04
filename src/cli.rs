@@ -24,6 +24,8 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
+    /// Show provider setup state or configure a selected provider
+    Setup(SetupFlags),
     /// Launch a GPU or TPU workspace with an optional repository
     Up(UpFlags),
     /// List rented instances
@@ -71,6 +73,34 @@ pub enum Command {
         #[arg(value_name = "ID/WHEN", num_args = 0..)]
         expiry_args: Vec<String>,
     },
+}
+
+#[derive(clap::Args, Debug, Default)]
+pub struct SetupFlags {
+    /// Choose a provider explicitly (otherwise open the provider picker)
+    #[arg(long, value_parser = ["vast", "gcp"])]
+    pub provider: Option<String>,
+    /// Google Cloud project ID (otherwise choose from your projects)
+    #[arg(long)]
+    pub project: Option<String>,
+    /// Default TPU zone (interactive default: us-east5-b)
+    #[arg(long)]
+    pub zone: Option<String>,
+    /// Default TPU runtime (interactive default: v2-alpha-tpuv6e)
+    #[arg(long)]
+    pub runtime: Option<String>,
+    /// Cloud Tasks queue region (default: us-central1, or recorded setup region)
+    #[arg(long)]
+    pub location: Option<String>,
+    /// Explicitly approve setup mutations in exactly this project
+    #[arg(long, value_name = "PROJECT")]
+    pub confirm_project: Option<String>,
+    /// Remove only infrastructure recorded as added by gpu setup
+    #[arg(long)]
+    pub remove: bool,
+    /// Show the setup plan without changing cloud resources or config
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(clap::Args, Debug)]

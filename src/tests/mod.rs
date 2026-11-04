@@ -11,5 +11,6 @@ mod lifecycle;
 mod picker;
 mod repo_cache;
 mod repos;
+mod setup;
 mod uptime;
 mod wizard;

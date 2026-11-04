@@ -12,9 +12,10 @@ fn ssh_args(id: &TpuId) -> Vec<String> {
     args
 }
 pub fn ssh(ctx: &Ctx, id: &TpuId, exec: bool) -> Result<()> {
+    ctx.require_gcloud()?;
     let args = ssh_args(id);
     if exec {
-        return Err(Error::msg(ctx.runner.exec(&args)));
+        return Err(Error::msg(ctx.exec(&args)));
     }
     ctx.println(&crate::pyfmt::shell_join(&args))
 }
@@ -163,6 +164,7 @@ pub fn edit(
     editor: Option<&str>,
     nvim_config: Option<&Value>,
 ) -> Result<()> {
+    ctx.require_gcloud()?;
     let editor = match editor
         .map(String::from)
         .or_else(|| crate::commands::last_editor(&ctx.env))

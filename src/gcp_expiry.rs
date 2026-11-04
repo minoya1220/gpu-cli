@@ -29,7 +29,12 @@ impl Queue {
         let get = |key| {
             text(d, key).filter(|s| component(s)).map(String::from).ok_or_else(|| Error::msg(format!("Set gcp.expiry.{key} in gpu/config.json. Next: gpu up --provider gcp --help")))
         };
-        let service_account = text(d, "service_account").filter(|s| s.ends_with(&format!("@{}.iam.gserviceaccount.com", settings.project)) && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"-@.".contains(&b)))
+        let service_account = text(d, "service_account").filter(|s| {
+            let default_compute = s.strip_suffix("-compute@developer.gserviceaccount.com")
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+            (default_compute || s.ends_with(&format!("@{}.iam.gserviceaccount.com", settings.project)))
+                && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"-@.".contains(&b))
+        })
             .ok_or_else(|| Error::msg("Set gcp.expiry.service_account to a service account in the queue's project. Next: gpu up --provider gcp --help"))?.into();
         Ok(Self {
             project: settings.project.clone(),

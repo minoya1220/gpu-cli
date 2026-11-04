@@ -328,6 +328,78 @@ fn test_new_repository_choices_dry_run_in_terminal() {
 }
 
 #[test]
+fn test_setup_project_picker_confirmation_status_and_remove_with_only_cloud_stubs() {
+    let sandbox = Sandbox::new();
+    sandbox.stub(
+        "vastai",
+        r#"#!/bin/sh
+{ printf 'vastai'; for arg in "$@"; do printf '\t%s' "$arg"; done; printf '\n'; } >> "$FAKE_CLI_LOG"
+[ "$*" = 'show instances --raw' ] || exit 97
+printf '[]\n'
+"#,
+    );
+    sandbox.stub("gcloud", r#"#!/bin/sh
+{ printf 'gcloud'; for arg in "$@"; do printf '\t%s' "$arg"; done; printf '\n'; } >> "$FAKE_CLI_LOG"
+case "$*" in
+  'projects list --filter=lifecycleState:ACTIVE --quiet --format=json')
+    printf '[{"projectId":"test-project","projectNumber":"123456","name":"sandbox"}]\n' ;;
+  'services list --enabled --project=test-project --quiet --format=json')
+    printf '[{"config":{"name":"compute.googleapis.com"}},{"config":{"name":"tpu.googleapis.com"}},{"config":{"name":"cloudtasks.googleapis.com"}}]\n' ;;
+  'tasks queues list --location=us-central1 --project=test-project --quiet --format=json')
+    printf '[{"name":"projects/test-project/locations/us-central1/queues/gpu-expiry"}]\n' ;;
+  'tasks queues describe gpu-expiry --project=test-project --location=us-central1 --quiet --format=json')
+    printf '{"state":"RUNNING","retryConfig":{"maxAttempts":-1,"maxBackoff":"60s"}}\n' ;;
+  'iam service-accounts describe 123456-compute@developer.gserviceaccount.com --project=test-project --quiet --format=json')
+    printf '{"email":"123456-compute@developer.gserviceaccount.com"}\n' ;;
+  'projects get-iam-policy test-project --project=test-project --quiet --format=json')
+    printf '{"bindings":[{"role":"roles/editor","members":["serviceAccount:123456-compute@developer.gserviceaccount.com"]}]}\n' ;;
+  'compute tpus locations list --project=test-project --quiet --format=json')
+    printf '[{"locationId":"us-east5-b"}]\n' ;;
+  'compute tpus tpu-vm list --project=test-project --zone=us-east5-b --quiet --format=json' | 'tasks list --location=us-central1 --queue=gpu-expiry --project=test-project --quiet --format=json')
+    printf '[]\n' ;;
+  *) echo 'unexpected cloud command: all mutations forbidden in this test' >&2; exit 97 ;;
+esac
+"#);
+    let mut term = Terminal::start(&sandbox, &["setup"]);
+    term.wait(shows("Vast.ai  ✓ set up"));
+    assert!(shows("Google Cloud  not set up")(&term));
+    assert_eq!(tools(&sandbox), ["vastai"]);
+    term.press_until("2", on("Google Cloud project"));
+    term.wait(shows("test-project"));
+    term.press_until("1", shows("TPU zone (Enter ="));
+    term.press_until(ENTER, shows("TPU runtime (Enter ="));
+    term.press_until(ENTER, shows("Type project ID 'test-project' to confirm:"));
+    // Not a single mutation was even attempted; the existing queue is reused.
+    term.press("test-project");
+    term.press(ENTER);
+    assert_eq!(term.exit_status(), 0, "{}", term.output_text());
+    let path = sandbox.root.join("config/gpu/config.json");
+    let config = std::fs::read_to_string(&path).unwrap();
+    assert!(config.contains("123456-compute@developer.gserviceaccount.com"));
+    assert!(config.contains("\"created_queue\": false"));
+    let before = sandbox.calls().len();
+    let mut term = Terminal::start(&sandbox, &["setup"]);
+    term.wait(shows("Google Cloud  ✓ set up"));
+    assert!(sandbox.calls()[before..]
+        .iter()
+        .all(|call| call[0] == "vastai"));
+    term.press_until("2", on("Google Cloud setup"));
+    term.press_until("2", shows("Type project ID 'test-project' to confirm:"));
+    term.press("test-project");
+    term.press(ENTER);
+    assert_eq!(term.exit_status(), 0, "{}", term.output_text());
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "{}\n");
+    let before = sandbox.calls().len();
+    let output = sandbox
+        .command(&["ls", "--provider", "gcp"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Next: gpu setup"));
+    assert_eq!(sandbox.calls().len(), before);
+}
+
+#[test]
 fn test_tpu_without_config_keeps_setup_visible_and_returns_to_gpu_choices() {
     for (repo_key, query) in [("0", "tpu"), ("1", "v5e")] {
         let sandbox = Sandbox::new();
@@ -343,10 +415,7 @@ fn test_tpu_without_config_keeps_setup_visible_and_returns_to_gpu_choices() {
         assert!(term.running(), "setup must remain visible until dismissed");
         let screen = term.lines().join("\n");
         assert!(screen.contains("No TPU created."), "{screen}");
-        assert!(
-            screen.contains("Next: gpu up --provider gcp --help"),
-            "{screen}"
-        );
+        assert!(screen.contains("Next: gpu setup"), "{screen}");
         let config = sandbox.root.join("config/gpu/config.json");
         assert!(
             term.lines()
@@ -378,7 +447,7 @@ fn test_tpu_category_and_type_search_continue_into_cloud_dry_run() {
         let sandbox = Sandbox::new();
         let config = sandbox.root.join("config/gpu");
         std::fs::create_dir_all(&config).unwrap();
-        std::fs::write(config.join("config.json"), r#"{"gcp":{"project":"test-project","zone":"us-central1-a","runtime":"v2-alpha-tpuv5lite","expiry":{"queue":"gpu-expiry","location":"us-central1","service_account":"reaper@test-project.iam.gserviceaccount.com"}}}"#).unwrap();
+        std::fs::write(config.join("config.json"), r#"{"gcp":{"setup":{"version":1,"project":"test-project"},"project":"test-project","zone":"us-central1-a","runtime":"v2-alpha-tpuv5lite","expiry":{"queue":"gpu-expiry","location":"us-central1","service_account":"reaper@test-project.iam.gserviceaccount.com"}}}"#).unwrap();
         // The only cloud call allowed is a read-only catalog request. All
         // lifecycle, IAM and task operations fail if this dry run reaches them.
         sandbox.stub("gcloud", r#"#!/bin/sh

@@ -195,6 +195,7 @@ pub fn prompt_for_picks(
             mode: Some(mode),
             gpu: Some(gpu),
             offer: None,
+            tpu: None,
         },
         offers,
     ))
@@ -299,6 +300,7 @@ pub fn launch(ctx: &Ctx, args: &UpArgs, cfg: &Dict, deadline: Option<Timestamp>)
         mode: args.mode.clone(),
         gpu: args.gpu.clone(),
         offer: None,
+        tpu: None,
     };
     let (picks, offer) = if ctx.interactive() {
         let repo_ctx = ctx.clone();
@@ -320,6 +322,11 @@ pub fn launch(ctx: &Ctx, args: &UpArgs, cfg: &Dict, deadline: Option<Timestamp>)
             },
         );
         let picks = wizard.run(ctx, picks)?;
+        if picks.tpu.is_some() {
+            // The picker only returns a provider choice. Cloud work starts here,
+            // after its input loop has exited, never in a screen transition.
+            return crate::gcp::launch_from_picker(ctx, args, &picks, cfg, deadline);
+        }
         let offer = match &picks.offer {
             Some(offer) => offer.clone(),
             None => {

@@ -2,7 +2,6 @@
 //! qualified, so changing config cannot redirect a destructive command.
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
-use crate::picker::{pick, Next, Opt, Screen};
 use crate::pyjson::{Dict, Value};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -23,28 +22,6 @@ impl InstanceId {
         }
         Ok(Self::Vast(id.into()))
     }
-}
-
-pub fn choose(ctx: &Ctx, cfg: &Dict, explicit: Option<&str>) -> Result<String> {
-    if let Some(provider) = explicit {
-        return Ok(provider.into());
-    }
-    if ctx.interactive() && cfg.get("gcp").is_some() {
-        return pick(
-            ctx,
-            Screen::new(
-                "Provider",
-                || {
-                    vec![
-                        Opt::new("vast".to_string(), "Vast.ai — GPU"),
-                        Opt::new("gcp".to_string(), "Google Cloud — TPU"),
-                    ]
-                },
-                Next::Done,
-            ),
-        );
-    }
-    Ok("vast".into())
 }
 
 fn inventory(ctx: &Ctx, cfg: &Dict, only: Option<&str>) -> Result<(Vec<Dict>, Vec<String>)> {

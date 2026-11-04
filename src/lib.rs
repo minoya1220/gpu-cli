@@ -131,18 +131,18 @@ fn dispatch(ctx: &Ctx, command: Command) -> Result<()> {
     let cfg = config::load_config(&ctx.env)?;
     match command {
         Command::Up(flags) => {
-            let selected = provider::choose(ctx, &cfg, flags.provider.as_deref())?;
-            if selected == "gcp" {
-                return gcp::launch(ctx, &flags, &cfg, up_deadline);
-            }
-            if flags.tpu.is_some()
+            let tpu_flags = flags.tpu.is_some()
                 || flags.zone.is_some()
                 || flags.runtime.is_some()
                 || flags.spot
-                || flags.on_demand
-            {
+                || flags.on_demand;
+            // TPU flags imply Google Cloud; only an explicit --provider vast rejects them.
+            if flags.provider.as_deref() == Some("gcp") || (flags.provider.is_none() && tpu_flags) {
+                return gcp::launch(ctx, &flags, &cfg, up_deadline);
+            }
+            if tpu_flags {
                 return Err(Error::msg(
-                    "TPU flags require Google Cloud. Next: gpu up --provider gcp --help",
+                    "TPU flags do not apply to Vast. Next: gpu up --provider gcp --help",
                 ));
             }
             launch::launch(ctx, &up_args(flags), &cfg, up_deadline)

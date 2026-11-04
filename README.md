@@ -1,6 +1,6 @@
 # gpu
 
-Run `gpu up` to rent a Vast.ai GPU workspace, with or without a git repository. Choose a container for general work or a VM for CUDA/Nsight profiling. Google Cloud TPU VMs are also supported with `--provider gcp`; see [Google Cloud TPUs](#google-cloud-tpus) for the required one-time setup and offline expiry.
+Run `gpu up` to rent a Vast.ai GPU workspace, with or without a git repository. Choose a container for general work or a VM for CUDA/Nsight profiling. Choose **TPU (Google Cloud)** on the GPU screen to rent a TPU VM instead, or use `--tpu` / `--provider gcp`; see [Google Cloud TPUs](#google-cloud-tpus) for the required one-time setup and offline expiry.
 
 ## Install
 
@@ -32,7 +32,8 @@ In the terminal picker:
 
 - Type to filter, use ↑/↓ to move, and Enter or → to select.
 - Press backtick (`) or ← to clear the filter, then go back. On the first screen, press twice to quit. Ctrl-C or Ctrl-D quits from any screen; Esc does nothing.
-- Press F2 on a GPU screen to load prices. Digits filter GPU names; on short, unfiltered lists, 1-9 select directly.
+- The GPU screen shows at most **three Recent** rows, GPU categories, and **TPU (Google Cloud)**. Type `tpu` to find the TPU category, or `v5e` / `v6e-1` to pick a common TPU type directly. TPU discovery is visible even before Google Cloud is configured; selecting it explains the required setup.
+- Press F2 on a GPU screen to load Vast prices. Digits filter GPU/TPU names; on short, unfiltered lists, 1-9 select directly.
 - On the Repository screen, **1–7** select the first seven repos, **8** opens **All repositories...** (when there are more than seven), **9** opens **Clone from URL...**, and **0** selects **No repository** at the bottom. Type to filter across all repos, including those not initially shown.
 - Choose **No repository** or **Clone from URL...** without waiting for GitHub. Paste a URL or `owner/name`, then Enter. Backspace edits; arrows select or go back, not move the text cursor.
 - Press Enter to retry a failed offer load; Ctrl-R retries repositories. With piped input, the CLI uses numbered line prompts instead.
@@ -201,15 +202,16 @@ gcloud compute tpus tpu-vm versions list --project=gcp-sandbox-355rm --zone=us-e
 ### Rent, connect, and destroy a TPU
 
 ```sh
-gpu up --provider gcp                      # terminal choices, including a mandatory expiry
-gpu up --provider gcp --tpu v6e-1 --no-repo --expire 2h --spot --dry-run
-gpu up --provider gcp --tpu v6e-1 --no-repo --expire 2h --spot --yes
+gpu up                                    # choose TPU (Google Cloud) on the GPU screen
+gpu up --provider gcp                      # jump straight to TPU choices; expiry is mandatory
+gpu up --tpu v6e-1 --no-repo --expire 2h --spot --dry-run
+gpu up --tpu v6e-1 --no-repo --expire 2h --spot --yes
 gpu ls                                    # labelled Vast and Google Cloud sections
 gpu ls --provider gcp                      # works without Vast installed/logged in
 gpu ls --provider vast --json              # legacy Vast JSON, unchanged
 ```
 
-Non-interactive launches require `--tpu`, `--repo` or `--no-repo`, and `--expire`; zone/runtime must be supplied through config or flags. `--on-demand` skips the capacity picker; on-demand is the non-interactive default. With GCP configured, an interactive `gpu up` first offers a numbered provider picker. Without GCP config, the existing Vast flow and its table/JSON output remain unchanged. Use `--provider vast` to skip the provider picker. GPU offer, reliability, price and disk-size flags are rejected for TPUs rather than ignored.
+Non-interactive launches require `--tpu`, `--repo` or `--no-repo`, and `--expire`; zone/runtime must be supplied through config or flags. `--on-demand` skips the capacity picker; on-demand is the non-interactive default. `--provider` is optional: TPU-specific flags imply Google Cloud, while `--provider gcp` jumps straight to its screens. Otherwise `gpu up` keeps the repository → mode → GPU flow, with the TPU category alongside GPU categories regardless of config. Selecting it continues to the TPU catalog/capacity screens and a mandatory expiry prompt if `--expire` was not supplied. The container/VM mode selected in the UI does not apply to a TPU VM. Common TPU search results are discovery shortcuts, not a live capacity catalog; select the category for Google's zone-specific type list. Vast table/JSON output is unchanged. Explicit Vast mode, GPU offer, reliability, price and disk-size flags are rejected for TPUs rather than ignored; `--provider vast` rejects TPU-specific flags.
 
 The returned ID is `gcp:PROJECT:ZONE:NAME`. Copy it exactly (or omit the ID to pick). Project and zone embedded in the ID prevent later config changes from redirecting a destructive command:
 

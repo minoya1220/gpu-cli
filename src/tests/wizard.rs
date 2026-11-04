@@ -13,7 +13,7 @@ use crate::picker::{Job, Next, Outcome};
 use crate::pyjson::Dict;
 use crate::repos::Repo;
 use crate::testing::{dict, TestEnv};
-use crate::wizard::{LaunchWizard, Picks, Search, WizardOptions};
+use crate::wizard::{LaunchWizard, Picks, Search, TpuChoice, WizardOptions, TPU_CATEGORY};
 
 const MODELS: [&str; 5] = ["B200", "H100 SXM", "RTX 4090", "RTX 5090", "Tesla T4"];
 
@@ -144,6 +144,7 @@ fn test_back_walks_every_screen_without_refetching_or_quitting() {
         mode: Some("vm".into()),
         gpu: Some("RTX 4090".into()),
         offer: Some(offer(1, "RTX 4090", 0.5)),
+        tpu: None,
     };
     assert_eq!(result, Outcome::Done(expected));
     assert_eq!(repo_calls.load(Ordering::SeqCst), 1);
@@ -361,12 +362,94 @@ fn test_f2_prices_are_shared_by_gpu_screens_and_loaded_once_per_mode() {
         mode: Some("vm".into()),
         gpu: Some("RTX 4090".into()),
         offer: None,
+        tpu: None,
     };
     assert_eq!(result, Outcome::Done(expected));
     assert_eq!(
         *gpu_labels.lock().unwrap(),
         ["B200  $1.735/hr (1 offer)", "H100 SXM"]
     );
+}
+
+#[test]
+fn test_gpu_screen_caps_valid_recents_at_three_and_always_lists_tpus() {
+    let t = TestEnv::new();
+    let search = FakeSearch::new();
+    let repo_calls = Arc::new(AtomicUsize::new(0));
+    let flow = wizard(
+        &t,
+        &search,
+        &repo_calls,
+        &[
+            "Retired GPU",
+            "RTX 4090",
+            "B200",
+            "Tesla T4",
+            "RTX 5090",
+            "H100 SXM",
+        ],
+        true,
+    );
+    let result = run(
+        &flow,
+        Picks::new(Some(Repo::NoRepo), Some("container"), None),
+        |keys| {
+            let labels = keys.labels();
+            assert_eq!(
+                labels
+                    .iter()
+                    .filter(|s| s.starts_with("Recent:"))
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                ["Recent: RTX 4090", "Recent: B200", "Recent: Tesla T4"]
+            );
+            assert!(labels.contains(&TPU_CATEGORY.to_string()));
+            // Select the visible category without filtering; no offer screen.
+            for _ in 0..labels.iter().position(|s| s == TPU_CATEGORY).unwrap() {
+                keys.press(DOWN);
+            }
+            keys.press(ENTER);
+        },
+    );
+    assert_eq!(
+        result,
+        Outcome::Done(Picks {
+            tpu: Some(TpuChoice::ChooseType),
+            ..Picks::new(Some(Repo::NoRepo), Some("container"), None)
+        })
+    );
+    assert_eq!(repo_calls.load(Ordering::SeqCst), 0);
+    assert!(search.offer_calls().is_empty());
+    assert!(search.stats_calls().is_empty());
+}
+
+#[test]
+fn test_gpu_search_finds_tpu_category_and_types_without_cloud_config() {
+    for (query, expected) in [
+        ("tpu", TpuChoice::ChooseType),
+        ("v5e", TpuChoice::Type("v5e-1".into())),
+        ("v6e-1", TpuChoice::Type("v6e-1".into())),
+    ] {
+        let t = TestEnv::new();
+        let search = FakeSearch::new();
+        let flow = wizard(&t, &search, &Arc::new(AtomicUsize::new(0)), &[], true);
+        let start = Picks::new(named("other"), Some("vm"), None);
+        let result = run(&flow, start.clone(), move |keys| {
+            keys.type_text(query);
+            assert!(!keys.labels().is_empty());
+            assert!(keys.labels().iter().all(|s| s.contains("TPU")));
+            keys.press(ENTER);
+        });
+        assert_eq!(
+            result,
+            Outcome::Done(Picks {
+                tpu: Some(expected),
+                ..start
+            })
+        );
+        assert!(search.offer_calls().is_empty());
+        assert!(search.stats_calls().is_empty());
+    }
 }
 
 #[test]

@@ -75,7 +75,7 @@ pub enum Command {
 
 #[derive(clap::Args, Debug)]
 pub struct UpFlags {
-    /// Provider (Vast by default; configured GCP enables the provider picker)
+    /// Provider (optional; TPU flags or a TPU picked on the GPU screen use gcp)
     #[arg(long, value_parser = ["vast", "gcp"])]
     pub provider: Option<String>,
     /// TPU accelerator type, e.g. v5e-1 or v6e-1

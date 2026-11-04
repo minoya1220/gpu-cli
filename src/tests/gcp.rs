@@ -232,6 +232,84 @@ fn dry_run_is_offline_aliases_v5e_and_rejects_missing_or_invalid_safety_flags() 
 }
 
 #[test]
+fn tpu_flags_infer_gcp_but_never_override_an_explicit_vast_provider() {
+    for provider in [None, Some("vast")] {
+        let (_env, ctx, runner, _state) = fixture();
+        let mut flags = vec![
+            "up",
+            "--tpu",
+            "v6e-1",
+            "--no-repo",
+            "--expire",
+            "2h",
+            "--dry-run",
+        ];
+        if let Some(provider) = provider {
+            flags.extend(["--provider", provider]);
+        }
+        assert_eq!(main(&ctx, &flags), if provider.is_some() { 1 } else { 0 });
+        if provider.is_some() {
+            assert!(err(&ctx).contains("TPU flags do not apply to Vast"));
+        } else {
+            assert!(out(&ctx).contains("DRY RUN: no TPU or expiry task created"));
+        }
+        assert!(runner.calls().is_empty());
+    }
+}
+
+#[test]
+fn tpu_picker_drops_ui_mode_but_preserves_explicit_vast_flags_for_rejection() {
+    use crate::launch::UpArgs;
+    use crate::repos::Repo;
+    use crate::wizard::{Picks, TpuChoice};
+    let (_env, ctx, runner, _state) = fixture();
+    let cfg = crate::config::load_config(&ctx.env).unwrap();
+    let deadline = ctx
+        .clock
+        .now()
+        .checked_add(std::time::Duration::from_secs(7200))
+        .unwrap();
+    let picks = Picks {
+        tpu: Some(TpuChoice::Type("v6e-1".into())),
+        ..Picks::new(Some(Repo::NoRepo), Some("container"), None)
+    };
+    let args = UpArgs {
+        num_gpus: 1,
+        dry_run: true,
+        ..UpArgs::default()
+    };
+    crate::gcp::launch_from_picker(&ctx, &args, &picks, &cfg, Some(deadline)).unwrap();
+    assert!(out(&ctx).contains("DRY RUN: no TPU or expiry task created"));
+    for args in [
+        UpArgs {
+            mode: Some("container".into()),
+            ..args.clone()
+        },
+        UpArgs {
+            max_price: Some(0.5),
+            ..args.clone()
+        },
+        UpArgs {
+            offer: Some(100),
+            ..args.clone()
+        },
+        UpArgs {
+            disk: Some(30),
+            ..args.clone()
+        },
+        UpArgs {
+            interruptible: true,
+            ..args.clone()
+        },
+    ] {
+        let error =
+            crate::gcp::launch_from_picker(&ctx, &args, &picks, &cfg, Some(deadline)).unwrap_err();
+        assert!(error.text().contains("flags do not apply to TPUs"));
+    }
+    assert!(runner.calls().is_empty());
+}
+
+#[test]
 fn queue_or_task_failures_prevent_paid_create() {
     for failure in 0..4 {
         let (_env, ctx, runner, state) = fixture();
@@ -430,14 +508,9 @@ fn cancel_can_clean_up_a_failed_create_with_no_node() {
 }
 
 #[test]
-fn provider_picker_and_catalog_jobs_use_real_keys() {
+fn tpu_flag_routes_without_provider_and_catalog_jobs_use_real_keys() {
     let (env, _ctx, runner, _state) = fixture();
-    let ctx = env
-        .ctx()
-        .runner(&runner)
-        .interactive(true)
-        .pickers(&["2"])
-        .build();
+    let ctx = env.ctx().runner(&runner).interactive(true).build();
     assert_eq!(
         main(
             &ctx,

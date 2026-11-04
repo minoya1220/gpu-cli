@@ -93,7 +93,7 @@ impl Settings {
     pub fn load(cfg: &Dict) -> Result<Self> {
         let d = cfg.get("gcp").and_then(Value::as_dict).ok_or_else(|| {
             Error::msg(
-                "Configure Google Cloud in gpu/config.json (see README setup). Next: gpu up --help",
+                "Set up Google Cloud before renting TPUs: add a \"gcp\" section with project, zone, runtime and expiry (queue, location, service_account) to gpu/config.json, as in README \"Google Cloud TPUs\".\nNext: gpu up --provider gcp --help",
             )
         })?;
         let project = optional(d, "project")?.filter(|s| component(s)).ok_or_else(|| Error::msg(
@@ -271,7 +271,52 @@ pub fn list(ctx: &Ctx, settings: &Settings) -> Result<Vec<Dict>> {
     Ok(items)
 }
 
+/// Carry the normal wizard's repository and TPU choice into the cloud flow.
+/// Only the mode chosen *in the UI* is dropped: explicit Vast-only flags remain
+/// present so the TPU adapter can reject them rather than silently ignore them.
+pub fn launch_from_picker(
+    ctx: &Ctx,
+    args: &crate::launch::UpArgs,
+    picks: &crate::wizard::Picks,
+    cfg: &Dict,
+    deadline: Option<Timestamp>,
+) -> Result<()> {
+    let repo = picks.repo.clone().unwrap_or(crate::repos::Repo::NoRepo);
+    let tpu = match &picks.tpu {
+        Some(crate::wizard::TpuChoice::Type(tpu)) => Some(tpu.clone()),
+        _ => None,
+    };
+    let flags = UpFlags {
+        provider: Some("gcp".into()),
+        tpu,
+        zone: None,
+        runtime: None,
+        spot: false,
+        on_demand: false,
+        repo: if repo == crate::repos::Repo::NoRepo {
+            None
+        } else {
+            Some(repo.as_arg().into())
+        },
+        no_repo: repo == crate::repos::Repo::NoRepo,
+        mode: args.mode.clone(),
+        gpu: args.gpu.clone(),
+        num_gpus: args.num_gpus,
+        max_price: args.max_price,
+        interruptible: args.interruptible,
+        offer: args.offer,
+        disk: args.disk,
+        yes: args.yes,
+        dry_run: args.dry_run,
+        expire: args.expire.clone(),
+        reliability: args.reliability,
+        unverified: args.unverified,
+    };
+    launch(ctx, &flags, cfg, deadline)
+}
+
 pub fn launch(ctx: &Ctx, flags: &UpFlags, cfg: &Dict, deadline: Option<Timestamp>) -> Result<()> {
+    let settings = Settings::load(cfg)?;
     if flags.mode.is_some()
         || flags.gpu.is_some()
         || flags.num_gpus != 1
@@ -286,7 +331,9 @@ pub fn launch(ctx: &Ctx, flags: &UpFlags, cfg: &Dict, deadline: Option<Timestamp
             "Vast GPU/offer/disk flags do not apply to TPUs. Next: gpu up --provider gcp --help",
         ));
     }
-    let settings = Settings::load(cfg)?;
+    let queue = crate::gcp_expiry::Queue::load(&settings)?;
+    let picks = crate::gcp_wizard::choose(ctx, flags, &settings, cfg)?;
+    // Ask last, so selection time is not taken from an interactive duration.
     let deadline = match deadline {
         Some(deadline) => deadline,
         None if ctx.interactive() => {
@@ -313,8 +360,6 @@ pub fn launch(ctx: &Ctx, flags: &UpFlags, cfg: &Dict, deadline: Option<Timestamp
         )),
     };
     crate::gcp_expiry::validate_deadline(ctx, deadline)?;
-    let queue = crate::gcp_expiry::Queue::load(&settings)?;
-    let picks = crate::gcp_wizard::choose(ctx, flags, &settings, cfg)?;
     let id = TpuId {
         project: settings.project.clone(),
         zone: picks.zone.clone(),

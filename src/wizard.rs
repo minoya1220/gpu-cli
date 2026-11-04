@@ -16,6 +16,19 @@ use crate::repos::{load_cached_repos, resolve_repo, Repo};
 
 pub const MODES: [&str; 2] = ["container", "vm"];
 
+/// Offline discovery hints, not a capacity/zone catalog. Selecting the category
+/// loads Google's live catalog later; direct type matches carry the choice over.
+pub const TPU_TYPES: [&str; 10] = [
+    "v5e-1", "v5e-4", "v5e-8", "v6e-1", "v6e-4", "v6e-8", "v5p-8", "v4-8", "v3-8", "v2-8",
+];
+pub const TPU_CATEGORY: &str = "TPU (Google Cloud)";
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum TpuChoice {
+    ChooseType,
+    Type(String),
+}
+
 /// Launch choices; `None` means not chosen yet.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Picks {
@@ -23,6 +36,7 @@ pub struct Picks {
     pub mode: Option<String>,
     pub gpu: Option<String>,
     pub offer: Option<Dict>,
+    pub tpu: Option<TpuChoice>,
 }
 
 impl Picks {
@@ -32,6 +46,7 @@ impl Picks {
             mode: mode.map(String::from),
             gpu: gpu.map(String::from),
             offer: None,
+            tpu: None,
         }
     }
 }
@@ -45,6 +60,7 @@ pub enum Choice {
     Text(String),
     Mode(String),
     Gpu(String),
+    Tpu(TpuChoice),
     Category(String),
     Offer(Dict),
 }
@@ -116,7 +132,7 @@ impl LaunchWizard {
             .recent_gpus
             .into_iter()
             .filter(|g| options.models.contains(g))
-            .take(5)
+            .take(3)
             .collect();
         LaunchWizard {
             state: Rc::new(State {
@@ -152,10 +168,10 @@ impl LaunchWizard {
         if picks.mode.is_none() {
             return Next::Screen(self.mode_screen(picks));
         }
-        if picks.gpu.is_none() {
+        if picks.gpu.is_none() && picks.tpu.is_none() {
             return Next::Screen(self.gpu_screen(picks));
         }
-        if picks.offer.is_none() && s.choose_offer {
+        if picks.tpu.is_none() && picks.offer.is_none() && s.choose_offer {
             return Next::Screen(self.offer_screen(picks));
         }
         if s.entered_repo_screen.get() {
@@ -382,21 +398,34 @@ impl LaunchWizard {
                     category_label(name, members, &stats),
                 )
             }));
+            options.push(Opt::new(Choice::Tpu(TpuChoice::ChooseType), TPU_CATEGORY));
             options
         };
         let (wizard, stats_job) = (self.clone(), prices.clone());
         let search = move || {
             let stats = stats_job.result().unwrap_or_default();
-            wizard
+            let mut options: Vec<_> = wizard
                 .state
                 .models
                 .iter()
                 .map(|gpu| Opt::new(Choice::Gpu(gpu.clone()), model_label(gpu, &stats)))
-                .collect()
+                .collect();
+            options.push(Opt::new(Choice::Tpu(TpuChoice::ChooseType), TPU_CATEGORY));
+            options.extend(TPU_TYPES.iter().map(|tpu| {
+                Opt::new(
+                    Choice::Tpu(TpuChoice::Type((*tpu).into())),
+                    format!("TPU {tpu} (Google Cloud)"),
+                )
+            }));
+            options
         };
         let wizard = self.clone();
         let select = move |choice: Choice| match choice {
             Choice::Category(name) => Next::Screen(wizard.category_screen(picks.clone(), name)),
+            Choice::Tpu(tpu) => wizard.next(Picks {
+                tpu: Some(tpu),
+                ..picks.clone()
+            }),
             Choice::Gpu(gpu) => wizard.next(Picks {
                 gpu: Some(gpu),
                 ..picks.clone()

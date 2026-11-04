@@ -328,6 +328,89 @@ fn test_new_repository_choices_dry_run_in_terminal() {
 }
 
 #[test]
+fn test_tpu_category_without_config_explains_setup_without_cloud_calls() {
+    let sandbox = Sandbox::new();
+    let mut term = Terminal::start(&sandbox, &["up", "--no-repo", "--dry-run"]);
+    term.wait(on("Mode"));
+    term.press_until("1", on("GPU"));
+    assert!(shows("TPU (Google Cloud)")(&term));
+    term.press_until("tpu", shows("Filter: tpu"));
+    assert!(!shows("No matches")(&term));
+    term.press(ENTER);
+    assert_eq!(term.exit_status(), 1);
+    let output = term.output_text();
+    assert!(
+        output.contains("Set up Google Cloud before renting TPUs"),
+        "{output}"
+    );
+    assert!(output.contains("gpu/config.json"));
+    assert!(output.contains("Next: gpu up --provider gcp --help"));
+    assert_eq!(output.matches("Next:").count(), 1);
+    assert!(sandbox.calls().is_empty());
+}
+
+#[test]
+fn test_tpu_category_and_type_search_continue_into_cloud_dry_run() {
+    for query in ["tpu", "v5e"] {
+        let sandbox = Sandbox::new();
+        let config = sandbox.root.join("config/gpu");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(config.join("config.json"), r#"{"gcp":{"project":"test-project","zone":"us-central1-a","runtime":"v2-alpha-tpuv5lite","expiry":{"queue":"gpu-expiry","location":"us-central1","service_account":"reaper@test-project.iam.gserviceaccount.com"}}}"#).unwrap();
+        // The only cloud call allowed is a read-only catalog request. All
+        // lifecycle, IAM and task operations fail if this dry run reaches them.
+        sandbox.stub("gcloud", r#"#!/bin/sh
+{ printf 'gcloud'; for arg in "$@"; do printf '\t%s' "$arg"; done; printf '\n'; } >> "$FAKE_CLI_LOG"
+if [ "$*" != 'compute tpus tpu-vm accelerator-types list --project=test-project --quiet --zone=us-central1-a --format=json' ]; then
+    echo 'unexpected cloud call' >&2
+    exit 97
+fi
+printf '[{"type":"v5litepod-1"}]\n'
+"#);
+        // Test repository carry-over, and both a flag deadline and a mandatory
+        // interactive deadline after the capacity choice (not before it).
+        let mut args = vec!["up", "--repo", "example/demo", "--dry-run"];
+        if query == "tpu" {
+            args.extend(["--expire", "2h"]);
+        }
+        let mut term = Terminal::start(&sandbox, &args);
+        term.wait(on("Mode")); // no provider picker, even with GCP configured
+        term.press_until("1", on("GPU"));
+        assert!(shows("TPU (Google Cloud)")(&term));
+        term.press_until(query, |t| t.line(1) == format!("Filter: {query}"));
+        if query == "tpu" {
+            term.press_until(ENTER, on("TPU type"));
+            term.wait(shows("v5litepod-1"));
+        }
+        term.press_until(ENTER, on("TPU capacity"));
+        term.press("2"); // Spot
+        if query == "v5e" {
+            term.wait(on("Destroy after (e.g. 2h)"));
+            term.press("2h");
+            term.press(ENTER);
+        }
+        assert_eq!(term.exit_status(), 0);
+        let output = term.output_text();
+        assert!(
+            output.contains("DRY RUN: no TPU or expiry task created"),
+            "{output}"
+        );
+        assert!(output.contains("--accelerator-type=v5litepod-1"));
+        assert!(output.contains("--spot"));
+        assert!(output.contains("--method=DELETE"));
+        assert!(output.contains("https://github.com/example/demo /workspace/demo"));
+        assert_eq!(
+            tools(&sandbox),
+            if query == "tpu" {
+                vec!["gcloud"]
+            } else {
+                vec![]
+            }
+        );
+        assert!(!sandbox.history_path().exists());
+    }
+}
+
+#[test]
 fn test_arrow_keys_navigate_and_special_keys_never_reach_the_filter() {
     let sandbox = Sandbox::new();
     let mut term = gpu_up(&sandbox);

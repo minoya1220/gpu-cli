@@ -67,7 +67,6 @@ impl TpuId {
 pub struct Settings {
     pub project: String,
     pub zone: Option<String>,
-    pub runtime: Option<String>,
     pub service_account: Option<String>,
     pub expiry: Option<Dict>,
 }
@@ -113,7 +112,6 @@ impl Settings {
         Ok(Self {
             project,
             zone,
-            runtime: optional(d, "runtime")?,
             service_account: optional(d, "service_account")?,
             expiry,
         })

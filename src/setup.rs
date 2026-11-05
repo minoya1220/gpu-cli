@@ -12,7 +12,6 @@ use crate::pyjson::{self, Dict, Value};
 pub const GCP_NOT_SETUP: &str =
     "Set up Google Cloud before renting TPUs. No Google Cloud command was run.\nNext: gpu setup";
 const ZONE: &str = "us-east5-b";
-const RUNTIME: &str = "v2-alpha-tpuv6e";
 const QUEUE: &str = "gpu-expiry";
 // Compute supplies the default compute identity and SSH infrastructure.
 const APIS: [&str; 3] = [
@@ -64,14 +63,12 @@ pub(crate) fn provider_screen(ctx: &Ctx, cfg: &Dict) -> Screen<String, String> {
 }
 
 pub fn run(ctx: &Ctx, cfg: &Dict, flags: &SetupFlags) -> Result<()> {
-    if flags.remove && (flags.zone.is_some() || flags.runtime.is_some() || flags.location.is_some())
-    {
-        return Err(Error::msg("Removal uses the recorded setup; omit --zone, --runtime and --location. Next: gpu setup --provider gcp --remove --help"));
+    if flags.remove && (flags.zone.is_some() || flags.location.is_some()) {
+        return Err(Error::msg("Removal uses the recorded setup; omit --zone and --location. Next: gpu setup --provider gcp --remove --help"));
     }
     if flags.provider.as_deref() != Some("gcp")
         && (flags.project.is_some()
             || flags.zone.is_some()
-            || flags.runtime.is_some()
             || flags.confirm_project.is_some()
             || flags.dry_run
             || flags.remove
@@ -256,7 +253,6 @@ struct Plan {
     project: String,
     number: String,
     zone: String,
-    runtime: String,
     location: String,
     enabled: Vec<String>,
     created_queue: bool,
@@ -333,7 +329,6 @@ impl Plan {
         let mut gcp = Dict::new();
         gcp.insert("project", Value::str(&self.project));
         gcp.insert("zone", Value::str(&self.zone));
-        gcp.insert("runtime", Value::str(&self.runtime));
         gcp.insert("service_account", Value::str(self.account()));
         gcp.insert("expiry", Value::Dict(expiry));
         gcp.insert("setup", Value::Dict(setup));
@@ -392,7 +387,6 @@ impl Plan {
             enabled,
             created_queue,
             zone: text(gcp, "zone").unwrap_or(ZONE).into(),
-            runtime: text(gcp, "runtime").unwrap_or(RUNTIME).into(),
             version: if setup.get("version") == Some(&Value::Int(1)) {
                 1
             } else {
@@ -508,12 +502,6 @@ fn setup_gcp(ctx: &Ctx, cfg: &Dict, flags: &SetupFlags) -> Result<()> {
             "TPU zone",
             flags.zone.as_deref(),
             previous.as_ref().map_or(ZONE, |p| &p.zone),
-        )?,
-        runtime: value_input(
-            ctx,
-            "TPU runtime",
-            flags.runtime.as_deref(),
-            previous.as_ref().map_or(RUNTIME, |p| &p.runtime),
         )?,
         location: location.into(),
         enabled: previous

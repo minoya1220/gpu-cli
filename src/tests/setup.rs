@@ -336,6 +336,10 @@ fn setup_creates_only_one_queue_preserves_config_and_is_idempotent() {
     let config = cfg(&env);
     let gcp = config.get("gcp").unwrap().as_dict().unwrap();
     assert_eq!(gcp.get("service_account"), Some(&Value::str(ACCOUNT)));
+    assert!(
+        gcp.get("runtime").is_none(),
+        "runtime is a launch choice, never a saved setup default"
+    );
     assert_eq!(
         gcp.get("expiry")
             .unwrap()
@@ -391,7 +395,7 @@ fn dry_run_missing_confirmation_and_decline_have_zero_mutations() {
                     .runner(&runner)
                     .interactive(true)
                     .input(&["no"])
-                    .pickers(&["\r", "\r"])
+                    .pickers(&["\r"])
                     .build(),
             ),
             _ => (APPLY[..5].to_vec(), ctx),

@@ -86,9 +86,6 @@ pub struct SetupFlags {
     /// Default TPU zone (interactive default: us-east5-b)
     #[arg(long)]
     pub zone: Option<String>,
-    /// Default TPU runtime (interactive default: v2-alpha-tpuv6e)
-    #[arg(long)]
-    pub runtime: Option<String>,
     /// Cloud Tasks queue region (default: us-central1, or recorded setup region)
     #[arg(long)]
     pub location: Option<String>,
@@ -114,7 +111,7 @@ pub struct UpFlags {
     /// Google Cloud zone (overrides gcp.zone)
     #[arg(long)]
     pub zone: Option<String>,
-    /// TPU runtime image/version (overrides gcp.runtime)
+    /// Override the TPU runtime image (default: chosen automatically by generation)
     #[arg(long)]
     pub runtime: Option<String>,
     /// Rent a Spot TPU instead of on-demand

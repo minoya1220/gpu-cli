@@ -49,17 +49,10 @@ pub(crate) fn catalog_job(
             items
                 .iter()
                 .map(|d| {
-                    gcp::text(
-                        d,
-                        if kind == "versions" {
-                            "version"
-                        } else {
-                            "type"
-                        },
-                    )
-                    .or_else(|| gcp::text(d, "name").and_then(|n| n.rsplit('/').next()))
-                    .map(String::from)
-                    .ok_or_else(gcp::bad_reply)
+                    gcp::text(d, "type")
+                        .or_else(|| gcp::text(d, "name").and_then(|n| n.rsplit('/').next()))
+                        .map(String::from)
+                        .ok_or_else(gcp::bad_reply)
                 })
                 .collect()
         };
@@ -96,7 +89,6 @@ pub(crate) fn catalog_screen<R: 'static>(
 pub(crate) struct Selection {
     pub zone: Option<String>,
     pub tpu: Option<String>,
-    pub runtime: Option<String>,
     pub spot: Option<bool>,
 }
 
@@ -107,8 +99,6 @@ pub(crate) fn next(ctx: Ctx, settings: Settings, picks: Selection) -> Next<Strin
         Some(("locations", "TPU zone"))
     } else if picks.tpu.is_none() {
         Some(("accelerator-types", "TPU type"))
-    } else if picks.runtime.is_none() {
-        Some(("versions", "TPU runtime image"))
     } else {
         None
     };
@@ -118,8 +108,7 @@ pub(crate) fn next(ctx: Ctx, settings: Settings, picks: Selection) -> Next<Strin
             let mut chosen = picks.clone();
             match kind {
                 "locations" => chosen.zone = Some(value),
-                "accelerator-types" => chosen.tpu = Some(value),
-                _ => chosen.runtime = Some(value),
+                _ => chosen.tpu = Some(value),
             }
             next(ctx.clone(), settings.clone(), chosen)
         }));
@@ -148,14 +137,26 @@ pub(crate) fn next(ctx: Ctx, settings: Settings, picks: Selection) -> Next<Strin
     Next::Done(picks)
 }
 
+/// Google's common JAX/PyTorch images; install the chosen framework in the VM.
+/// https://cloud.google.com/tpu/docs/runtimes#pytorch_and_jax
+/// Never use a saved runtime: a later type selection can change generations.
+pub(crate) fn runtime_for(tpu: &str) -> Result<&'static str> {
+    match tpu.split_once('-').map(|(generation, _)| generation) {
+        Some("v2" | "v3" | "v4") => Ok("tpu-ubuntu2204-base"),
+        Some("v5e" | "v5litepod") => Ok("v2-alpha-tpuv5-lite"),
+        Some("v5p") => Ok("v2-alpha-tpuv5"),
+        Some("v6e") => Ok("v2-alpha-tpuv6e"),
+        _ => Err(Error::msg(format!("No automatic runtime is known for TPU type {tpu}. Choose an explicit image. Next: gpu up --tpu {} --runtime <image> --expire 2h", crate::pyfmt::shell_quote(tpu)))),
+    }
+}
+
 pub fn choose(ctx: &Ctx, flags: &UpFlags, settings: &Settings, cfg: &Dict) -> Result<Picks> {
     let missing = || {
-        Error::msg("Specify --tpu, --zone, --runtime and --repo or --no-repo (zone/runtime may come from config). Next: gpu up --provider gcp --help")
+        Error::msg("Specify --tpu, --zone and --repo or --no-repo (zone may come from config). Next: gpu up --provider gcp --help")
     };
     let selected = Selection {
         zone: flags.zone.clone().or_else(|| settings.zone.clone()),
         tpu: flags.tpu.clone(),
-        runtime: flags.runtime.clone().or_else(|| settings.runtime.clone()),
         spot: if ctx.interactive() && !flags.spot && !flags.on_demand {
             None
         } else {
@@ -173,13 +174,16 @@ pub fn choose(ctx: &Ctx, flags: &UpFlags, settings: &Settings, cfg: &Dict) -> Re
     };
     let zone = selected.zone.ok_or_else(missing)?;
     let tpu = selected.tpu.ok_or_else(missing)?;
-    let runtime = selected.runtime.ok_or_else(missing)?;
     let spot = selected.spot.unwrap_or(false);
     // v5e's TPU API accelerator name predates its public product name.
     let tpu = tpu
         .strip_prefix("v5e-")
         .map(|size| format!("v5litepod-{size}"))
         .unwrap_or(tpu);
+    let runtime = match &flags.runtime {
+        Some(runtime) => runtime.clone(),
+        None => runtime_for(&tpu)?.to_string(),
+    };
     if ![&zone, &tpu, &runtime].iter().all(|s| {
         !s.is_empty()
             && s.bytes()

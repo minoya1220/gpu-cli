@@ -367,7 +367,6 @@ esac
     term.press_until("2", on("Google Cloud project"));
     term.wait(shows("test-project"));
     term.press_until("1", shows("TPU zone (Enter ="));
-    term.press_until(ENTER, shows("TPU runtime (Enter ="));
     term.press_until(ENTER, shows("Type project ID 'test-project' to confirm:"));
     // Not a single mutation was even attempted; the existing queue is reused.
     term.press("test-project");
@@ -487,6 +486,7 @@ printf '[{"type":"v5litepod-1"}]\n'
             "{output}"
         );
         assert!(output.contains("--accelerator-type=v5litepod-1"));
+        assert!(output.contains("--version=v2-alpha-tpuv5-lite"));
         assert!(output.contains("--spot"));
         assert!(output.contains("--method=DELETE"));
         assert!(output.contains("https://github.com/example/demo /workspace/demo"));

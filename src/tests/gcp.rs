@@ -143,7 +143,6 @@ fn fixture() -> (TestEnv, Ctx, Arc<FakeRunner>, Arc<Mutex<State>>) {
         assert_eq!(a[3], "tpu-vm");
         match a[4] {
             "accelerator-types" => ok(r#"[{"type":"v6e-1"}]"#),
-            "versions" => ok(r#"[{"version":"v2-alpha-tpuv6e"}]"#),
             "list" => ok(&list(if arg(cmd,"zone") == "us-east5-b" {state.nodes.clone()} else {Vec::new()})),
             "describe" => ok(&value(state.nodes.first().unwrap().clone())),
             "create" => {
@@ -228,6 +227,47 @@ fn dry_run_is_offline_aliases_v5e_and_rejects_missing_or_invalid_safety_flags() 
         ),
         1
     );
+    assert!(runner.calls().is_empty());
+}
+
+#[test]
+fn runtime_is_chosen_from_each_generation_not_the_legacy_config() {
+    let (_env, ctx, runner, _state) = fixture(); // legacy runtime is v6e
+    for (tpu, runtime) in [
+        ("v2-8", "tpu-ubuntu2204-base"),
+        ("v3-8", "tpu-ubuntu2204-base"),
+        ("v4-8", "tpu-ubuntu2204-base"),
+        ("v5e-1", "v2-alpha-tpuv5-lite"),
+        ("v5litepod-8", "v2-alpha-tpuv5-lite"),
+        ("v5p-8", "v2-alpha-tpuv5"),
+        ("v6e-1", "v2-alpha-tpuv6e"),
+    ] {
+        let mut args = UP.to_vec();
+        args.extend(["--tpu", tpu, "--dry-run"]);
+        assert_eq!(main(&ctx, &args), 0, "{}", err(&ctx));
+        assert!(out(&ctx).contains(&format!("--version={runtime}")), "{tpu}");
+    }
+    assert!(runner.calls().is_empty());
+}
+
+#[test]
+fn unknown_generations_need_an_explicit_runtime_and_known_defaults_can_be_overridden() {
+    let (_env, ctx, runner, _state) = fixture();
+    let mut args = UP.to_vec();
+    args.extend(["--tpu", "v99-1", "--dry-run"]);
+    assert_eq!(main(&ctx, &args), 1);
+    let message = err(&ctx);
+    assert!(
+        message.contains("No automatic runtime is known"),
+        "{message}"
+    );
+    assert!(message.contains("--runtime <image>"));
+    for tpu in ["v99-1", "v5e-1"] {
+        let mut args = UP.to_vec();
+        args.extend(["--tpu", tpu, "--runtime", "custom-image", "--dry-run"]);
+        assert_eq!(main(&ctx, &args), 0, "{}", err(&ctx));
+        assert!(out(&ctx).contains("--version=custom-image"));
+    }
     assert!(runner.calls().is_empty());
 }
 
@@ -539,7 +579,6 @@ fn tpu_flag_routes_without_provider_and_catalog_jobs_use_real_keys() {
     for (kind, title, expected) in [
         ("locations", "TPU zone", "us-east5-b"),
         ("accelerator-types", "TPU type", "v6e-1"),
-        ("versions", "TPU runtime image", "v2-alpha-tpuv6e"),
     ] {
         let gate = super::picker::Gate::default();
         let worker_gate = gate.clone();
@@ -566,7 +605,7 @@ fn tpu_flag_routes_without_provider_and_catalog_jobs_use_real_keys() {
         gate.set();
         assert_eq!(result, Outcome::Done(expected.to_string()));
     }
-    assert_eq!(runner.calls().len(), 3);
+    assert_eq!(runner.calls().len(), 2);
 }
 
 #[test]
@@ -581,15 +620,14 @@ fn catalog_choices_share_a_stack_and_back_does_not_refetch() {
         keys.wait(|s| s.title == "TPU zone" && !s.labels.is_empty());
         keys.press_until(ENTER, on("TPU type"));
         keys.wait(|s| s.labels.contains(&"v6e-1".to_string()));
-        keys.press_until(ENTER, on("TPU runtime image"));
-        keys.wait(|s| !s.labels.is_empty());
+        keys.press_until(ENTER, on("TPU capacity"));
         keys.press_until(BACK, on("TPU type"));
         keys.press_until(BACK, on("TPU zone"));
         assert_eq!(keys.labels(), ["us-east5-b", "us-central1-a"]);
         keys.press(CTRL_C);
     });
     assert_eq!(result, Outcome::Cancelled(130));
-    assert_eq!(runner.calls().len(), 3);
+    assert_eq!(runner.calls().len(), 2);
 }
 
 #[test]

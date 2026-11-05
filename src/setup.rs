@@ -213,39 +213,74 @@ fn choose_project(ctx: &Ctx, explicit: Option<&str>) -> Result<Dict> {
         .ok_or_else(gcp::bad_reply)
 }
 
-fn value_input(ctx: &Ctx, label: &str, explicit: Option<&str>, default: &str) -> Result<String> {
-    let valid = |s: &str| {
-        !s.is_empty()
-            && s.bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"-._".contains(&b))
-    };
-    let value = if let Some(value) = explicit {
-        value.to_string()
-    } else if ctx.interactive() {
-        let value: String = pick(
-            ctx,
-            Screen::new(format!("{label} (Enter = {default})"), Vec::new, Next::Done)
-                .text_input(Some(Box::new(move |s| {
-                    if s.is_empty() || valid(s) {
-                        Ok(())
-                    } else {
-                        Err("Use letters, digits, hyphens, dots or underscores".into())
-                    }
-                })))
-                .input_label(label),
-        )?;
-        if value.is_empty() {
-            default.into()
+// Published v2-v6 TPU zones, not stock or quota. Used ONLY while the TPU API is
+// disabled: querying that API before consent can prompt gcloud to enable it.
+// https://cloud.google.com/tpu/docs/regions-zones (2026-11-05)
+const PUBLISHED_TPU_ZONES: &[&str] = &[
+    "asia-east1-c",
+    "asia-northeast1-b",
+    "europe-west4-a",
+    "europe-west4-b",
+    "southamerica-west1-a",
+    "us-central1-a",
+    "us-central1-b",
+    "us-central1-c",
+    "us-central2-b",
+    "us-east1-d",
+    "us-east5-a",
+    "us-east5-b",
+    "us-south1-a",
+    "us-south1-ai1b",
+    "us-west1-c",
+    "us-west4-a",
+];
+
+pub(crate) fn zone_screen(
+    ctx: &Ctx,
+    project: &str,
+    preferred: &str,
+    api_enabled: bool,
+) -> Screen<String, String> {
+    let worker = ctx.clone();
+    let project = project.to_string();
+    let title = format!("TPU zone ({project})");
+    let preferred = preferred.to_string();
+    let job = Job::new(move || {
+        let mut zones = if api_enabled {
+            gcp::locations(&worker, &project).map_err(|e| e.text().to_string())?
         } else {
-            value
-        }
+            PUBLISHED_TPU_ZONES.iter().map(|s| s.to_string()).collect()
+        };
+        zones.sort();
+        zones.dedup();
+        // The engine initially highlights row 0. Preserve the previous zone on
+        // reconfiguration; new setups prefer us-east5-b only when available.
+        zones.sort_by_key(|zone| zone != &preferred);
+        Ok(zones)
+    });
+    let options = job.clone();
+    Screen::new(
+        title,
+        move || {
+            options
+                .result()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|zone| Opt::new(zone.clone(), zone))
+                .collect()
+        },
+        Next::Done,
+    )
+    .load(job)
+    .wait_initial(true)
+    .quick_select(false)
+    .loading("Loading TPU-capable zones…")
+    .empty("No TPU-capable zones returned; Back returns, Enter retries a failed request")
+    .notice(if api_enabled {
+        "Project TPU zones; quota/capacity is not guaranteed."
     } else {
-        default.into()
-    };
-    if !valid(&value) {
-        return Err(Error::msg(format!("Invalid {label}. Next: gpu setup")));
-    }
-    Ok(value)
+        "Published TPU zones (TPU API disabled); project availability/quota is unverified."
+    })
 }
 
 #[derive(Clone)]
@@ -497,12 +532,10 @@ fn setup_gcp(ctx: &Ctx, cfg: &Dict, flags: &SetupFlags) -> Result<()> {
     let mut plan = Plan {
         project,
         number,
-        zone: value_input(
-            ctx,
-            "TPU zone",
-            flags.zone.as_deref(),
-            previous.as_ref().map_or(ZONE, |p| &p.zone),
-        )?,
+        zone: flags
+            .zone
+            .clone()
+            .unwrap_or_else(|| previous.as_ref().map_or(ZONE, |p| p.zone.as_str()).into()),
         location: location.into(),
         enabled: previous
             .as_ref()
@@ -512,7 +545,21 @@ fn setup_gcp(ctx: &Ctx, cfg: &Dict, flags: &SetupFlags) -> Result<()> {
         version: previous.as_ref().map_or(0, |p| p.version),
         removing: false,
     };
+    if !component(&plan.zone) {
+        return Err(Error::msg("Invalid TPU zone. Next: gpu setup"));
+    }
     let enabled = plan.services(ctx)?;
+    if flags.zone.is_none() && ctx.interactive() {
+        plan.zone = pick(
+            ctx,
+            zone_screen(
+                ctx,
+                &plan.project,
+                &plan.zone,
+                enabled.iter().any(|s| s == "tpu.googleapis.com"),
+            ),
+        )?;
+    }
     let missing: Vec<_> = APIS
         .iter()
         .filter(|api| !enabled.iter().any(|s| s == **api))
@@ -525,6 +572,10 @@ fn setup_gcp(ctx: &Ctx, cfg: &Dict, flags: &SetupFlags) -> Result<()> {
         plan.queue()?.check(ctx)?;
     }
     ctx.println(&format!("Set up existing project {}. Use a dedicated, sacrificial project you do not mind gpu working in. No TPU is created.", plan.project))?;
+    ctx.println(&format!(
+        "  Default TPU zone: {}; Cloud Tasks queue region: {}. Runtime is automatic at launch.",
+        plan.zone, plan.location
+    ))?;
     for api in &missing {
         ctx.println(&format!("  Enable API: {api}"))?;
     }
@@ -557,6 +608,13 @@ fn setup_gcp(ctx: &Ctx, cfg: &Dict, flags: &SetupFlags) -> Result<()> {
             ))
         })?;
         ctx.println(&format!("Enabled API: {api}."))?;
+    }
+    // An API-disabled project's pre-consent list was necessarily offline.
+    // Verify the selected zone against this project once enabling is approved,
+    // and stop before creating the queue if it is unavailable.
+    let zones = gcp::locations(ctx, &plan.project).map_err(|_| Error::msg("Setup stopped while verifying the TPU zone; completed API changes are recorded. Next: gpu setup"))?;
+    if !zones.contains(&plan.zone) {
+        return Err(Error::msg(format!("TPU zone {} was not returned for project {}; completed API changes are recorded. Choose another zone. Next: gpu setup", plan.zone, plan.project)));
     }
     // Check the default identity AFTER Compute is enabled, BEFORE queue creation.
     plan.check_identity(ctx)?;

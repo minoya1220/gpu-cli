@@ -390,12 +390,11 @@ fn dry_run_missing_confirmation_and_decline_have_zero_mutations() {
                 ctx,
             ),
             "decline" => (
-                APPLY[..5].to_vec(),
+                [APPLY[..5].to_vec(), vec!["--zone", "us-east5-b"]].concat(),
                 env.ctx()
                     .runner(&runner)
                     .interactive(true)
                     .input(&["no"])
-                    .pickers(&["\r"])
                     .build(),
             ),
             _ => (APPLY[..5].to_vec(), ctx),
@@ -728,6 +727,120 @@ fn unset_up_cloud_is_blocked_at_the_single_process_boundary_for_all_commands() {
         assert_eq!(main(&ctx, &["setup", "--provider", "vast"]), 0);
         assert!(runner.argvs().iter().all(|a| a[0] == "vastai"));
     }
+}
+
+#[test]
+fn setup_zone_picker_loads_project_zones_highlights_default_and_filters_with_real_keys() {
+    use crate::picker::{testing::*, Outcome};
+    let (_env, ctx, runner, _state) = fixture();
+    let cloud = ctx.for_gcp_setup();
+    let result = drive(
+        crate::setup::zone_screen(&cloud, PROJECT, "us-east5-b", true),
+        |keys| {
+            keys.wait(|s| s.labels.len() == 2);
+            assert_eq!(keys.labels(), ["us-east5-b", "us-central1-a"]);
+            assert!(keys.snapshot().notice.contains("quota/capacity"));
+            keys.type_text("central1");
+            assert_eq!(keys.labels(), ["us-central1-a"]);
+            keys.press(ENTER);
+        },
+    );
+    assert_eq!(result, Outcome::Done("us-central1-a".into()));
+    assert_eq!(
+        runner.argvs(),
+        [vec![
+            "gcloud",
+            "compute",
+            "tpus",
+            "locations",
+            "list",
+            "--project=test-project",
+            "--quiet",
+            "--format=json"
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect::<Vec<_>>()]
+    );
+    // Pressing Enter without moving really selects the highlighted default.
+    let result = drive(
+        crate::setup::zone_screen(&cloud, PROJECT, "us-east5-b", true),
+        |keys| {
+            keys.wait(|s| s.labels.len() == 2);
+            keys.press(ENTER);
+        },
+    );
+    assert_eq!(result, Outcome::Done("us-east5-b".into()));
+}
+
+#[test]
+fn setup_zone_picker_handles_disabled_api_and_absent_default_without_implicit_enable() {
+    use crate::picker::{testing::*, Outcome};
+    let env = TestEnv::new();
+    let ctx = env.ctx().build().for_gcp_setup(); // every process forbidden
+    let result = drive(
+        crate::setup::zone_screen(&ctx, PROJECT, "us-east5-b", false),
+        |keys| {
+            keys.wait(|s| !s.labels.is_empty());
+            assert_eq!(keys.labels()[0], "us-east5-b");
+            assert!(keys.snapshot().notice.contains("TPU API disabled"));
+            keys.type_text("europe-west4-b");
+            keys.press(ENTER);
+        },
+    );
+    assert_eq!(result, Outcome::Done("europe-west4-b".into()));
+    let runner = FakeRunner::new(|cmd| {
+        assert_eq!(
+            strs(&cmd.argv)[1..5],
+            ["compute", "tpus", "locations", "list"]
+        );
+        ok(r#"[{"locationId":"europe-west4-b"},{"locationId":"europe-west4-a"}]"#)
+    });
+    let ctx = env.ctx().runner(&runner).build().for_gcp_setup();
+    let result = drive(
+        crate::setup::zone_screen(&ctx, PROJECT, "us-east5-b", true),
+        |keys| {
+            keys.wait(|s| s.labels.len() == 2);
+            assert_eq!(keys.labels(), ["europe-west4-a", "europe-west4-b"]);
+            keys.press(ENTER);
+        },
+    );
+    assert_eq!(result, Outcome::Done("europe-west4-a".into()));
+}
+
+#[test]
+fn unavailable_zone_stops_before_queue_creation_and_empty_catalog_never_skips_the_picker() {
+    use crate::picker::{testing::*, Outcome};
+    use crate::process::Runner;
+    let (env, _ctx, inner, _state) = fixture();
+    let runner = FakeRunner::new(move |cmd| {
+        if strs(&cmd.argv).get(1..5) == Some(&["compute", "tpus", "locations", "list"]) {
+            return ok("[]");
+        }
+        inner.run(cmd)
+    });
+    let ctx = env.ctx().runner(&runner).build();
+    assert_eq!(main(&ctx, APPLY), 1);
+    assert!(err(&ctx).contains("TPU zone us-east5-b was not returned for project test-project"));
+    assert!(mutations(&runner).is_empty());
+    assert!(!crate::setup::gcp_ready(&cfg(&env)));
+    let result = drive(
+        crate::setup::zone_screen(&ctx.for_gcp_setup(), PROJECT, "us-east5-b", true),
+        |keys| {
+            keys.wait(|s| {
+                s.body
+                    .iter()
+                    .any(|line| line.contains("No TPU-capable zones returned"))
+            });
+            keys.press(ENTER);
+            assert!(
+                !keys.snapshot().done,
+                "empty catalog must not advance to confirmation"
+            );
+            keys.press(CTRL_C);
+        },
+    );
+    assert_eq!(result, Outcome::Cancelled(130));
 }
 
 #[test]

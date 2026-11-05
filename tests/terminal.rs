@@ -328,6 +328,50 @@ fn test_new_repository_choices_dry_run_in_terminal() {
 }
 
 #[test]
+fn test_setup_with_disabled_api_still_shows_zone_choices_without_enabling_anything() {
+    let sandbox = Sandbox::new();
+    sandbox.stub(
+        "gcloud",
+        r#"#!/bin/sh
+{ printf 'gcloud'; for arg in "$@"; do printf '\t%s' "$arg"; done; printf '\n'; } >> "$FAKE_CLI_LOG"
+case "$*" in
+  'projects list --filter=lifecycleState:ACTIVE --quiet --format=json')
+    printf '[{"projectId":"test-project","projectNumber":"123456","name":"sandbox"}]\n' ;;
+  'services list --enabled --project=test-project --quiet --format=json') printf '[]\n' ;;
+  *) echo 'unexpected call: no API queries or mutations allowed before consent' >&2; exit 97 ;;
+esac
+"#,
+    );
+    let mut term = Terminal::start(
+        &sandbox,
+        &[
+            "setup",
+            "--provider",
+            "gcp",
+            "--project",
+            "test-project",
+            "--dry-run",
+        ],
+    );
+    term.wait(on("TPU zone (test-project)"));
+    term.wait(shows("us-east5-b"));
+    assert!(shows("TPU API disabled")(&term));
+    assert!(shows("asia-east1-c")(&term));
+    assert!(shows("us-central1-a")(&term));
+    term.press_until("southamerica", shows("Filter: southamerica"));
+    term.press(ENTER);
+    assert_eq!(term.exit_status(), 0, "{}", term.output_text());
+    assert!(term
+        .output_text()
+        .contains("Default TPU zone: southamerica-west1-a"));
+    assert!(!sandbox.root.join("config/gpu/config.json").exists());
+    let calls = sandbox.calls();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0][1..3], ["projects", "list"]);
+    assert_eq!(calls[1][1..3], ["services", "list"]);
+}
+
+#[test]
 fn test_setup_project_picker_confirmation_status_and_remove_with_only_cloud_stubs() {
     let sandbox = Sandbox::new();
     sandbox.stub(
@@ -354,8 +398,8 @@ case "$*" in
   'projects get-iam-policy test-project --project=test-project --quiet --format=json')
     printf '{"bindings":[{"role":"roles/editor","members":["serviceAccount:123456-compute@developer.gserviceaccount.com"]}]}\n' ;;
   'compute tpus locations list --project=test-project --quiet --format=json')
-    printf '[{"locationId":"us-east5-b"}]\n' ;;
-  'compute tpus tpu-vm list --project=test-project --zone=us-east5-b --quiet --format=json' | 'tasks list --location=us-central1 --queue=gpu-expiry --project=test-project --quiet --format=json')
+    printf '[{"locationId":"us-central1-a"},{"locationId":"europe-west4-a"},{"locationId":"us-east5-b"}]\n' ;;
+  'compute tpus tpu-vm list --project=test-project --zone=us-east5-b --quiet --format=json' | 'compute tpus tpu-vm list --project=test-project --zone=us-central1-a --quiet --format=json' | 'compute tpus tpu-vm list --project=test-project --zone=europe-west4-a --quiet --format=json' | 'tasks list --location=us-central1 --queue=gpu-expiry --project=test-project --quiet --format=json')
     printf '[]\n' ;;
   *) echo 'unexpected cloud command: all mutations forbidden in this test' >&2; exit 97 ;;
 esac
@@ -366,8 +410,21 @@ esac
     assert_eq!(tools(&sandbox), ["vastai"]);
     term.press_until("2", on("Google Cloud project"));
     term.wait(shows("test-project"));
-    term.press_until("1", shows("TPU zone (Enter ="));
+    term.press_until("1", on("TPU zone (test-project)"));
+    term.wait(shows("us-central1-a"));
+    assert!(
+        term.lines().contains(&"› 1. us-east5-b".to_string()),
+        "{}",
+        term.lines().join("\n")
+    );
+    assert!(shows("europe-west4-a")(&term));
+    assert!(!shows("Type HTTPS/git@ URL")(&term));
+    term.press_until("europe", shows("Filter: europe"));
     term.press_until(ENTER, shows("Type project ID 'test-project' to confirm:"));
+    assert!(term
+        .output_text()
+        .contains("Default TPU zone: europe-west4-a"));
+    assert!(!term.output_text().contains("TPU runtime (Enter ="));
     // Not a single mutation was even attempted; the existing queue is reused.
     term.press("test-project");
     term.press(ENTER);
@@ -376,6 +433,8 @@ esac
     let config = std::fs::read_to_string(&path).unwrap();
     assert!(config.contains("123456-compute@developer.gserviceaccount.com"));
     assert!(config.contains("\"created_queue\": false"));
+    assert!(config.contains("\"zone\": \"europe-west4-a\""));
+    assert!(!config.contains("\"runtime\""));
     let before = sandbox.calls().len();
     let mut term = Terminal::start(&sandbox, &["setup"]);
     term.wait(shows("Google Cloud  ✓ set up"));

@@ -10,6 +10,7 @@ pub mod error;
 pub mod expiry;
 pub mod gcp;
 pub mod gcp_expiry;
+pub mod gcp_geo;
 pub mod gcp_ssh;
 pub mod gcp_wizard;
 pub mod history;

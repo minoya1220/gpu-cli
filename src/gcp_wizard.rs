@@ -8,6 +8,7 @@ use crate::picker::{pick, Job, Next, Opt, Screen};
 use crate::pyjson::Dict;
 use crate::repos::{resolve_repo, Repo};
 
+#[derive(Clone)]
 pub struct Picks {
     pub zone: String,
     pub tpu: String,
@@ -43,6 +44,19 @@ pub(crate) fn catalog_job(
             )
         };
         load().map_err(|e| e.text().to_string())
+    })
+}
+
+pub(crate) fn zone_job(
+    ctx: &Ctx,
+    settings: &Settings,
+    tpu: Option<&str>,
+) -> Job<Vec<crate::gcp_catalog::Zone>> {
+    let worker = ctx.clone();
+    let project = settings.project.clone();
+    let tpu = tpu.map(String::from);
+    Job::new(move || {
+        crate::gcp_catalog::zones(&worker, &project, tpu.as_deref()).map_err(|e| e.text().into())
     })
 }
 
@@ -100,6 +114,26 @@ pub(crate) fn next(ctx: Ctx, settings: Settings, picks: Selection) -> Next<Strin
         None
     };
     if let Some((kind, title)) = missing {
+        if kind == "locations" {
+            let job = zone_job(&ctx, &settings, picks.tpu.as_deref());
+            let initial = crate::gcp_catalog::known(&ctx, &settings.project, picks.tpu.as_deref());
+            return Next::Screen(crate::gcp_zones::screen(
+                job,
+                initial,
+                title,
+                "",
+                move |zone| {
+                    next(
+                        ctx.clone(),
+                        settings.clone(),
+                        Selection {
+                            zone: Some(zone),
+                            ..picks.clone()
+                        },
+                    )
+                },
+            ));
+        }
         let job = catalog_job(
             &ctx,
             &settings,

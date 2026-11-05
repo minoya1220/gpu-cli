@@ -356,10 +356,10 @@ esac
         ],
     );
     term.wait(on("TPU zone (test-project)"));
-    term.wait(shows("us-east5-b"));
+    term.wait(shows("us-east ("));
     assert!(shows("API disabled")(&term));
-    assert!(shows("asia-east1-c")(&term));
-    assert!(shows("us-central1-a")(&term));
+    assert!(shows("asia-east")(&term));
+    assert!(shows("us-central")(&term));
     term.press_until("southamerica", shows("Filter: southamerica"));
     term.press(ENTER);
     assert_eq!(term.exit_status(), 0, "{}", term.output_text());
@@ -418,11 +418,11 @@ esac
     term.press_until("2", on("Google Cloud project"));
     term.wait(shows("test-project"));
     term.press_until("1", on("TPU zone (test-project)"));
-    term.wait(shows("us-central1-a"));
+    term.wait(shows("us-central"));
     assert!(
         term.lines()
             .iter()
-            .any(|l| l.starts_with("›") && l.contains("us-east5-b")),
+            .any(|l| l.starts_with("›") && l.contains("us-east (")),
         "{}",
         term.lines().join("\n")
     );
@@ -587,7 +587,7 @@ esac
         assert!(shows("TPU (Google Cloud)")(&term));
         term.press_until(query, |t| t.line(1) == format!("Filter: {query}"));
         term.press_until(ENTER, on("TPU zone"));
-        term.wait(shows("us-central1-a"));
+        term.wait(shows("us-central"));
         term.press_until("us-central1-a", shows("Filter: us-central1-a"));
         if query == "tpu" {
             term.press_until(ENTER, on("TPU type"));

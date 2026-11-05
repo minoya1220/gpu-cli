@@ -184,6 +184,11 @@ enabled. Disabled APIs are not queried before approval. Setup verifies the
 selected zone live after enablement, before creating the queue. Lists do not
 guarantee stock or quota.
 
+Zone pickers first show area groups such as `us-west (3 zones)` and `us-east`.
+Enter/→ opens only that area's zones; Back returns to the groups. Typing a full
+zone name on the first screen searches zones directly. Groups come from region
+prefixes (South America is one umbrella); counts are zones, not stock.
+
 Zones sort approximately nearest-first from the local IANA timezone and region
 city coordinates—not measured latency. There are no network probes/geolocation
 services. `TZ` overrides cross-platform timezone discovery; embedded public-domain
@@ -264,6 +269,14 @@ ambiguous/time-out results keep it. `ls`, TPU `up`, `down` and `expire` reconcil
 only owned tasks whose exact node is absent from a complete authenticated
 inventory. Failed checks, existing nodes, unrelated tasks and tasks armed within
 60s are kept. After uncertain creation, inspect `gpu ls --provider gcp`.
+
+After a verified capacity rejection and timer cleanup, interactive launches offer
+the next-nearest zone with the same type and capacity mode. Its price is shown;
+one key approves the retry, or choose another zone. Previously tried zones are
+omitted. Retries keep the original deadline, runtime and repo; a changed price
+requires confirmation again. Non-interactive errors name verified alternative
+zones and a different command with the original absolute deadline. Unverified
+creates or timer cleanup never offer another paid launch.
 
 Worker **0** handles SSH/editing, including multi-worker types. Successful
 interactive launches offer the same editor picker as Vast. `gpu ssh` prints the

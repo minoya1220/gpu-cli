@@ -26,6 +26,7 @@ struct State {
     tasks: Vec<Dict>,
     nodes: Vec<Dict>,
     fail_create: bool,
+    reject_creates: usize,
     ambiguous_create: bool,
     fail_presence: bool,
     empty_types: bool,
@@ -160,9 +161,11 @@ fn fixture() -> (TestEnv, Ctx, Arc<FakeRunner>, Arc<Mutex<State>>) {
             },
             "create" => {
                 assert!(!state.tasks.is_empty(), "create without a deletion task");
-                if state.fail_create { return Ok(Output::failed(1, if state.ambiguous_create { "unknown transport failure" } else { "RESOURCE_EXHAUSTED capacity stockout token=do-not-print" })); }
+                let reject=state.fail_create || state.reject_creates>0;
+                state.reject_creates=state.reject_creates.saturating_sub(1);
+                if reject { return Ok(Output::failed(1, if state.ambiguous_create { "unknown transport failure" } else { "RESOURCE_EXHAUSTED capacity stockout token=do-not-print" })); }
                 let mut n = node(a.contains(&"--spot"));
-                n.insert("name", Value::str(format!("projects/test-project/locations/us-east5-b/nodes/{}", a[5])));
+                n.insert("name", Value::str(format!("projects/test-project/locations/{}/nodes/{}",arg(cmd,"zone"), a[5])));
                 state.nodes.push(n);
                 ok("{}")
             },
@@ -395,7 +398,16 @@ fn stockout_with_verified_absence_cleans_its_task_and_reports_one_next_command()
     state.lock().unwrap().fail_create = true;
     assert_eq!(main(&ctx, UP), 1);
     let message = err(&ctx);
-    assert!(message.contains("try another zone or Spot"), "{message}");
+    assert!(
+        message.contains("No on-demand capacity in us-east5-b"),
+        "{message}"
+    );
+    assert!(message.contains("Other v6e-1 zones:"));
+    assert!(!message
+        .split("Next:")
+        .nth(1)
+        .unwrap()
+        .contains("--zone us-east5-b"));
     assert_eq!(message.matches("Next:").count(), 1);
     assert!(!message.contains("do-not-print"));
     assert!(message.contains("deletion task removed"));
@@ -650,13 +662,17 @@ fn catalog_choices_share_a_stack_and_back_does_not_refetch() {
         panic!("missing first screen")
     };
     let result = drive(first, move |keys| {
-        keys.wait(|s| s.title == "TPU zone" && s.labels == ["us-east5-b", "us-central1-a"]);
+        keys.wait(|s| {
+            s.title == "TPU zone" && s.labels == ["us-east (1 zone)", "us-central (1 zone)"]
+        });
+        keys.press_until(RIGHT, on("us-east zones"));
         keys.press_until(ENTER, on("TPU type"));
         keys.wait(|s| s.labels.contains(&"v6e-1".to_string()));
         keys.press_until(ENTER, on("TPU capacity"));
         keys.press_until(BACK, on("TPU type"));
+        keys.press_until(BACK, on("us-east zones"));
         keys.press_until(BACK, on("TPU zone"));
-        assert_eq!(keys.labels(), ["us-east5-b", "us-central1-a"]);
+        assert_eq!(keys.labels(), ["us-east (1 zone)", "us-central (1 zone)"]);
         keys.press(CTRL_C);
     });
     assert_eq!(result, Outcome::Cancelled(130));
@@ -944,4 +960,309 @@ fn incomplete_inventory_never_proves_absence() {
             .iter()
             .any(|a| a.iter().any(|s| s == "delete")));
     }
+}
+
+fn retry_flags() -> crate::cli::UpFlags {
+    let mut args = UP.to_vec();
+    args.extend(["--zone", "us-east5-b", "--spot"]);
+    let crate::cli::Parsed::Run(command) = crate::cli::parse(&argv(&args)) else {
+        panic!("parse")
+    };
+    let crate::cli::Command::Up(flags) = *command else {
+        panic!("up")
+    };
+    flags
+}
+fn restrict_retry_zones(ctx: &Ctx) {
+    let mut zones = crate::gcp_facts::known_zones(ctx, "test-project");
+    for zone in &mut zones {
+        zone.types.clear();
+        if zone.name == "us-east5-b" {
+            zone.types.push("v6e-1".into());
+        }
+    }
+    zones.push(crate::gcp_catalog::Zone {
+        name: "us-east5-a".into(),
+        types: vec!["v6e-1".into()],
+    });
+    let mut d = Dict::new();
+    d.insert(
+        "zones",
+        Value::List(
+            zones
+                .into_iter()
+                .map(|z| {
+                    let mut row = Dict::new();
+                    row.insert("name", Value::str(z.name));
+                    row.insert(
+                        "types",
+                        Value::List(z.types.into_iter().map(Value::str).collect()),
+                    );
+                    Value::Dict(row)
+                })
+                .collect(),
+        ),
+    );
+    crate::gcp_http::write_cache(ctx, "tpu-catalog-test-project.json", d);
+}
+#[test]
+fn spot_stockout_names_a_different_zone_and_preserves_request_scope() {
+    let (env, ctx, _runner, state) = fixture();
+    restrict_retry_zones(&ctx);
+    super::gcp_prices::cache(&env);
+    state.lock().unwrap().fail_create = true;
+    let mut args = UP.to_vec();
+    args.push("--spot");
+    assert_eq!(main(&ctx, &args), 1);
+    let text = err(&ctx);
+    assert!(
+        text.contains("No Spot capacity in us-east5-b. No node; deletion task removed."),
+        "{text}"
+    );
+    assert!(!text.contains("or Spot"));
+    assert!(text.contains("Other v6e-1 zones: us-east5-a"));
+    let next = text.split("Next:").nth(1).unwrap();
+    assert!(next.contains("--zone us-east5-a --spot"));
+    assert!(!next.contains("--zone us-east5-b"));
+    assert!(next.contains("--runtime v2-alpha-tpuv6e"));
+    assert!(next.contains("--expire 2026-11-03T02:00:00Z"));
+    assert!(state.lock().unwrap().tasks.is_empty());
+}
+#[test]
+fn interactive_capacity_retry_is_one_key_and_keeps_original_deadline() {
+    use crate::picker::{testing::*, Outcome};
+    let (env, _ctx, runner, state) = fixture();
+    let ctx = env
+        .ctx()
+        .runner(&runner)
+        .clock(&FakeClock::at("2026-11-03T00:00:00Z".parse().unwrap()))
+        .interactive(true)
+        .pickers(&["2"])
+        .build();
+    restrict_retry_zones(&ctx);
+    super::gcp_prices::cache(&env);
+    state.lock().unwrap().reject_creates = 1;
+    let cfg = crate::config::load_config(&ctx.env).unwrap();
+    let flags = retry_flags();
+    let clock = ctx.clock.clone();
+    let watched = state.clone();
+    let result = crate::gcp::launch_with_retry(
+        &ctx,
+        &flags,
+        &cfg,
+        Some("2026-11-03T02:00:00Z".parse().unwrap()),
+        move |screen| {
+            assert!(
+                watched.lock().unwrap().tasks.is_empty(),
+                "remove rejected attempt's timer before offering another paid create"
+            );
+            let clock = clock.clone();
+            match drive(screen, move |keys| {
+                keys.wait(|s| {
+                    s.labels
+                        .iter()
+                        .any(|l| l.contains("us-east5-a · $0.750/hr"))
+                });
+                assert!(keys
+                    .snapshot()
+                    .notice
+                    .contains("delete at Nov 03 02:00 UTC"));
+                assert!(!keys.labels().iter().any(|s| s.contains("in us-east5-b")));
+                clock.sleep(30.0);
+                keys.press("1");
+            }) {
+                Outcome::Done(choice) => Ok(choice),
+                other => panic!("{other:?}"),
+            }
+        },
+    );
+    assert!(result.is_ok(), "{}", err(&ctx));
+    let s = state.lock().unwrap();
+    assert_eq!(s.nodes.len(), 1);
+    assert!(crate::gcp::text(&s.nodes[0], "name")
+        .unwrap()
+        .contains("/us-east5-a/"));
+    assert_eq!(s.tasks.len(), 1);
+    assert_eq!(
+        crate::gcp::text(&s.tasks[0], "scheduleTime"),
+        Some("2026-11-03T02:00:00Z")
+    );
+    let creates = runner
+        .calls()
+        .into_iter()
+        .filter(|c| c.argv.get(4).is_some_and(|a| a == "create"))
+        .collect::<Vec<_>>();
+    assert_eq!(creates.len(), 2);
+    assert!(creates.iter().all(|c| c.argv.contains(&"--spot".into())));
+    assert_eq!(ctx.ui.remaining(), 0);
+}
+#[test]
+fn ambiguous_create_never_offers_capacity_retry_or_disarms_timer() {
+    let (env, _ctx, runner, state) = fixture();
+    let ctx = env
+        .ctx()
+        .runner(&runner)
+        .clock(&FakeClock::at("2026-11-03T00:00:00Z".parse().unwrap()))
+        .interactive(true)
+        .build();
+    {
+        let mut s = state.lock().unwrap();
+        s.fail_create = true;
+        s.ambiguous_create = true;
+    }
+    let cfg = crate::config::load_config(&ctx.env).unwrap();
+    assert!(crate::gcp::launch_with_retry(
+        &ctx,
+        &retry_flags(),
+        &cfg,
+        Some("2026-11-03T02:00:00Z".parse().unwrap()),
+        |_| panic!("unverified create cannot offer another paid launch")
+    )
+    .is_err());
+    assert_eq!(state.lock().unwrap().tasks.len(), 1);
+}
+#[test]
+fn retry_can_return_to_grouped_zone_picker_without_authorizing_payment() {
+    use crate::picker::{testing::*, Outcome};
+    let (env, ctx, _runner, _state) = fixture();
+    restrict_retry_zones(&ctx);
+    super::gcp_prices::cache(&env);
+    let picks = crate::gcp_wizard::Picks {
+        zone: "us-east5-b".into(),
+        tpu: "v6e-1".into(),
+        spot: true,
+        runtime: "v2-alpha-tpuv6e".into(),
+        repo: crate::repos::Repo::NoRepo,
+        directory: "/workspace".into(),
+        deadline: "2026-11-03T02:00:00Z".parse().unwrap(),
+    };
+    let settings = crate::gcp::Settings::load(&dict(CONFIG)).unwrap();
+    let skipped = ["us-east5-b".into()].into_iter().collect();
+    let result = drive(
+        crate::gcp_retry::screen(&ctx, &settings, &dict(CONFIG), &picks, &skipped),
+        |keys| {
+            keys.wait(|s| s.labels.iter().any(|l| l.starts_with("Retry")));
+            keys.press_until("2", on("TPU zone"));
+            assert!(keys.labels().iter().any(|s| s.starts_with("us-east (")));
+            keys.type_text("us-east5-a");
+            keys.press(ENTER);
+        },
+    );
+    assert_eq!(
+        result,
+        Outcome::Done(Some(crate::gcp_retry::Choice {
+            zone: "us-east5-a".into(),
+            approved: false,
+            rate: None
+        }))
+    );
+}
+
+#[test]
+fn cleanup_failure_never_offers_retry_and_keeps_expiry() {
+    let (env, _ctx, runner, state) = fixture();
+    let ctx = env
+        .ctx()
+        .runner(&runner)
+        .clock(&FakeClock::at("2026-11-03T00:00:00Z".parse().unwrap()))
+        .interactive(true)
+        .build();
+    {
+        let mut s = state.lock().unwrap();
+        s.fail_create = true;
+        s.fail_delete_task = true;
+    }
+    let cfg = crate::config::load_config(&ctx.env).unwrap();
+    assert!(crate::gcp::launch_with_retry(
+        &ctx,
+        &retry_flags(),
+        &cfg,
+        Some("2026-11-03T02:00:00Z".parse().unwrap()),
+        |_| panic!("timer cleanup was not verified")
+    )
+    .is_err());
+    assert_eq!(state.lock().unwrap().tasks.len(), 1);
+}
+#[test]
+fn retry_does_not_extend_an_expired_deadline_or_create_again() {
+    use crate::picker::{testing::*, Outcome};
+    let (env, _ctx, runner, state) = fixture();
+    let ctx = env
+        .ctx()
+        .runner(&runner)
+        .clock(&FakeClock::at("2026-11-03T00:00:00Z".parse().unwrap()))
+        .interactive(true)
+        .build();
+    restrict_retry_zones(&ctx);
+    super::gcp_prices::cache(&env);
+    state.lock().unwrap().reject_creates = 1;
+    let cfg = crate::config::load_config(&ctx.env).unwrap();
+    let clock = ctx.clock.clone();
+    let result = crate::gcp::launch_with_retry(
+        &ctx,
+        &retry_flags(),
+        &cfg,
+        Some("2026-11-03T02:00:00Z".parse().unwrap()),
+        move |screen| {
+            let clock = clock.clone();
+            match drive(screen, move |keys| {
+                keys.wait(|s| s.labels.iter().any(|l| l.starts_with("Retry")));
+                clock.sleep(7201.0);
+                keys.press("1");
+            }) {
+                Outcome::Done(choice) => Ok(choice),
+                other => panic!("{other:?}"),
+            }
+        },
+    );
+    assert!(result.is_err());
+    assert!(state.lock().unwrap().tasks.is_empty());
+    assert!(state.lock().unwrap().nodes.is_empty());
+    assert_eq!(
+        runner
+            .calls()
+            .iter()
+            .filter(|c| c.argv.get(4).is_some_and(|s| s == "create"))
+            .count(),
+        1
+    );
+}
+#[test]
+fn changed_retry_estimate_requires_a_new_confirmation() {
+    let (env, _ctx, runner, state) = fixture();
+    let ctx = env
+        .ctx()
+        .runner(&runner)
+        .clock(&FakeClock::at("2026-11-03T00:00:00Z".parse().unwrap()))
+        .interactive(true)
+        .input(&["no"])
+        .build();
+    restrict_retry_zones(&ctx);
+    super::gcp_prices::cache(&env);
+    state.lock().unwrap().reject_creates = 1;
+    let cfg = crate::config::load_config(&ctx.env).unwrap();
+    crate::gcp::launch_with_retry(
+        &ctx,
+        &retry_flags(),
+        &cfg,
+        Some("2026-11-03T02:00:00Z".parse().unwrap()),
+        |_| {
+            Ok(Some(crate::gcp_retry::Choice {
+                zone: "us-east5-a".into(),
+                approved: true,
+                rate: Some(999.0),
+            }))
+        },
+    )
+    .unwrap();
+    assert!(out(&ctx).contains("Type yes:"));
+    assert!(state.lock().unwrap().tasks.is_empty());
+    assert_eq!(
+        runner
+            .calls()
+            .iter()
+            .filter(|c| c.argv.get(4).is_some_and(|s| s == "create"))
+            .count(),
+        1
+    );
 }

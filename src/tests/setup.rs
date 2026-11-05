@@ -749,7 +749,7 @@ fn setup_zone_picker_loads_project_zones_highlights_default_and_filters_with_rea
         crate::setup::zone_screen(&cloud, PROJECT, "us-east5-b", true),
         |keys| {
             keys.wait(|s| s.labels.len() == 2);
-            assert_eq!(keys.labels(), ["us-east5-b — v6e", "us-central1-a — v6e"]);
+            assert_eq!(keys.labels(), ["us-east (1 zone)", "us-central (1 zone)"]);
             assert!(keys.snapshot().notice.contains("Quota and capacity"));
             keys.type_text("central1");
             assert_eq!(keys.labels(), ["us-central1-a — v6e"]);
@@ -763,6 +763,7 @@ fn setup_zone_picker_loads_project_zones_highlights_default_and_filters_with_rea
         crate::setup::zone_screen(&cloud, PROJECT, "us-east5-b", true),
         |keys| {
             keys.wait(|s| s.labels.len() == 2);
+            keys.press_until(RIGHT, on("us-east zones"));
             keys.press(ENTER);
         },
     );
@@ -778,7 +779,7 @@ fn setup_zone_picker_handles_disabled_api_and_absent_default_without_implicit_en
         crate::setup::zone_screen(&ctx, PROJECT, "us-east5-b", false),
         |keys| {
             keys.wait(|s| !s.labels.is_empty());
-            assert_eq!(keys.labels()[0].split(" — ").next().unwrap(), "us-east5-b");
+            assert!(keys.labels()[0].starts_with("us-east ("));
             assert!(keys.snapshot().notice.contains("API disabled"));
             keys.type_text("europe-west4-b");
             keys.press(ENTER);
@@ -795,7 +796,9 @@ fn setup_zone_picker_handles_disabled_api_and_absent_default_without_implicit_en
     let result = drive(
         crate::setup::zone_screen(&ctx, PROJECT, "us-east5-b", true),
         |keys| {
-            keys.wait(|s| s.labels.len() == 2);
+            keys.wait(|s| s.labels == ["europe-west (2 zones)"]);
+            assert_eq!(keys.labels(), ["europe-west (2 zones)"]);
+            keys.press_until(RIGHT, on("europe-west zones"));
             assert_eq!(
                 keys.labels(),
                 ["europe-west4-a — v6e", "europe-west4-b — v6e"]

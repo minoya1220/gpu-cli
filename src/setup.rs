@@ -269,37 +269,17 @@ pub(crate) fn zone_screen(
         crate::gcp_geo::order(&worker.env, &mut zones, |z| &z.name);
         Ok(zones)
     });
-    let options = job.clone();
-    Screen::new(
-        title,
-        move || {
-            options
-                .result()
-                .unwrap_or_else(|| initial.clone())
-                .into_iter()
-                .map(|zone| {
-                    let label = if zone.types.is_empty() {
-                        zone.name.clone()
-                    } else {
-                        crate::gcp_catalog::label(&zone)
-                    };
-                    Opt::new(zone.name, label)
-                })
-                .collect()
+    crate::gcp_zones::screen(
+        job,
+        initial,
+        &title,
+        if api_enabled {
+            "Quota and capacity still need a live check."
+        } else {
+            "Known zones; project availability unverified (API disabled)."
         },
         Next::Done,
     )
-    .load(job)
-    .wait_initial(false)
-    .quick_select(false)
-    .load_required(false)
-    .loading("Checking TPU zones…")
-    .empty("No TPU zones returned. Ctrl-R retries.")
-    .notice(if api_enabled {
-        "Quota and capacity still need a live check."
-    } else {
-        "Known zones; project availability unverified (API disabled)."
-    })
 }
 
 #[derive(Clone)]

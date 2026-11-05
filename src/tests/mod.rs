@@ -6,6 +6,7 @@ mod editors;
 mod expiry;
 mod expiry_launch;
 mod gcp;
+mod gcp_prices;
 mod instances;
 mod lifecycle;
 mod picker;

@@ -186,6 +186,41 @@ pub fn describe(ctx: &Ctx, id: &TpuId) -> Result<Dict> {
         _ => Err(bad_reply()),
     }
 }
+/// Only an authenticated node GET returning a definite 404 proves absence.
+/// List failures, malformed responses, auth failures and process errors never do.
+pub fn absent(ctx: &Ctx, id: &TpuId) -> Result<bool> {
+    ctx.require_gcloud()?;
+    let mut args = id.args("describe");
+    args.push("--format=json".into());
+    match ctx.run(&Cmd::new(&args).timeout(Some(60.0))) {
+        Ok(out) if out.code == 0 => {
+            let value = pyjson::loads(&out.stdout).map_err(|_| bad_reply())?;
+            if value.as_dict().and_then(|d| text(d, "name")) != Some(&id.resource()) {
+                return Err(bad_reply());
+            }
+            Ok(false)
+        }
+        Ok(out) => {
+            let detail = out.stderr.to_ascii_uppercase();
+            let denied = detail.contains("PERMISSION_DENIED")
+                || detail.contains("UNAUTHENTICATED")
+                || detail.contains("FORBIDDEN");
+            if !denied
+                && (detail.contains("NOT_FOUND:")
+                    || detail.contains("(NOT_FOUND)")
+                    || detail.contains("HTTPERROR 404")
+                    || (out.stderr.contains(&id.resource()) && detail.contains("WAS NOT FOUND")))
+            {
+                return Ok(true);
+            }
+            Err(Error::msg("Could not authenticate/verify TPU absence; deletion tasks were kept. Next: gpu ls --provider gcp"))
+        }
+        _ => Err(Error::msg(
+            "Could not verify TPU absence; deletion tasks were kept. Next: gpu ls --provider gcp",
+        )),
+    }
+}
+
 pub fn locations(ctx: &Ctx, project: &str) -> Result<Vec<String>> {
     let value = json(
         ctx,
@@ -266,6 +301,7 @@ pub fn list(ctx: &Ctx, settings: &Settings) -> Result<Vec<Dict>> {
             items.push(item);
         }
     }
+    crate::gcp_expiry::Queue::load(settings)?.reconcile(ctx)?;
     Ok(items)
 }
 
@@ -350,6 +386,10 @@ pub fn launch(ctx: &Ctx, flags: &UpFlags, cfg: &Dict, deadline: Option<Timestamp
     let picks = crate::gcp_wizard::choose(ctx, flags, &settings, cfg, deadline)?;
     let deadline = picks.deadline;
     crate::gcp_expiry::validate_deadline(ctx, deadline)?;
+    if !flags.dry_run {
+        queue.reconcile(ctx)?;
+        crate::gcp_catalog::verify(ctx, &settings.project, &picks.zone, &picks.tpu)?;
+    }
     let id = TpuId {
         project: settings.project.clone(),
         zone: picks.zone.clone(),
@@ -389,8 +429,12 @@ pub fn launch(ctx: &Ctx, flags: &UpFlags, cfg: &Dict, deadline: Option<Timestamp
         ))?;
         return Ok(());
     }
+    let price = match crate::gcp_prices::load(ctx, cfg, &picks.zone) {
+        Ok(prices) => prices.quote(&picks.tpu, picks.spot),
+        Err(e) => e.text().to_string(),
+    };
     ctx.println(&format!(
-        "Launch Google Cloud {} in {} ({})? Paid TPU; price is not quoted. Destroy at {deadline}.",
+        "Launch Google Cloud {} in {} ({})? {price}. Excludes storage/network/taxes; discounts not included. Destroy at {deadline}.",
         picks.tpu,
         picks.zone,
         if picks.spot { "Spot" } else { "on-demand" }
@@ -411,6 +455,19 @@ pub fn launch(ctx: &Ctx, flags: &UpFlags, cfg: &Dict, deadline: Option<Timestamp
         return Err(Error::msg(format!("Expiry deadline passed; no TPU created, but its deletion task may remain. Next: gpu expire {} cancel", id.cli())));
     }
     if let Err(e) = run(ctx, &args, "gpu up --provider gcp --spot --expire 2h") {
+        // A known request rejection plus an authenticated 404 is terminal.
+        // Keep the timer after ambiguous errors/timeouts (create may be in flight).
+        let rejected = [
+            "No TPU capacity",
+            "Google Cloud resource was not found",
+            "Google Cloud quota",
+            "Google Cloud denied access",
+        ]
+        .iter()
+        .any(|s| e.text().starts_with(s));
+        if rejected && absent(ctx, &id).unwrap_or(false) && queue.cancel(ctx, &id).is_ok() {
+            return Err(Error::msg(format!("Could not create {}: {}. Verified that no node exists; its deletion task was removed. Next: gpu up --tpu {} --zone {} --spot --no-repo --expire 2h", id.cli(), e.text().split(". Next:").next().unwrap_or("request rejected"), picks.tpu, picks.zone)));
+        }
         return Err(Error::msg(format!("{}\nCreation of {} is unverified; its deletion task remains armed. Next: gpu ls --provider gcp", e.text().split(". Next:").next().unwrap_or("TPU create failed"), id.cli())));
     }
     ctx.println(&format!(
@@ -473,6 +530,9 @@ pub fn lifecycle(ctx: &Ctx, id: &TpuId, cfg: &Dict, destroy: bool, yes: bool) ->
         )?
     {
         return ctx.println("Cancelled.");
+    }
+    if destroy {
+        crate::gcp_expiry::reconcile(ctx, cfg)?;
     }
     let listed = nodes(ctx, &id.project, &id.zone)?;
     let node = listed

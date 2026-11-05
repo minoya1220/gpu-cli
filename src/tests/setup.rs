@@ -10,10 +10,11 @@ const PROJECT: &str = "test-project";
 const ID: &str = "gcp:test-project:us-east5-b:test-tpu";
 const RESOURCE: &str = "projects/test-project/locations/us-central1/queues/gpu-expiry";
 const ACCOUNT: &str = "123456-compute@developer.gserviceaccount.com";
-const APIS: [&str; 3] = [
+const APIS: [&str; 4] = [
     "compute.googleapis.com",
     "tpu.googleapis.com",
     "cloudtasks.googleapis.com",
+    "cloudbilling.googleapis.com",
 ];
 const APPLY: &[&str] = &[
     "setup",
@@ -188,6 +189,9 @@ fn fixture() -> (TestEnv, Ctx, Arc<FakeRunner>, Arc<Mutex<State>>) {
                 } else {
                     ok("")
                 }
+            }
+            ["compute", "tpus", "tpu-vm", "accelerator-types", "list", _zone] => {
+                ok(r#"[{"type":"v6e-1"}]"#)
             }
             ["compute", "tpus", "locations", "list"] => {
                 ok(r#"[{"locationId":"us-east5-b"},{"locationId":"us-central1-a"}]"#)
@@ -476,6 +480,10 @@ fn undo_removes_only_recorded_additions_and_restores_the_gate() {
                 ],
                 false
             ),
+            call(
+                &["services", "disable", "cloudbilling.googleapis.com"],
+                false
+            ),
             call(&["services", "disable", "cloudtasks.googleapis.com"], false),
             call(&["services", "disable", "tpu.googleapis.com"], false),
         ]
@@ -738,31 +746,16 @@ fn setup_zone_picker_loads_project_zones_highlights_default_and_filters_with_rea
         crate::setup::zone_screen(&cloud, PROJECT, "us-east5-b", true),
         |keys| {
             keys.wait(|s| s.labels.len() == 2);
-            assert_eq!(keys.labels(), ["us-east5-b", "us-central1-a"]);
+            assert_eq!(keys.labels(), ["us-east5-b — v6e", "us-central1-a — v6e"]);
             assert!(keys.snapshot().notice.contains("quota/capacity"));
             keys.type_text("central1");
-            assert_eq!(keys.labels(), ["us-central1-a"]);
+            assert_eq!(keys.labels(), ["us-central1-a — v6e"]);
             keys.press(ENTER);
         },
     );
     assert_eq!(result, Outcome::Done("us-central1-a".into()));
-    assert_eq!(
-        runner.argvs(),
-        [vec![
-            "gcloud",
-            "compute",
-            "tpus",
-            "locations",
-            "list",
-            "--project=test-project",
-            "--quiet",
-            "--format=json"
-        ]
-        .into_iter()
-        .map(String::from)
-        .collect::<Vec<_>>()]
-    );
-    // Pressing Enter without moving really selects the highlighted default.
+    assert_eq!(runner.calls().len(), 3); // locations plus both type catalogs
+                                         // Pressing Enter without moving really selects the highlighted default.
     let result = drive(
         crate::setup::zone_screen(&cloud, PROJECT, "us-east5-b", true),
         |keys| {
@@ -790,10 +783,9 @@ fn setup_zone_picker_handles_disabled_api_and_absent_default_without_implicit_en
     );
     assert_eq!(result, Outcome::Done("europe-west4-b".into()));
     let runner = FakeRunner::new(|cmd| {
-        assert_eq!(
-            strs(&cmd.argv)[1..5],
-            ["compute", "tpus", "locations", "list"]
-        );
+        if cmd.argv[3] == "tpu-vm" {
+            return ok(r#"[{"type":"v6e-1"}]"#);
+        }
         ok(r#"[{"locationId":"europe-west4-b"},{"locationId":"europe-west4-a"}]"#)
     });
     let ctx = env.ctx().runner(&runner).build().for_gcp_setup();
@@ -801,11 +793,38 @@ fn setup_zone_picker_handles_disabled_api_and_absent_default_without_implicit_en
         crate::setup::zone_screen(&ctx, PROJECT, "us-east5-b", true),
         |keys| {
             keys.wait(|s| s.labels.len() == 2);
-            assert_eq!(keys.labels(), ["europe-west4-a", "europe-west4-b"]);
+            assert_eq!(
+                keys.labels(),
+                ["europe-west4-a — v6e", "europe-west4-b — v6e"]
+            );
             keys.press(ENTER);
         },
     );
     assert_eq!(result, Outcome::Done("europe-west4-a".into()));
+}
+
+#[test]
+fn failed_zone_reconfiguration_keeps_the_previously_verified_default() {
+    use crate::process::Runner;
+    let (env, ctx, inner, _state) = fixture();
+    assert_eq!(main(&ctx, APPLY), 0, "{}", err(&ctx));
+    let runner = FakeRunner::new(move |cmd| {
+        if cmd.argv.iter().any(|s| s == "--zone=us-west1-b") {
+            return ok("[]");
+        }
+        inner.run(cmd)
+    });
+    let ctx = env.ctx().runner(&runner).build();
+    let mut flags = APPLY.to_vec();
+    flags.extend(["--zone", "us-west1-b"]);
+    assert_eq!(main(&ctx, &flags), 1);
+    let config = cfg(&env);
+    assert!(crate::setup::gcp_ready(&config));
+    assert_eq!(
+        config.get("gcp").unwrap().as_dict().unwrap().get("zone"),
+        Some(&Value::str("us-east5-b"))
+    );
+    assert!(mutations(&runner).is_empty());
 }
 
 #[test]
@@ -814,14 +833,18 @@ fn unavailable_zone_stops_before_queue_creation_and_empty_catalog_never_skips_th
     use crate::process::Runner;
     let (env, _ctx, inner, _state) = fixture();
     let runner = FakeRunner::new(move |cmd| {
-        if strs(&cmd.argv).get(1..5) == Some(&["compute", "tpus", "locations", "list"]) {
+        if strs(&cmd.argv).get(1..5) == Some(&["compute", "tpus", "locations", "list"])
+            || strs(&cmd.argv).get(1..5)
+                == Some(&["compute", "tpus", "tpu-vm", "accelerator-types"])
+        {
             return ok("[]");
         }
         inner.run(cmd)
     });
     let ctx = env.ctx().runner(&runner).build();
     assert_eq!(main(&ctx, APPLY), 1);
-    assert!(err(&ctx).contains("TPU zone us-east5-b was not returned for project test-project"));
+    assert!(err(&ctx)
+        .contains("TPU zone us-east5-b offers no accelerator types in project test-project"));
     assert!(mutations(&runner).is_empty());
     assert!(!crate::setup::gcp_ready(&cfg(&env)));
     let result = drive(

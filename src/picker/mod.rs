@@ -75,6 +75,8 @@ type Settled<V, R> = Box<dyn Fn() -> Option<Next<V, R>>>;
 ///
 /// `options` is called on every redraw, so labels can reflect data that loads
 /// later. `select` returns the next screen, or the flow's final result.
+type PriceSource<V> = Box<dyn Fn(&V) -> Rc<dyn AnyJob>>;
+
 pub struct Screen<V, R> {
     pub title: String,
     pub options: Options<V>,
@@ -86,7 +88,8 @@ pub struct Screen<V, R> {
     pub loading: String,
     pub empty: String,
     /// F2 starts it; `options` should read its result.
-    pub prices: Option<Box<dyn AnyJob>>,
+    pub prices: Option<Rc<dyn AnyJob>>,
+    pub price_source: Option<PriceSource<V>>,
     /// Digits choose directly on unfiltered lists with explicit digits or at most nine rows.
     pub quick_select: bool,
     /// Optional background load: static choices remain usable while it runs or fails.
@@ -117,6 +120,7 @@ impl<V: PickValue, R: 'static> Screen<V, R> {
             loading: "Loading...".into(),
             empty: "Nothing to choose from".into(),
             prices: None,
+            price_source: None,
             quick_select: true,
             load_required: true,
             text_input: false,
@@ -151,7 +155,12 @@ impl<V: PickValue, R: 'static> Screen<V, R> {
     }
 
     pub fn prices(mut self, job: impl AnyJob + 'static) -> Self {
-        self.prices = Some(Box::new(job));
+        self.prices = Some(Rc::new(job));
+        self
+    }
+
+    pub fn price_source(mut self, source: impl Fn(&V) -> Rc<dyn AnyJob> + 'static) -> Self {
+        self.price_source = Some(Box::new(source));
         self
     }
 
@@ -212,6 +221,19 @@ struct View<V, R> {
 }
 
 impl<V: PickValue, R: 'static> View<V, R> {
+    fn price_job(&self) -> Option<Rc<dyn AnyJob>> {
+        let entries = self.entries();
+        self.screen
+            .price_source
+            .as_ref()
+            .and_then(|source| {
+                entries
+                    .get(self.current(entries.len()))
+                    .map(|opt| source(&opt.value))
+            })
+            .or_else(|| self.screen.prices.clone())
+    }
+
     fn new(screen: Screen<V, R>) -> View<V, R> {
         View {
             screen: Rc::new(screen),
@@ -456,7 +478,7 @@ impl<V: PickValue, R: 'static> Core<V, R> {
             }
             Key::CtrlR => self.open(true),
             Key::F2 => {
-                if let Some(prices) = self.view().screen.prices.as_deref() {
+                if let Some(prices) = self.view().price_job() {
                     prices.start(Box::new(|| {}));
                 }
             }
@@ -669,7 +691,7 @@ impl<V: PickValue, R: 'static> Core<V, R> {
         if !screen.load_required && load.is_some_and(|l| l.state() == JobState::Failed) {
             hints.push("Ctrl-R retry repositories".into());
         }
-        if let Some(prices) = screen.prices.as_deref() {
+        if let Some(prices) = view.price_job() {
             match prices.state() {
                 JobState::Idle => hints.push("F2 prices".into()),
                 JobState::Running => hints.push("Loading prices...".into()),

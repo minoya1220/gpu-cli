@@ -26,6 +26,9 @@ struct State {
     tasks: Vec<Dict>,
     nodes: Vec<Dict>,
     fail_create: bool,
+    ambiguous_create: bool,
+    fail_presence: bool,
+    empty_types: bool,
     fail_arm: bool,
     fail_delete_task: bool,
     corrupt_task: bool,
@@ -76,6 +79,12 @@ fn fixture() -> (TestEnv, Ctx, Arc<FakeRunner>, Arc<Mutex<State>>) {
             return ok(
                 r#"[{"id":123,"gpu_name":"RTX 4090","actual_status":"running","instance_api_key":"not-for-output"}]"#,
             );
+        }
+        if a[0] == "gcloud" && a.get(1) == Some(&"auth") {
+            return Ok(Output::failed(
+                1,
+                "test deliberately has no Billing credentials",
+            ));
         }
         if a[0] == "code" {
             return ok("");
@@ -142,12 +151,15 @@ fn fixture() -> (TestEnv, Ctx, Arc<FakeRunner>, Arc<Mutex<State>>) {
         }
         assert_eq!(a[3], "tpu-vm");
         match a[4] {
-            "accelerator-types" => ok(r#"[{"type":"v6e-1"}]"#),
+            "accelerator-types" => if state.empty_types { ok("[]") } else { ok(r#"[{"type":"v6e-1"}]"#) },
             "list" => ok(&list(if arg(cmd,"zone") == "us-east5-b" {state.nodes.clone()} else {Vec::new()})),
-            "describe" => ok(&value(state.nodes.first().unwrap().clone())),
+            "describe" if state.fail_presence => Ok(Output::failed(1,"PERMISSION_DENIED: secret")),
+            "describe" => match state.nodes.iter().find(|n| crate::gcp::text(n,"name").is_some_and(|name| name.ends_with(&format!("/{}", a[5])))) {
+                Some(n) => ok(&value(n.clone())), None => Ok(Output::failed(1,"NOT_FOUND: node does not exist")),
+            },
             "create" => {
                 assert!(!state.tasks.is_empty(), "create without a deletion task");
-                if state.fail_create { return Ok(Output::failed(1, "RESOURCE_EXHAUSTED capacity stockout token=do-not-print")); }
+                if state.fail_create { return Ok(Output::failed(1, if state.ambiguous_create { "unknown transport failure" } else { "RESOURCE_EXHAUSTED capacity stockout token=do-not-print" })); }
                 let mut n = node(a.contains(&"--spot"));
                 n.insert("name", Value::str(format!("projects/test-project/locations/us-east5-b/nodes/{}", a[5])));
                 state.nodes.push(n);
@@ -178,14 +190,18 @@ fn launch_arms_and_verifies_before_create_and_never_uses_vast_or_ssh() {
     flags.push("--spot");
     assert_eq!(main(&ctx, &flags), 0, "{}", err(&ctx));
     let calls = runner.argvs();
-    assert_eq!(calls.len(), 4);
-    assert_eq!(calls[0][1..4], ["tasks", "queues", "describe"]);
-    assert_eq!(calls[1][2], "create-http-task");
-    assert_eq!(calls[2][2], "describe");
-    assert_eq!(calls[3][1..5], ["compute", "tpus", "tpu-vm", "create"]);
-    assert!(calls[3].contains(&"--accelerator-type=v6e-1".into()));
-    assert!(calls[3].contains(&"--spot".into()));
-    assert!(!calls[3].iter().any(|a| a.contains("reaper@")));
+    let task = calls
+        .iter()
+        .position(|a| a.get(2).is_some_and(|s| s == "create-http-task"))
+        .unwrap();
+    let paid = calls
+        .iter()
+        .position(|a| a.get(4).is_some_and(|s| s == "create"))
+        .unwrap();
+    assert!(task < paid && calls[task + 1][2] == "describe");
+    assert!(calls[paid].contains(&"--accelerator-type=v6e-1".into()));
+    assert!(calls[paid].contains(&"--spot".into()));
+    assert!(!calls[paid].iter().any(|a| a.contains("reaper@")));
     assert_eq!(state.lock().unwrap().tasks.len(), 1);
     assert!(out(&ctx).contains("Next: gpu ssh gcp:test-project:us-east5-b:gpu-"));
 }
@@ -373,7 +389,7 @@ fn queue_or_task_failures_prevent_paid_create() {
 }
 
 #[test]
-fn stockout_keeps_safety_task_and_reports_one_next_command() {
+fn stockout_with_verified_absence_cleans_its_task_and_reports_one_next_command() {
     let (_env, ctx, _runner, state) = fixture();
     state.lock().unwrap().fail_create = true;
     assert_eq!(main(&ctx, UP), 1);
@@ -381,7 +397,8 @@ fn stockout_keeps_safety_task_and_reports_one_next_command() {
     assert!(message.contains("try another zone or Spot"), "{message}");
     assert_eq!(message.matches("Next:").count(), 1);
     assert!(!message.contains("do-not-print"));
-    assert_eq!(state.lock().unwrap().tasks.len(), 1);
+    assert!(message.contains("deletion task was removed"));
+    assert!(state.lock().unwrap().tasks.is_empty());
 }
 
 #[test]
@@ -472,10 +489,16 @@ fn down_verifies_disappearance_before_cancelling_tasks_and_is_repeatable() {
     let start = runner.calls().len();
     assert_eq!(main(&ctx, &["down", ID, "--yes"]), 0, "{}", err(&ctx));
     let calls = &runner.argvs()[start..];
-    assert_eq!(calls[0][4], "list");
-    assert_eq!(calls[1][4], "delete");
-    assert_eq!(calls[2][4], "list");
-    assert_eq!(calls[3][1], "tasks");
+    let paid = calls
+        .iter()
+        .position(|a| a.get(4).is_some_and(|s| s == "delete"))
+        .unwrap();
+    assert_eq!(calls[paid + 1][4], "list");
+    let task_delete = calls
+        .iter()
+        .position(|a| a.get(2).is_some_and(|s| s == "delete"))
+        .unwrap();
+    assert!(paid < task_delete);
     assert!(state.lock().unwrap().tasks.is_empty());
     assert_eq!(main(&ctx, &["down", ID, "--yes"]), 0);
 }
@@ -519,7 +542,11 @@ fn failed_replacement_never_cancels_the_old_deadline() {
 #[test]
 fn cancel_can_clean_up_a_failed_create_with_no_node() {
     let (_env, ctx, _runner, state) = fixture();
-    state.lock().unwrap().fail_create = true;
+    {
+        let mut s = state.lock().unwrap();
+        s.fail_create = true;
+        s.ambiguous_create = true;
+    }
     assert_eq!(main(&ctx, UP), 1);
     let url = {
         let s = state.lock().unwrap();
@@ -562,6 +589,8 @@ fn tpu_flag_routes_without_provider_and_catalog_jobs_use_real_keys() {
                 "--expire",
                 "2h",
                 "--on-demand",
+                "--zone",
+                "us-east5-b",
                 "--dry-run"
             ]
         ),
@@ -588,7 +617,7 @@ fn tpu_flag_routes_without_provider_and_catalog_jobs_use_real_keys() {
             inner.run(cmd)
         });
         let ctx = env.ctx().runner(&gated_runner).build();
-        let job = crate::gcp_wizard::catalog_job(&ctx, &settings, Some("us-east5-b"), kind);
+        let job = crate::gcp_wizard::catalog_job(&ctx, &settings, Some("us-east5-b"), kind, None);
         let observer = job.observer();
         let release = gate.clone();
         let result = drive(
@@ -605,7 +634,7 @@ fn tpu_flag_routes_without_provider_and_catalog_jobs_use_real_keys() {
         gate.set();
         assert_eq!(result, Outcome::Done(expected.to_string()));
     }
-    assert_eq!(runner.calls().len(), 2);
+    assert_eq!(runner.calls().len(), 4);
 }
 
 #[test]
@@ -627,7 +656,7 @@ fn catalog_choices_share_a_stack_and_back_does_not_refetch() {
         keys.press(CTRL_C);
     });
     assert_eq!(result, Outcome::Cancelled(130));
-    assert_eq!(runner.calls().len(), 2);
+    assert_eq!(runner.calls().len(), 4);
 }
 
 #[test]
@@ -696,26 +725,139 @@ fn real_clock_precision_does_not_break_task_verification() {
 }
 
 #[test]
-fn declining_creation_or_destruction_never_calls_a_provider() {
+fn declining_creation_or_destruction_never_creates_paid_resources() {
     let (env, _ctx, runner, _state) = fixture();
     let ctx = env.ctx().runner(&runner).input(&["no", "no"]).build();
     let flags: Vec<_> = UP.iter().copied().filter(|s| *s != "--yes").collect();
     assert_eq!(main(&ctx, &flags), 0);
     assert_eq!(main(&ctx, &["down", ID]), 0);
-    assert!(runner.calls().is_empty());
+    assert!(!runner
+        .argvs()
+        .iter()
+        .any(|a| a.get(4).is_some_and(|s| s == "create")));
 }
 
 #[test]
 fn malformed_node_list_never_verifies_destruction() {
     let (env, _, _, _) = fixture();
     let runner = FakeRunner::new(|cmd| {
+        if cmd.argv[1] == "tasks" {
+            return ok("[]");
+        }
         assert_eq!(cmd.argv[4], "list");
         ok(r#"[{"state":"READY"}]"#)
     });
     let ctx = env.ctx().runner(&runner).build();
     assert_eq!(main(&ctx, &["down", ID, "--yes"]), 1);
     assert!(err(&ctx).contains("incomplete reply"));
-    assert_eq!(runner.calls().len(), 1);
+    assert_eq!(runner.calls().len(), 2);
+}
+
+#[test]
+fn impossible_type_is_rejected_before_confirmation_or_arming() {
+    let (_env, ctx, runner, state) = fixture();
+    state.lock().unwrap().empty_types = true;
+    assert_eq!(main(&ctx, UP), 1);
+    let message = err(&ctx);
+    assert!(
+        message.contains("v6e-1 is not offered in us-east5-b"),
+        "{message}"
+    );
+    assert!(!runner
+        .argvs()
+        .iter()
+        .any(|a| a.iter().any(|s| s == "create-http-task" || s == "create")));
+    assert!(state.lock().unwrap().tasks.is_empty());
+}
+
+#[test]
+fn orphan_reconciliation_requires_authenticated_absence_and_preserves_other_tasks() {
+    let (_env, ctx, _runner, state) = fixture();
+    state.lock().unwrap().nodes.push(node(false));
+    assert_eq!(main(&ctx, &["expire", ID, "2h"]), 0, "{}", err(&ctx));
+    {
+        let mut s = state.lock().unwrap();
+        let mut unrelated = s.tasks[0].clone();
+        unrelated.insert("name", Value::str(format!("{QUEUE}/tasks/manual")));
+        s.tasks.push(unrelated);
+        s.nodes.clear();
+        s.fail_presence = true;
+    }
+    assert_eq!(main(&ctx, &["ls", "--provider", "gcp"]), 0);
+    assert_eq!(state.lock().unwrap().tasks.len(), 2);
+    assert!(err(&ctx).contains("kept its expiry task"));
+    state.lock().unwrap().fail_presence = false;
+    assert_eq!(main(&ctx, &["ls", "--provider", "gcp"]), 0, "{}", err(&ctx));
+    let s = state.lock().unwrap();
+    assert_eq!(s.tasks.len(), 1);
+    assert!(crate::gcp::text(&s.tasks[0], "name")
+        .unwrap()
+        .ends_with("/manual"));
+}
+
+#[test]
+fn ambiguous_create_keeps_timer_and_next_command_reconciles_a_verified_orphan() {
+    let (_env, ctx, _runner, state) = fixture();
+    {
+        let mut s = state.lock().unwrap();
+        s.fail_create = true;
+        s.ambiguous_create = true;
+    }
+    assert_eq!(main(&ctx, UP), 1);
+    assert_eq!(state.lock().unwrap().tasks.len(), 1);
+    assert!(err(&ctx).contains("deletion task remains armed"));
+    assert_eq!(main(&ctx, &["ls", "--provider", "gcp"]), 0, "{}", err(&ctx));
+    assert!(state.lock().unwrap().tasks.is_empty());
+}
+
+#[test]
+fn launch_confirmation_quotes_cached_catalog_prices_for_both_capacity_modes() {
+    for spot in [false, true] {
+        let (env, ctx, _runner, _state) = fixture();
+        super::gcp_prices::cache(&env);
+        let mut args = UP.to_vec();
+        if spot {
+            args.push("--spot");
+        }
+        assert_eq!(main(&ctx, &args), 0, "{}", err(&ctx));
+        assert!(out(&ctx).contains(if spot {
+            "$0.750/hr USD list (us-east5)"
+        } else {
+            "$2.750/hr USD list (us-east5)"
+        }));
+    }
+}
+
+#[test]
+fn successful_tpu_launch_offers_last_select_and_dont_open_editors_like_vast() {
+    for mode in ["select", "default", "none"] {
+        let (env, _ctx, runner, _state) = fixture();
+        env.executable("code", "#!/bin/sh\nexit 0\n");
+        if mode == "default" {
+            crate::history::record_picks(&env.env(), &[("editor", "code")]).unwrap();
+        }
+        let ctx = env
+            .ctx()
+            .runner(&runner)
+            .interactive(true)
+            .pickers(&[match mode {
+                "select" => "12",
+                "default" => "1",
+                _ => "2",
+            }])
+            .build();
+        let mut args = UP.to_vec();
+        args.extend(["--on-demand", "--zone", "us-east5-b"]);
+        assert_eq!(main(&ctx, &args), 0, "{mode}: {}", err(&ctx));
+        assert_eq!(
+            runner.argvs().iter().any(|a| a[0] == "code"),
+            mode != "none"
+        );
+        assert_eq!(
+            env.home.join(".ssh/gpu_gcp_config").exists(),
+            mode != "none"
+        );
+    }
 }
 
 #[test]

@@ -104,6 +104,7 @@ struct State {
     recent_gpus: Vec<String>,
     choose_offer: bool,
     tpu_setup_error: Option<String>,
+    tpu_prices: Job<Arc<crate::gcp_prices::Prices>>,
     prices: RefCell<HashMap<String, Job<Stats>>>,
 }
 
@@ -125,6 +126,7 @@ pub struct WizardOptions {
     pub choose_offer: bool,
     /// Local config preflight only; no cloud calls on a screen transition.
     pub tpu_setup_error: Option<String>,
+    pub tpu_prices: Option<Job<Arc<crate::gcp_prices::Prices>>>,
     pub owner: String,
 }
 
@@ -152,6 +154,9 @@ impl LaunchWizard {
                 recent_gpus,
                 choose_offer: options.choose_offer,
                 tpu_setup_error: options.tpu_setup_error,
+                tpu_prices: options
+                    .tpu_prices
+                    .unwrap_or_else(|| Job::new(|| Err("TPU prices need gpu setup".into()))),
                 prices: RefCell::new(HashMap::new()),
             }),
         }
@@ -405,7 +410,12 @@ impl LaunchWizard {
                     category_label(name, members, &stats),
                 )
             }));
-            options.push(Opt::new(Choice::Tpu(TpuChoice::ChooseType), TPU_CATEGORY));
+            let label = s
+                .tpu_prices
+                .result()
+                .map(|p| p.category_label(&TPU_TYPES))
+                .unwrap_or_else(|| TPU_CATEGORY.into());
+            options.push(Opt::new(Choice::Tpu(TpuChoice::ChooseType), label));
             options
         };
         let (wizard, stats_job) = (self.clone(), prices.clone());
@@ -417,11 +427,22 @@ impl LaunchWizard {
                 .iter()
                 .map(|gpu| Opt::new(Choice::Gpu(gpu.clone()), model_label(gpu, &stats)))
                 .collect();
-            options.push(Opt::new(Choice::Tpu(TpuChoice::ChooseType), TPU_CATEGORY));
+            let label = wizard
+                .state
+                .tpu_prices
+                .result()
+                .map(|p| p.category_label(&TPU_TYPES))
+                .unwrap_or_else(|| TPU_CATEGORY.into());
+            options.push(Opt::new(Choice::Tpu(TpuChoice::ChooseType), label));
             options.extend(TPU_TYPES.iter().map(|tpu| {
                 Opt::new(
                     Choice::Tpu(TpuChoice::Type((*tpu).into())),
-                    format!("TPU {tpu} (Google Cloud)"),
+                    wizard
+                        .state
+                        .tpu_prices
+                        .result()
+                        .map(|p| p.label(tpu))
+                        .unwrap_or_else(|| format!("TPU {tpu} (Google Cloud)")),
                 )
             }));
             options
@@ -445,9 +466,16 @@ impl LaunchWizard {
             }),
             _ => Next::Done(picks.clone()),
         };
+        let cloud_prices = self.state.tpu_prices.clone();
         Screen::new("GPU", options, select)
             .search(search)
-            .prices(prices)
+            .price_source(move |choice| {
+                if matches!(choice, Choice::Tpu(_)) {
+                    Rc::new(cloud_prices.clone())
+                } else {
+                    Rc::new(prices.clone())
+                }
+            })
             // Digits belong to names such as "RTX 4090".
             .quick_select(false)
             .empty("No known GPU models")

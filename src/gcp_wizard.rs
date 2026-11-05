@@ -23,15 +23,18 @@ pub(crate) fn catalog_job(
     settings: &Settings,
     zone: Option<&str>,
     kind: &str,
+    tpu: Option<&str>,
 ) -> Job<Vec<String>> {
     let worker = ctx.clone();
     let project = settings.project.clone();
     let zone = zone.map(String::from);
     let kind = kind.to_string();
+    let tpu = tpu.map(String::from);
     Job::new(move || {
         let load = || -> Result<Vec<String>> {
             if kind == "locations" {
-                return gcp::locations(&worker, &project);
+                return crate::gcp_catalog::zones(&worker, &project, tpu.as_deref())
+                    .map(|zs| zs.into_iter().map(|z| z.name).collect());
             }
             let mut args = vec![
                 "gcloud".into(),
@@ -105,7 +108,13 @@ pub(crate) fn next(ctx: Ctx, settings: Settings, picks: Selection) -> Next<Strin
         None
     };
     if let Some((kind, title)) = missing {
-        let job = catalog_job(&ctx, &settings, picks.zone.as_deref(), kind);
+        let job = catalog_job(
+            &ctx,
+            &settings,
+            picks.zone.as_deref(),
+            kind,
+            picks.tpu.as_deref(),
+        );
         return Next::Screen(catalog_screen(job, title, move |value| {
             let mut chosen = picks.clone();
             match kind {
@@ -196,7 +205,13 @@ pub fn choose(
     };
     let selected = Selection {
         expiry_at: deadline,
-        zone: flags.zone.clone().or_else(|| settings.zone.clone()),
+        zone: flags.zone.clone().or_else(|| {
+            if ctx.interactive() {
+                None
+            } else {
+                settings.zone.clone()
+            }
+        }),
         tpu: flags.tpu.clone(),
         spot: if ctx.interactive() && !flags.spot && !flags.on_demand {
             None
@@ -259,6 +274,7 @@ pub fn choose(
                 recent_gpus: Vec::new(),
                 choose_offer: false,
                 tpu_setup_error: None,
+                tpu_prices: None,
                 owner: owner.clone(),
             },
         );

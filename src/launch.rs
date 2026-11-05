@@ -318,6 +318,7 @@ pub fn launch(ctx: &Ctx, args: &UpArgs, cfg: &Dict, deadline: Option<Timestamp>)
                 models: known_gpu_models(&ctx.env),
                 recent_gpus: recent,
                 choose_offer: !args.yes && args.offer.is_none(),
+                tpu_prices: Some(crate::gcp_prices::job(ctx, cfg)),
                 tpu_setup_error: crate::gcp::launch_setup(ctx, cfg)
                     .err()
                     .map(|e| e.text().to_string()),

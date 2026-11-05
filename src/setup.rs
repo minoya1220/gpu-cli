@@ -14,10 +14,11 @@ pub const GCP_NOT_SETUP: &str =
 const ZONE: &str = "us-east5-b";
 const QUEUE: &str = "gpu-expiry";
 // Compute supplies the default compute identity and SSH infrastructure.
-const APIS: [&str; 3] = [
+const APIS: [&str; 4] = [
     "compute.googleapis.com",
     "tpu.googleapis.com",
     "cloudtasks.googleapis.com",
+    "cloudbilling.googleapis.com",
 ];
 
 pub fn gcp_ready(cfg: &Dict) -> bool {
@@ -247,15 +248,22 @@ pub(crate) fn zone_screen(
     let preferred = preferred.to_string();
     let job = Job::new(move || {
         let mut zones = if api_enabled {
-            gcp::locations(&worker, &project).map_err(|e| e.text().to_string())?
+            crate::gcp_catalog::zones(&worker, &project, None).map_err(|e| e.text().to_string())?
         } else {
-            PUBLISHED_TPU_ZONES.iter().map(|s| s.to_string()).collect()
+            PUBLISHED_TPU_ZONES
+                .iter()
+                .map(|s| crate::gcp_catalog::Zone {
+                    name: s.to_string(),
+                    types: Vec::new(),
+                })
+                .collect()
         };
-        zones.sort();
-        zones.dedup();
+        zones.sort_by(|a, b| a.name.cmp(&b.name));
+        zones.dedup_by(|a, b| a.name == b.name);
         // The engine initially highlights row 0. Preserve the previous zone on
         // reconfiguration; new setups prefer us-east5-b only when available.
-        zones.sort_by_key(|zone| zone != &preferred);
+        zones.sort_by_key(|zone| zone.name != preferred);
+        crate::gcp_geo::order(&worker.env, &mut zones, |z| &z.name);
         Ok(zones)
     });
     let options = job.clone();
@@ -266,7 +274,14 @@ pub(crate) fn zone_screen(
                 .result()
                 .unwrap_or_default()
                 .into_iter()
-                .map(|zone| Opt::new(zone.clone(), zone))
+                .map(|zone| {
+                    let label = if zone.types.is_empty() {
+                        zone.name.clone()
+                    } else {
+                        crate::gcp_catalog::label(&zone)
+                    };
+                    Opt::new(zone.name, label)
+                })
                 .collect()
         },
         Next::Done,
@@ -592,7 +607,7 @@ fn setup_gcp(ctx: &Ctx, cfg: &Dict, flags: &SetupFlags) -> Result<()> {
     }
     // Journal intent BEFORE requests: a timeout/interruption may still have applied
     // the mutation. On retry list actual state, never replay a blind delete/create.
-    save_config(ctx, Some(plan.config()))?;
+    save_setup_progress(ctx, &plan, previous.as_ref())?;
     for api in missing {
         // A service enabled during review is not ours to disable later.
         if plan.services(ctx)?.iter().any(|s| s == api) {
@@ -601,7 +616,7 @@ fn setup_gcp(ctx: &Ctx, cfg: &Dict, flags: &SetupFlags) -> Result<()> {
         if !plan.enabled.iter().any(|s| s == api) {
             plan.enabled.push(api.into());
         }
-        save_config(ctx, Some(plan.config()))?;
+        save_setup_progress(ctx, &plan, previous.as_ref())?;
         plan.run(ctx, &["services", "enable", api]).map_err(|_| {
             Error::msg(format!(
                 "Setup stopped while enabling {api}; completion is unverified."
@@ -612,9 +627,9 @@ fn setup_gcp(ctx: &Ctx, cfg: &Dict, flags: &SetupFlags) -> Result<()> {
     // An API-disabled project's pre-consent list was necessarily offline.
     // Verify the selected zone against this project once enabling is approved,
     // and stop before creating the queue if it is unavailable.
-    let zones = gcp::locations(ctx, &plan.project).map_err(|_| Error::msg("Setup stopped while verifying the TPU zone; completed API changes are recorded. Next: gpu setup"))?;
-    if !zones.contains(&plan.zone) {
-        return Err(Error::msg(format!("TPU zone {} was not returned for project {}; completed API changes are recorded. Choose another zone. Next: gpu setup", plan.zone, plan.project)));
+    let types = crate::gcp_catalog::types(ctx, &plan.project, &plan.zone).map_err(|_| Error::msg("Setup stopped while verifying the TPU zone; completed API changes are recorded. Next: gpu setup"))?;
+    if types.is_empty() {
+        return Err(Error::msg(format!("TPU zone {} offers no accelerator types in project {}; completed API changes are recorded. Choose another zone. Next: gpu setup", plan.zone, plan.project)));
     }
     // Check the default identity AFTER Compute is enabled, BEFORE queue creation.
     plan.check_identity(ctx)?;
@@ -652,6 +667,16 @@ fn setup_gcp(ctx: &Ctx, cfg: &Dict, flags: &SetupFlags) -> Result<()> {
     plan.version = 1;
     save_config(ctx, Some(plan.config()))?;
     ctx.println("Google Cloud  ✓ set up\nNext: gpu up --provider gcp")
+}
+
+// Journal new API ownership immediately, but do not publish an unverified zone
+// over a previously completed setup if reconfiguration fails midway.
+fn save_setup_progress(ctx: &Ctx, plan: &Plan, previous: Option<&Plan>) -> Result<()> {
+    let mut cfg = plan.config();
+    if let Some(previous) = previous.filter(|p| p.version == 1) {
+        cfg.insert("zone", Value::str(&previous.zone));
+    }
+    save_config(ctx, Some(cfg))
 }
 
 /// Rechecked after confirmation as well: a user may spend minutes reviewing

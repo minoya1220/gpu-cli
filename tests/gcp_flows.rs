@@ -106,8 +106,10 @@ fn config_lookup_and_setup_errors_use_xdg_or_dot_config_on_every_platform() {
 fn gcp_list_and_non_executing_ssh_never_use_vast() {
     let s = configured();
     s.stub("gcloud", r#"#!/bin/sh
-{ printf 'gcloud'; for arg in "$@"; do printf '\t%s' "$arg"; done; printf '\n'; } >> "$FAKE_CLI_LOG"
+entry=gcloud; for arg in "$@"; do entry="$entry	$arg"; done
+printf '%s\n' "$entry" >> "$FAKE_CLI_LOG"
 case "$1 $2 $3 $4" in
+  'tasks list --project=test-project --location=us-central1') printf '[]\n' ;;
   'compute tpus locations list') printf '%s\n' '[{"locationId":"us-east5-b"}]' ;;
   'compute tpus tpu-vm list') printf '%s\n' '[{"name":"projects/test-project/locations/us-east5-b/nodes/test-tpu","acceleratorType":"v6e-1","state":"READY"}]' ;;
   *) exit 97 ;;
@@ -131,7 +133,7 @@ esac
         .unwrap();
     assert!(output.status.success());
     let calls = s.calls();
-    assert_eq!(calls.len(), 2);
+    assert_eq!(calls.len(), 3);
     assert!(calls.iter().all(|a| a[0] == "gcloud"
         && a.contains(&"--project=test-project".into())
         && a.contains(&"--quiet".into())));
@@ -141,8 +143,12 @@ esac
 fn paused_queue_prevents_any_paid_resource_request() {
     let s = configured();
     s.stub("gcloud", r#"#!/bin/sh
-{ printf 'gcloud'; for arg in "$@"; do printf '\t%s' "$arg"; done; printf '\n'; } >> "$FAKE_CLI_LOG"
+entry=gcloud; for arg in "$@"; do entry="$entry	$arg"; done
+printf '%s\n' "$entry" >> "$FAKE_CLI_LOG"
 case "$1 $2 $3" in
+  'tasks list --project=test-project') printf '[]\n' ;;
+  'compute tpus tpu-vm') printf '[{"type":"v6e-1"}]\n' ;;
+  'auth print-access-token --project=test-project') exit 1 ;;
   'tasks queues describe') printf '%s\n' '{"state":"PAUSED","retryConfig":{"maxAttempts":-1,"maxBackoff":"60s"}}' ;;
   *) exit 97 ;;
 esac
@@ -164,6 +170,12 @@ esac
         .unwrap();
     assert_eq!(output.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&output.stderr).contains("must be RUNNING"));
-    assert_eq!(s.calls().len(), 1);
-    assert_eq!(s.calls()[0][1..4], ["tasks", "queues", "describe"]);
+    assert!(s
+        .calls()
+        .iter()
+        .any(|a| a.get(1..4) == Some(&["tasks".into(), "queues".into(), "describe".into()])));
+    assert!(!s
+        .calls()
+        .iter()
+        .any(|a| a.iter().any(|s| s == "create" || s == "create-http-task")));
 }

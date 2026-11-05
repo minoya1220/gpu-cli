@@ -153,6 +153,11 @@ impl Queue {
         }
         Ok(())
     }
+    fn own_task_name(&self, task: &Dict) -> bool {
+        text(task, "name")
+            .and_then(|n| n.strip_prefix(&format!("{}/tasks/", self.resource())))
+            .is_some_and(|name| name.starts_with("gpu-expire-") && component(name))
+    }
     fn tasks(&self, ctx: &Ctx, id: &TpuId) -> Result<Vec<Dict>> {
         let data = gcp::json(
             ctx,
@@ -163,9 +168,7 @@ impl Queue {
         Ok(gcp::objects(data)?
             .into_iter()
             .filter(|d| {
-                let own_name = text(d, "name").is_some_and(|n| {
-                    n.starts_with(&format!("{}/tasks/gpu-expire-", self.resource()))
-                });
+                let own_name = self.own_task_name(d);
                 let target = d.get("httpRequest").and_then(Value::as_dict);
                 own_name
                     && target.is_some_and(|h| {
@@ -188,6 +191,57 @@ impl Queue {
         }
         Ok(())
     }
+    /// Opportunistic cleanup only for this queue's gpu-owned exact DELETEs.
+    /// A failed presence check must never remove a safety task.
+    pub fn reconcile(&self, ctx: &Ctx) -> Result<()> {
+        let tasks = gcp::objects(gcp::json(ctx, self.args("list"), "gpu ls --provider gcp")?)?;
+        for task in tasks {
+            let own = self.own_task_name(&task);
+            let Some(http) = task.get("httpRequest").and_then(Value::as_dict) else {
+                continue;
+            };
+            let account = http
+                .get("oauthToken")
+                .and_then(Value::as_dict)
+                .and_then(|d| text(d, "serviceAccountEmail"));
+            if !own
+                || account != Some(&self.service_account)
+                || text(http, "httpMethod") != Some("DELETE")
+            {
+                continue;
+            }
+            let Some(path) = text(http, "url")
+                .and_then(|u| u.strip_prefix("https://tpu.googleapis.com/v2/projects/"))
+            else {
+                continue;
+            };
+            let p: Vec<_> = path.split('/').collect();
+            if p.len() != 5
+                || p[0] != self.project
+                || p[1] != "locations"
+                || p[3] != "nodes"
+                || ![p[0], p[2], p[4]].iter().all(|s| gcp::component(s))
+            {
+                continue;
+            }
+            let id = TpuId {
+                project: p[0].into(),
+                zone: p[2].into(),
+                name: p[4].into(),
+            };
+            match gcp::absent(ctx, &id) {
+                Ok(true) => self.delete_tasks(ctx, &id, &[task])?,
+                Ok(false) => {}
+                Err(_) => ctx.eprintln(&format!(
+                    "Could not verify {}; kept its expiry task. Next: gpu expire {} show",
+                    id.cli(),
+                    id.cli()
+                ))?,
+            }
+        }
+        Ok(())
+    }
+
     pub fn cancel(&self, ctx: &Ctx, id: &TpuId) -> Result<()> {
         self.delete_tasks(ctx, id, &self.tasks(ctx, id)?)?;
         if !self.tasks(ctx, id)?.is_empty() {
@@ -198,6 +252,11 @@ impl Queue {
         }
         Ok(())
     }
+}
+
+pub fn reconcile(ctx: &Ctx, cfg: &Dict) -> Result<()> {
+    ctx.require_gcloud()?;
+    Queue::load(&Settings::load(cfg)?)?.reconcile(ctx)
 }
 
 pub fn queue_for_node(cfg: &Dict, id: &TpuId, node: &Dict) -> Result<Queue> {
@@ -248,6 +307,7 @@ pub fn manage(
     if let Some(deadline) = deadline {
         validate_deadline(ctx, deadline)?;
     }
+    reconcile(ctx, cfg)?;
     // Listing also lets cancel clean up tasks left by a failed/expired create.
     // Authentication failures are not confused with absence.
     let node = gcp::nodes(ctx, &id.project, &id.zone)?

@@ -358,6 +358,8 @@ impl LaunchWizard {
         };
         Screen::new("Clone from URL", Vec::new, select)
             .text_input(Some(Box::new(validate)))
+            .input_label("Repository")
+            .input_hint("Type HTTPS/git@ URL or owner/name, then Enter/→")
             .quick_select(false)
     }
 

@@ -94,6 +94,8 @@ pub struct Screen<V, R> {
     /// Text entry shares the same loop and stack; validation gives an inline error.
     pub text_input: bool,
     pub input_label: String,
+    pub input_hint: String,
+    pub back_clears_input: bool,
     pub validate: Option<Validate>,
     pub on_settled: Option<Settled<V, R>>,
     pub notice: String,
@@ -118,7 +120,9 @@ impl<V: PickValue, R: 'static> Screen<V, R> {
             quick_select: true,
             load_required: true,
             text_input: false,
-            input_label: "Repository".into(),
+            input_label: "Input".into(),
+            input_hint: "Type a value, then Enter/→".into(),
+            back_clears_input: true,
             validate: None,
             on_settled: None,
             notice: String::new(),
@@ -164,6 +168,16 @@ impl<V: PickValue, R: 'static> Screen<V, R> {
     pub fn text_input(mut self, validate: Option<Validate>) -> Self {
         self.text_input = true;
         self.validate = validate;
+        self
+    }
+
+    pub fn input_hint(mut self, hint: impl Into<String>) -> Self {
+        self.input_hint = hint.into();
+        self
+    }
+
+    pub fn back_clears_input(mut self, on: bool) -> Self {
+        self.back_clears_input = on;
         self
     }
 
@@ -425,7 +439,7 @@ impl<V: PickValue, R: 'static> Core<V, R> {
             Key::Left | Key::Char('`') => {
                 if self.view().selection_notice.is_some() {
                     self.view_mut().selection_notice = None;
-                } else if !self.view().filter.is_empty() {
+                } else if !self.view().filter.is_empty() && self.view().screen.back_clears_input {
                     self.view_mut().set_filter(String::new());
                 } else if self.stack.len() > 1 {
                     self.stack.pop();
@@ -548,13 +562,7 @@ impl<V: PickValue, R: 'static> Core<V, R> {
         }
         if screen.text_input {
             return if view.error.is_empty() {
-                (
-                    one(
-                        Style::Note,
-                        "  Type HTTPS/git@ URL or owner/name, then Enter/\u{2192}".into(),
-                    ),
-                    None,
-                )
+                (one(Style::Note, format!("  {}", screen.input_hint)), None)
             } else {
                 (one(Style::Error, view.error.clone()), None)
             };
@@ -649,7 +657,7 @@ impl<V: PickValue, R: 'static> Core<V, R> {
             }
             hints
         };
-        if !view.filter.is_empty() {
+        if !view.filter.is_empty() && screen.back_clears_input {
             hints.push("`/\u{2190} clear".into());
         } else if self.quit_pending {
             hints.push("Press `/\u{2190} again to quit".into());

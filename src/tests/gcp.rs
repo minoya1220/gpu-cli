@@ -631,6 +631,54 @@ fn catalog_choices_share_a_stack_and_back_does_not_refetch() {
 }
 
 #[test]
+fn expiry_entry_has_duration_help_validation_and_back_to_capacity() {
+    use crate::picker::{testing::*, Next, Outcome};
+    let (_env, ctx, runner, _state) = fixture();
+    let settings = crate::gcp::Settings::load(&dict(CONFIG)).unwrap();
+    let Next::Screen(first) = crate::gcp_wizard::next(
+        ctx,
+        settings,
+        crate::gcp_wizard::Selection {
+            zone: Some("us-east5-b".into()),
+            tpu: Some("v6e-1".into()),
+            ..Default::default()
+        },
+    ) else {
+        panic!("missing capacity screen")
+    };
+    let result = drive(first, |keys| {
+        keys.press_until(ENTER, on("Destroy after (e.g. 2h)"));
+        assert!(keys
+            .snapshot()
+            .body
+            .iter()
+            .any(|s| s.contains("30m, 2h or 1d")));
+        assert!(!keys.snapshot().body.iter().any(|s| s.contains("HTTPS")));
+        assert!(keys.footer().contains("back"));
+        assert!(!keys.footer().contains("quit (twice)"));
+        keys.type_text("30s");
+        keys.press(ENTER);
+        assert!(keys
+            .snapshot()
+            .body
+            .iter()
+            .any(|s| s.contains("1 minute to 29 days")));
+        keys.press_until(BACK, on("TPU capacity"));
+        keys.press_until(ENTER, on("Destroy after (e.g. 2h)"));
+        keys.type_text("1d");
+        keys.press(ENTER);
+    });
+    let Outcome::Done(selection) = result else {
+        panic!("{result:?}")
+    };
+    assert_eq!(
+        selection.expiry_at.unwrap().to_string(),
+        "2026-11-04T00:00:00Z"
+    );
+    assert!(runner.calls().is_empty());
+}
+
+#[test]
 fn real_clock_precision_does_not_break_task_verification() {
     let (env, _ctx, runner, state) = fixture();
     let ctx = env

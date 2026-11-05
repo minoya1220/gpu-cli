@@ -15,6 +15,7 @@ pub struct Picks {
     pub spot: bool,
     pub repo: Repo,
     pub directory: String,
+    pub deadline: jiff::Timestamp,
 }
 
 pub(crate) fn catalog_job(
@@ -90,6 +91,7 @@ pub(crate) struct Selection {
     pub zone: Option<String>,
     pub tpu: Option<String>,
     pub spot: Option<bool>,
+    pub expiry_at: Option<jiff::Timestamp>,
 }
 
 /// One screen stack for the TPU choices: back restores the previous selection
@@ -134,6 +136,38 @@ pub(crate) fn next(ctx: Ctx, settings: Settings, picks: Selection) -> Next<Strin
             },
         ));
     }
+    if picks.expiry_at.is_none() {
+        return Next::Screen(
+            Screen::new(
+                "Destroy after (e.g. 2h)",
+                Vec::new,
+                move |duration: String| match crate::expiry::parse_deadline_duration(
+                    &duration,
+                    ctx.clock.now(),
+                ) {
+                    Ok(at) => next(
+                        ctx.clone(),
+                        settings.clone(),
+                        Selection {
+                            expiry_at: Some(at),
+                            ..picks.clone()
+                        },
+                    ),
+                    Err(message) => Next::Notice(message),
+                },
+            )
+            .text_input(Some(Box::new(|s| {
+                let seconds = crate::expiry::parse_duration(s)?;
+                if !(60..=29 * 86400).contains(&seconds) {
+                    return Err("Choose 1 minute to 29 days".into());
+                }
+                Ok(())
+            })))
+            .input_label("Duration")
+            .input_hint("Type a duration: 30m, 2h or 1d, then Enter/→")
+            .back_clears_input(false),
+        );
+    }
     Next::Done(picks)
 }
 
@@ -150,11 +184,18 @@ pub(crate) fn runtime_for(tpu: &str) -> Result<&'static str> {
     }
 }
 
-pub fn choose(ctx: &Ctx, flags: &UpFlags, settings: &Settings, cfg: &Dict) -> Result<Picks> {
+pub fn choose(
+    ctx: &Ctx,
+    flags: &UpFlags,
+    settings: &Settings,
+    cfg: &Dict,
+    deadline: Option<jiff::Timestamp>,
+) -> Result<Picks> {
     let missing = || {
         Error::msg("Specify --tpu, --zone and --repo or --no-repo (zone may come from config). Next: gpu up --provider gcp --help")
     };
     let selected = Selection {
+        expiry_at: deadline,
         zone: flags.zone.clone().or_else(|| settings.zone.clone()),
         tpu: flags.tpu.clone(),
         spot: if ctx.interactive() && !flags.spot && !flags.on_demand {
@@ -172,6 +213,11 @@ pub fn choose(ctx: &Ctx, flags: &UpFlags, settings: &Settings, cfg: &Dict) -> Re
     } else {
         selected
     };
+    let deadline = selected.expiry_at.ok_or_else(|| {
+        Error::msg(
+            "TPU launches require a destruction deadline. Next: gpu up --provider gcp --expire 2h",
+        )
+    })?;
     let zone = selected.zone.ok_or_else(missing)?;
     let tpu = selected.tpu.ok_or_else(missing)?;
     let spot = selected.spot.unwrap_or(false);
@@ -239,5 +285,6 @@ pub fn choose(ctx: &Ctx, flags: &UpFlags, settings: &Settings, cfg: &Dict) -> Re
         spot,
         repo,
         directory,
+        deadline,
     })
 }

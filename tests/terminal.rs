@@ -535,6 +535,13 @@ printf '[{"type":"v5litepod-1"}]\n'
         term.press("2"); // Spot
         if query == "v5e" {
             term.wait(on("Destroy after (e.g. 2h)"));
+            assert!(shows("30m, 2h or 1d")(&term));
+            assert!(!shows("HTTPS/git@")(&term));
+            assert!(!term.last_line().contains("quit (twice)"));
+            term.press("30s");
+            term.press_until(ENTER, shows("Choose 1 minute to 29 days"));
+            term.press_until(BACK, on("TPU capacity"));
+            term.press_until("2", on("Destroy after (e.g. 2h)"));
             term.press("2h");
             term.press(ENTER);
         }

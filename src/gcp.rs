@@ -347,33 +347,8 @@ pub fn launch(ctx: &Ctx, flags: &UpFlags, cfg: &Dict, deadline: Option<Timestamp
             "Vast GPU/offer/disk flags do not apply to TPUs. Next: gpu up --provider gcp --help",
         ));
     }
-    let picks = crate::gcp_wizard::choose(ctx, flags, &settings, cfg)?;
-    // Ask last, so selection time is not taken from an interactive duration.
-    let deadline = match deadline {
-        Some(deadline) => deadline,
-        None if ctx.interactive() => {
-            let duration: String = crate::picker::pick(
-                ctx,
-                crate::picker::Screen::new(
-                    "Destroy after (e.g. 2h)",
-                    Vec::new,
-                    crate::picker::Next::Done,
-                )
-                .text_input(Some(Box::new(|s| {
-                    let seconds = crate::expiry::parse_duration(s)?;
-                    if !(60..=29 * 86400).contains(&seconds) {
-                        return Err("Choose 1 minute to 29 days".into());
-                    }
-                    Ok(())
-                }))),
-            )?;
-            crate::expiry::parse_deadline_duration(&duration, ctx.clock.now())
-                .map_err(Error::msg)?
-        }
-        None => return Err(Error::msg(
-            "TPU launches require a destruction deadline. Next: gpu up --provider gcp --expire 2h",
-        )),
-    };
+    let picks = crate::gcp_wizard::choose(ctx, flags, &settings, cfg, deadline)?;
+    let deadline = picks.deadline;
     crate::gcp_expiry::validate_deadline(ctx, deadline)?;
     let id = TpuId {
         project: settings.project.clone(),

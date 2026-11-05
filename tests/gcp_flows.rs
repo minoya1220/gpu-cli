@@ -10,6 +10,7 @@ fn configured() -> Sandbox {
     let s = Sandbox::new();
     std::fs::create_dir_all(s.root.join("config/gpu")).unwrap();
     std::fs::write(s.root.join("config/gpu/config.json"), CONFIG).unwrap();
+    s.gcp_reads("[]", false);
     s
 }
 
@@ -84,9 +85,9 @@ fn config_lookup_and_setup_errors_use_xdg_or_dot_config_on_every_platform() {
         let missing = launch();
         assert_eq!(missing.status.code(), Some(1));
         let error = String::from_utf8_lossy(&missing.stderr);
-        assert!(error.contains("Set up Google Cloud before renting TPUs"));
+        assert!(error.contains("Google Cloud is not set up"));
         assert!(
-            error.contains(&format!("Config file: {}", path.display())),
+            error.contains(&format!("Config: {}", path.display())),
             "{error}"
         );
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -105,10 +106,12 @@ fn config_lookup_and_setup_errors_use_xdg_or_dot_config_on_every_platform() {
 #[test]
 fn gcp_list_and_non_executing_ssh_never_use_vast() {
     let s = configured();
+    s.gcp_reads(r#"[{"name":"projects/test-project/locations/us-east5-b/nodes/test-tpu","acceleratorType":"v6e-1","state":"READY"}]"#,false);
     s.stub("gcloud", r#"#!/bin/sh
 entry=gcloud; for arg in "$@"; do entry="$entry	$arg"; done
 printf '%s\n' "$entry" >> "$FAKE_CLI_LOG"
 case "$1 $2 $3 $4" in
+  'auth print-access-token --project=test-project --quiet') printf 'test-token\n' ;;
   'tasks list --project=test-project --location=us-central1') printf '[]\n' ;;
   'compute tpus locations list') printf '%s\n' '[{"locationId":"us-east5-b"}]' ;;
   'compute tpus tpu-vm list') printf '%s\n' '[{"name":"projects/test-project/locations/us-east5-b/nodes/test-tpu","acceleratorType":"v6e-1","state":"READY"}]' ;;
@@ -134,9 +137,10 @@ esac
     assert!(output.status.success());
     let calls = s.calls();
     assert_eq!(calls.len(), 3);
-    assert!(calls.iter().all(|a| a[0] == "gcloud"
-        && a.contains(&"--project=test-project".into())
-        && a.contains(&"--quiet".into())));
+    assert!(calls.iter().all(|a| a[0] == "curl"
+        || (a[0] == "gcloud"
+            && a.contains(&"--project=test-project".into())
+            && a.contains(&"--quiet".into()))));
 }
 
 #[test]
@@ -148,7 +152,7 @@ printf '%s\n' "$entry" >> "$FAKE_CLI_LOG"
 case "$1 $2 $3" in
   'tasks list --project=test-project') printf '[]\n' ;;
   'compute tpus tpu-vm') printf '[{"type":"v6e-1"}]\n' ;;
-  'auth print-access-token --project=test-project') exit 1 ;;
+  'auth print-access-token --project=test-project') printf 'test-token\n' ;;
   'tasks queues describe') printf '%s\n' '{"state":"PAUSED","retryConfig":{"maxAttempts":-1,"maxBackoff":"60s"}}' ;;
   *) exit 97 ;;
 esac

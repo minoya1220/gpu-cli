@@ -15,3 +15,5 @@ mod repos;
 mod setup;
 mod uptime;
 mod wizard;
+
+pub(crate) mod gcp_transport;

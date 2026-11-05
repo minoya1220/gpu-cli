@@ -1,12 +1,11 @@
-//! Public USD list prices, fetched from Cloud Billing Catalog with gcloud OAuth.
+//! Public USD prices: generated Catalog SKU metadata + live per-SKU prices.
 //! Tokens are captured, passed to curl on stdin, and never cached or displayed.
 use crate::{
     ctx::Ctx,
     error::{Error, Result},
     gcp,
     picker::Job,
-    process::{Cmd, Input},
-    pyjson::{self, Dict, Value},
+    pyjson::{Dict, Value},
 };
 use jiff::Timestamp;
 
@@ -15,6 +14,9 @@ pub struct Prices {
     pub region: String,
     pub skus: Vec<Dict>,
     pub at: Timestamp,
+    pub cache_age: Option<i64>,
+    pub(crate) clock: Option<std::sync::Arc<dyn crate::ctx::Clock>>,
+    pub unavailable: Option<String>,
 }
 fn number(d: &Dict, key: &str) -> Option<f64> {
     crate::pyfmt::py_float(d.get(key)?)
@@ -22,23 +24,7 @@ fn number(d: &Dict, key: &str) -> Option<f64> {
         .filter(|n| n.is_finite())
 }
 fn generation(s: &str) -> Option<&'static str> {
-    let s = s.to_ascii_lowercase();
-    let compact: String = s.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
-    if compact.contains("v6e") || compact.contains("trillium") {
-        Some("v6e")
-    } else if compact.contains("v5lite") || compact.contains("v5e") {
-        Some("v5e")
-    } else if compact.contains("v5p") {
-        Some("v5p")
-    } else if compact.contains("v4") {
-        Some("v4")
-    } else if compact.contains("v3") {
-        Some("v3")
-    } else if compact.contains("v2") {
-        Some("v2")
-    } else {
-        None
-    }
+    crate::gcp_facts::generation(s)
 }
 fn chips(tpu: &str) -> Option<(&'static str, f64)> {
     let (g, n) = tpu.rsplit_once('-')?;
@@ -79,9 +65,17 @@ impl Prices {
             let usage = gcp::text(cat, "usageType").unwrap_or("");
             if (spot && !matches!(usage, "Preemptible" | "Spot"))
                 || (!spot && usage != "OnDemand")
-                || ["commit", "flex", "calendar", "reservation"]
-                    .iter()
-                    .any(|s| desc.contains(s))
+                || [
+                    "commit",
+                    "dws",
+                    "flex",
+                    "calendar",
+                    "reservation",
+                    "subscription",
+                    "capacity optimized",
+                ]
+                .iter()
+                .any(|s| desc.contains(s))
             {
                 continue;
             }
@@ -123,7 +117,12 @@ impl Prices {
             let Some(rate) = rates[0].as_dict() else {
                 continue;
             };
-            if number(rate, "startUsageAmount").unwrap_or(0.0) != 0.0 {
+            let start = if rate.contains_key("startUsageAmount") {
+                number(rate, "startUsageAmount")
+            } else {
+                Some(0.0)
+            };
+            if start != Some(0.0) {
                 continue;
             }
             let Some(money) = rate.get("unitPrice").and_then(Value::as_dict) else {
@@ -153,7 +152,18 @@ impl Prices {
             {
                 continue;
             }
-            let price = units + nanos / 1e9;
+            let quantity = if expr.contains_key("unitQuantity") {
+                number(expr, "unitQuantity")
+            } else {
+                Some(1.0)
+            };
+            let Some(quantity) = quantity else {
+                continue;
+            };
+            if quantity <= 0.0 {
+                continue;
+            }
+            let price = (units + nanos / 1e9) / quantity;
             let unit = gcp::text(expr, "usageUnit")
                 .unwrap_or("")
                 .to_ascii_lowercase();
@@ -165,10 +175,12 @@ impl Prices {
                 || unit
                     .split(|c: char| !c.is_ascii_alphanumeric())
                     .any(|s| matches!(s, "h" | "hr" | "hour"));
-            let hourly = if basis.contains("chip") && is_hour {
-                price * count
-            } else if basis.contains("core") && is_hour {
+            let compute_chip = gcp::text(cat, "serviceDisplayName") == Some("Compute Engine")
+                && gcp::text(cat, "resourceGroup") == Some("TPU");
+            let hourly = if basis.contains("core") && is_hour {
                 price * count * 2.0
+            } else if (basis.contains("chip") || compute_chip) && is_hour {
+                price * count
             } else if matches!(unit.as_str(), "h" | "hr" | "hour") {
                 // A size-specific VM SKU overrides the full-host shape.
                 let explicit = desc
@@ -194,19 +206,52 @@ impl Prices {
             .all(|p| (*p - first).abs() < 1e-8)
             .then_some(first)
     }
+    pub fn cache_note(&self) -> String {
+        self.cache_age
+            .map(|age| {
+                let age = age.saturating_add(
+                    self.clock
+                        .as_ref()
+                        .map(|c| {
+                            c.now()
+                                .as_second()
+                                .saturating_sub(self.at.as_second())
+                                .max(0)
+                        })
+                        .unwrap_or(0),
+                );
+                format!(
+                    "cached {}",
+                    if age < 60 {
+                        format!("{age}s")
+                    } else if age < 3600 {
+                        format!("{}m", age / 60)
+                    } else if age < 86400 {
+                        format!("{}h", age / 3600)
+                    } else {
+                        format!("{}d", age / 86400)
+                    }
+                )
+            })
+            .unwrap_or_default()
+    }
     pub fn quote(&self, tpu: &str, spot: bool) -> String {
         self.hourly(tpu, spot)
             .map(|p| {
                 format!(
-                    "${}/hr USD list ({})",
+                    "${}/hr{}",
                     crate::pyfmt::fixed(p, 3),
-                    self.region
+                    self.cache_age
+                        .map(|_| format!(" ({})", self.cache_note()))
+                        .unwrap_or_default()
                 )
             })
             .unwrap_or_else(|| {
                 format!(
-                    "price unavailable (no unambiguous hourly SKU in {})",
-                    self.region
+                    "price unavailable ({})",
+                    self.unavailable
+                        .as_deref()
+                        .unwrap_or("no matching hourly SKU")
                 )
             })
     }
@@ -216,198 +261,296 @@ impl Prices {
                 .iter()
                 .filter_map(|t| self.hourly(t, spot))
                 .min_by(f64::total_cmp)
-                .map(|p| format!("${}", crate::pyfmt::fixed(p, 3)))
+                .map(|p| format!("${}/hr", crate::pyfmt::fixed(p, 3)))
                 .unwrap_or_else(|| "unavailable".into())
         };
         format!(
-            "TPU (Google Cloud)  from {} on-demand / {} Spot USD/hr ({})",
+            "TPU (Google Cloud) · from {} · Spot {}",
             rate(false),
-            rate(true),
-            self.region
+            rate(true)
         )
     }
     pub fn label(&self, tpu: &str) -> String {
         let rate = |spot| {
             self.hourly(tpu, spot)
-                .map(|p| format!("${}", crate::pyfmt::fixed(p, 3)))
+                .map(|p| format!("${}/hr", crate::pyfmt::fixed(p, 3)))
                 .unwrap_or_else(|| "unavailable".into())
         };
-        format!(
-            "TPU {tpu} (Google Cloud)  on-demand {} / Spot {} USD/hr ({})",
-            rate(false),
-            rate(true),
-            self.region
-        )
+        if self.hourly(tpu, false).is_none() && self.hourly(tpu, true).is_none() {
+            format!("TPU {tpu} · price unavailable")
+        } else {
+            format!("TPU {tpu} · {} · Spot {}", rate(false), rate(true))
+        }
     }
 }
 fn unavailable(reason: &str) -> Error {
-    Error::msg(format!(
-        "price unavailable ({reason}); rerun gpu setup for Cloud Billing API access"
-    ))
+    Error::msg(reason.to_string())
 }
-fn encode(s: &str) -> String {
-    s.bytes()
-        .map(|b| {
-            if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
-                (b as char).to_string()
-            } else {
-                format!("%{b:02X}")
+#[derive(Clone)]
+struct Entry {
+    at: i64,
+    sku: Dict,
+}
+fn entries(ctx: &Ctx, project: &str) -> std::collections::BTreeMap<String, Entry> {
+    crate::gcp_http::read_cache(ctx, &format!("tpu-prices-{project}.json"), i64::MAX)
+        .and_then(|d| d.get("entries").cloned())
+        .and_then(|v| gcp::objects(v).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|e| {
+            let id = gcp::text(&e, "id")
+                .filter(|s| gcp::component(s))?
+                .to_string();
+            let Value::Int(at) = e.get("at")? else {
+                return None;
+            };
+            let age = ctx.clock.now().as_second().checked_sub(*at)?;
+            if age < 0 {
+                return None;
             }
+            Some((
+                id,
+                Entry {
+                    at: *at,
+                    sku: e.get("sku")?.as_dict()?.clone(),
+                },
+            ))
         })
         .collect()
 }
-fn page(ctx: &Ctx, token: &str, project: &str, path: &str) -> Result<Dict> {
-    let url = format!("https://cloudbilling.googleapis.com/v1/{path}");
-    let config = format!(
-        "header = \"Authorization: Bearer {token}\"\nheader = \"x-goog-user-project: {project}\"\n"
-    );
-    let cmd = Cmd::new(&[
-        "curl",
-        "--disable", // ignore ~/.curlrc (redirects, traces, proxy overrides)
-        "--silent",
-        "--show-error",
-        "--fail-with-body",
-        "--noproxy",
-        "*",
-        "--proto",
-        "=https",
-        "--max-time",
-        "15",
-        "--config",
-        "-",
-        &url,
-    ])
-    .stdin(Input::Text(config))
-    .timeout(Some(20.0));
-    let out = ctx
-        .run(&cmd)
-        .map_err(|_| unavailable("could not run the Catalog HTTPS request"))?;
-    if out.code != 0 {
-        let reason = if out.stdout.contains("SERVICE_DISABLED") {
-            "Cloud Billing API is disabled"
-        } else if out.stdout.contains("PERMISSION_DENIED") {
-            "Catalog access was denied"
-        } else {
-            "Catalog HTTPS request failed"
-        };
-        return Err(unavailable(reason));
-    }
-    pyjson::loads(&out.stdout)
-        .ok()
-        .and_then(|v| v.as_dict().cloned())
-        .ok_or_else(|| unavailable("unreadable Catalog reply"))
+fn has_region(sku: &Dict, key: &str, region: &str) -> bool {
+    sku.get(key)
+        .and_then(Value::as_list)
+        .is_some_and(|rs| rs.contains(&Value::str(region)))
 }
-fn pages(ctx: &Ctx, token: &str, project: &str, path: &str, key: &str) -> Result<Vec<Dict>> {
-    let mut rows = Vec::new();
-    let mut next = String::new();
-    let mut seen = std::collections::HashSet::new();
-    for _ in 0..30 {
-        let query = format!(
-            "{path}{}pageSize=5000&pageToken={}",
-            if path.contains('?') { "&" } else { "?" },
-            encode(&next)
-        );
-        let page = page(ctx, token, project, &query)?;
-        rows.extend(
-            gcp::objects(page.get(key).cloned().unwrap_or(Value::List(Vec::new())))
-                .map_err(|_| unavailable("incomplete Catalog page"))?,
-        );
-        next = gcp::text(&page, "nextPageToken").unwrap_or("").into();
-        if next.is_empty() {
-            return Ok(rows);
-        }
-        if !seen.insert(next.clone()) {
-            return Err(unavailable("repeated Catalog page token"));
-        }
+fn prices(
+    ctx: &Ctx,
+    region: String,
+    entries: &std::collections::BTreeMap<String, Entry>,
+    cache: bool,
+    unavailable: Option<String>,
+) -> Prices {
+    let selected = entries
+        .values()
+        .filter(|e| has_region(&e.sku, "serviceRegions", &region))
+        .collect::<Vec<_>>();
+    let cache_age = cache.then(|| {
+        selected
+            .iter()
+            .map(|e| ctx.clock.now().as_second().saturating_sub(e.at))
+            .max()
+            .unwrap_or(0)
+    });
+    Prices {
+        region,
+        skus: selected.into_iter().map(|e| e.sku.clone()).collect(),
+        at: ctx.clock.now(),
+        cache_age,
+        clock: Some(ctx.clock.clone()),
+        unavailable,
     }
-    Err(unavailable("Catalog pagination limit reached"))
+}
+pub fn cached(ctx: &Ctx, cfg: &Dict, zone: &str) -> Option<std::sync::Arc<Prices>> {
+    if !crate::setup::gcp_ready(cfg) {
+        return None;
+    }
+    let project = gcp::Settings::load(cfg).ok()?.project;
+    let region = crate::gcp_geo::region(zone)?.to_string();
+    let entries = entries(ctx, &project);
+    let prices = prices(ctx, region, &entries, true, None);
+    (!prices.skus.is_empty()).then(|| std::sync::Arc::new(prices))
+}
+fn normalize(meta: &Dict, data: Dict, at: Timestamp) -> Result<Dict> {
+    if gcp::text(&data, "currencyCode") != Some("USD") {
+        return Err(unavailable("Non-USD public rate."));
+    }
+    let rate = data
+        .get("rate")
+        .and_then(Value::as_dict)
+        .ok_or_else(|| unavailable("No hourly public rate."))?;
+    let unit = rate
+        .get("unitInfo")
+        .and_then(Value::as_dict)
+        .ok_or_else(gcp::bad_reply)?;
+    let mut expr = Dict::new();
+    expr.insert(
+        "usageUnit",
+        unit.get("unit").cloned().unwrap_or(Value::Null),
+    );
+    expr.insert(
+        "usageUnitDescription",
+        unit.get("unitDescription").cloned().unwrap_or(Value::Null),
+    );
+    expr.insert(
+        "unitQuantity",
+        unit.get("unitQuantity")
+            .and_then(Value::as_dict)
+            .and_then(|d| d.get("value"))
+            .cloned()
+            .unwrap_or(Value::Int(1)),
+    );
+    let tiers = rate
+        .get("tiers")
+        .and_then(Value::as_list)
+        .ok_or_else(gcp::bad_reply)?
+        .iter()
+        .map(|tier| {
+            let tier = tier.as_dict().ok_or_else(gcp::bad_reply)?;
+            let mut d = Dict::new();
+            d.insert(
+                "startUsageAmount",
+                tier.get("startAmount")
+                    .and_then(Value::as_dict)
+                    .and_then(|d| d.get("value"))
+                    .cloned()
+                    .unwrap_or(Value::Int(0)),
+            );
+            d.insert(
+                "unitPrice",
+                tier.get("listPrice").cloned().ok_or_else(gcp::bad_reply)?,
+            );
+            Ok(Value::Dict(d))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    expr.insert("tieredRates", Value::List(tiers));
+    let mut info = Dict::new();
+    info.insert("effectiveTime", Value::str(at.to_string()));
+    info.insert("pricingExpression", Value::Dict(expr));
+    let mut sku = Dict::new();
+    for key in ["description", "category"] {
+        sku.insert(key, meta.get(key).cloned().unwrap_or(Value::Null));
+    }
+    sku.insert("skuId", meta.get("id").cloned().unwrap_or(Value::Null));
+    sku.insert(
+        "serviceRegions",
+        meta.get("regions")
+            .cloned()
+            .unwrap_or(Value::List(Vec::new())),
+    );
+    sku.insert("pricingInfo", Value::List(vec![Value::Dict(info)]));
+    Ok(sku)
 }
 pub fn load(ctx: &Ctx, cfg: &Dict, zone: &str) -> Result<Prices> {
+    load_for(ctx, cfg, zone, None)
+}
+pub fn load_for(ctx: &Ctx, cfg: &Dict, zone: &str, wanted: Option<(&str, bool)>) -> Result<Prices> {
     ctx.require_gcloud()?;
     let project = gcp::Settings::load(cfg)?.project;
     let region = crate::gcp_geo::region(zone)
         .filter(|s| gcp::component(s))
-        .ok_or_else(|| unavailable("configure a TPU zone"))?
+        .ok_or_else(|| unavailable("Choose a TPU zone with gpu setup."))?
         .to_string();
-    let at = ctx.clock.now();
-    let path = ctx
-        .env
-        .xdg("XDG_CACHE_HOME", ".cache")
-        .join("gpu")
-        .join(format!("tpu-prices-{project}-{region}.json"));
-    if let Ok(raw) = std::fs::read_to_string(&path) {
-        if let Ok(Value::Dict(d)) = pyjson::loads(&raw) {
-            let age = number(&d, "at").map(|t| at.as_second() as f64 - t);
-            if age.is_some_and(|age| (0.0..600.0).contains(&age)) {
-                if let Some(skus) = d.get("skus").cloned().and_then(|v| gcp::objects(v).ok()) {
-                    return Ok(Prices { region, skus, at });
-                }
-            }
-        }
+    let gen = match wanted {
+        Some((tpu, _)) => Some(
+            chips(tpu)
+                .ok_or_else(|| unavailable("No public price mapping."))?
+                .0,
+        ),
+        None => None,
+    };
+    let metas = crate::gcp_facts::skus(ctx)
+        .into_iter()
+        .filter(|m| {
+            gcp::text(m, "id").is_some_and(gcp::component)
+                && has_region(m, "regions", &region)
+                && crate::gcp_facts::capacity(m)
+                    .is_some_and(|spot| wanted.is_none_or(|(_, w)| spot == w))
+                && gen.is_none_or(|g| gcp::text(m, "generation") == Some(g))
+        })
+        .collect::<Vec<_>>();
+    if metas.is_empty() {
+        return Err(unavailable("No public hourly SKU for this region/type."));
     }
-    let out = ctx
-        .run(
-            &Cmd::new(&[
-                "gcloud",
-                "auth",
-                "print-access-token",
-                &format!("--project={project}"),
-                "--quiet",
-            ])
-            .timeout(Some(30.0)),
-        )
-        .map_err(|_| unavailable("could not read gcloud credentials"))?;
-    let token = out.stdout.trim();
-    if out.code != 0
-        || token.is_empty()
-        || !token
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"-._~+/=".contains(&b))
-    {
-        return Err(unavailable("gcloud authentication failed"));
-    }
-    let services = pages(ctx, token, &project, "services", "services")?;
-    let service = services
+    let _flight = ctx
+        .gcp_price_lock
+        .lock()
+        .map_err(|_| unavailable("Price cache unavailable."))?;
+    let mut stored = entries(ctx, &project);
+    let now = ctx.clock.now();
+    let missing = metas
         .iter()
-        .find(|d| gcp::text(d, "displayName") == Some("Cloud TPU"))
-        .and_then(|d| gcp::text(d, "name"))
-        .filter(|s| s.strip_prefix("services/").is_some_and(gcp::component))
-        .ok_or_else(|| unavailable("Cloud TPU service not found in Catalog"))?;
-    let skus = pages(
-        ctx,
-        token,
-        &project,
-        &format!("{service}/skus?currencyCode=USD"),
-        "skus",
-    )?;
-    let mut cache = Dict::new();
-    cache.insert("at", Value::Int(at.as_second()));
-    cache.insert(
-        "skus",
-        Value::List(skus.iter().cloned().map(Value::Dict).collect()),
-    );
-    if let Some(parent) = path.parent() {
-        if std::fs::create_dir_all(parent).is_ok() {
-            if let Ok(file) = tempfile::NamedTempFile::new_in(parent) {
-                if std::fs::write(file.path(), pyjson::dumps(&Value::Dict(cache), None)).is_ok() {
-                    let _ = file.persist(&path);
-                }
+        .filter(|m| {
+            !stored
+                .get(gcp::text(m, "id").unwrap())
+                .is_some_and(|e| (0..600).contains(&now.as_second().saturating_sub(e.at)))
+        })
+        .collect::<Vec<_>>();
+    let was_cached = missing.len() < metas.len();
+    let urls = missing
+        .iter()
+        .map(|m| {
+            format!(
+                "https://cloudbilling.googleapis.com/v1beta/skus/{}/price?currencyCode=USD",
+                gcp::text(m, "id").unwrap()
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut failure = None;
+    for (meta, data) in missing
+        .into_iter()
+        .zip(crate::gcp_http::many_results(ctx, &project, &urls)?)
+    {
+        match data.and_then(|d| normalize(meta, d, now)) {
+            Ok(sku) => {
+                stored.insert(
+                    gcp::text(meta, "id").unwrap().into(),
+                    Entry {
+                        at: now.as_second(),
+                        sku,
+                    },
+                );
+            }
+            Err(e) => {
+                failure = Some(e.text().to_string());
+                stored.remove(gcp::text(meta, "id").unwrap());
             }
         }
     }
-    Ok(Prices { region, skus, at })
+    let mut cache = Dict::new();
+    cache.insert(
+        "entries",
+        Value::List(
+            stored
+                .iter()
+                .map(|(id, e)| {
+                    let mut d = Dict::new();
+                    d.insert("id", Value::str(id));
+                    d.insert("at", Value::Int(e.at));
+                    d.insert("sku", Value::Dict(e.sku.clone()));
+                    Value::Dict(d)
+                })
+                .collect(),
+        ),
+    );
+    crate::gcp_http::write_cache(ctx, &format!("tpu-prices-{project}.json"), cache);
+    let ids = metas
+        .iter()
+        .filter_map(|m| gcp::text(m, "id"))
+        .collect::<std::collections::HashSet<_>>();
+    let relevant = stored
+        .into_iter()
+        .filter(|(id, _)| ids.contains(id.as_str()))
+        .collect();
+    let prices = prices(ctx, region, &relevant, was_cached, failure.clone());
+    if prices.skus.is_empty() {
+        return Err(unavailable(
+            failure.as_deref().unwrap_or("No public hourly rate."),
+        ));
+    }
+    Ok(prices)
 }
 pub fn job(ctx: &Ctx, cfg: &Dict) -> Job<std::sync::Arc<Prices>> {
     let worker = ctx.clone();
     let cfg = cfg.clone();
     Job::new(move || {
         if !crate::setup::gcp_ready(&cfg) {
-            return Err("TPU prices need gpu setup".into());
+            return Err("needs gpu setup".into());
         }
-        let zone = gcp::Settings::load(&cfg)
-            .map_err(|e| e.text().to_string())?
-            .zone
-            .ok_or("TPU prices need a configured zone; run gpu setup")?;
+        let settings = gcp::Settings::load(&cfg).map_err(|e| e.text().to_string())?;
+        let zone = settings.zone.ok_or("Choose a TPU zone with gpu setup.")?;
+        // Rare metadata refresh is nonfatal: known SKU IDs can still return
+        // authoritative current rates. No API is enabled implicitly.
+        let _ = crate::gcp_facts::refresh_skus(&worker, &settings.project);
         load(&worker, &cfg, &zone)
             .map(std::sync::Arc::new)
             .map_err(|e| e.text().to_string())

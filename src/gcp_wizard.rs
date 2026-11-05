@@ -36,37 +36,28 @@ pub(crate) fn catalog_job(
                 return crate::gcp_catalog::zones(&worker, &project, tpu.as_deref())
                     .map(|zs| zs.into_iter().map(|z| z.name).collect());
             }
-            let mut args = vec![
-                "gcloud".into(),
-                "compute".into(),
-                "tpus".into(),
-                "tpu-vm".into(),
-                kind.clone(),
-                "list".into(),
-                format!("--project={project}"),
-                "--quiet".into(),
-            ];
-            if let Some(zone) = &zone {
-                args.push(format!("--zone={zone}"));
-            }
-            let items = gcp::objects(gcp::json(&worker, args, "gpu up --provider gcp --help")?)?;
-            items
-                .iter()
-                .map(|d| {
-                    gcp::text(d, "type")
-                        .or_else(|| gcp::text(d, "name").and_then(|n| n.rsplit('/').next()))
-                        .map(String::from)
-                        .ok_or_else(gcp::bad_reply)
-                })
-                .collect()
+            crate::gcp_catalog::cached_types(
+                &worker,
+                &project,
+                zone.as_deref().ok_or_else(gcp::bad_reply)?,
+            )
         };
         load().map_err(|e| e.text().to_string())
     })
 }
 
+#[cfg(test)]
 pub(crate) fn catalog_screen<R: 'static>(
     job: Job<Vec<String>>,
     title: &str,
+    select: impl Fn(String) -> Next<String, R> + 'static,
+) -> Screen<String, R> {
+    catalog_screen_seeded(job, title, Vec::new(), select)
+}
+fn catalog_screen_seeded<R: 'static>(
+    job: Job<Vec<String>>,
+    title: &str,
+    initial: Vec<String>,
     select: impl Fn(String) -> Next<String, R> + 'static,
 ) -> Screen<String, R> {
     let options = job.clone();
@@ -75,7 +66,7 @@ pub(crate) fn catalog_screen<R: 'static>(
         move || {
             options
                 .result()
-                .unwrap_or_default()
+                .unwrap_or_else(|| initial.clone())
                 .into_iter()
                 .map(|s| Opt::new(s.clone(), s))
                 .collect()
@@ -83,10 +74,11 @@ pub(crate) fn catalog_screen<R: 'static>(
         select,
     )
     .load(job)
-    .wait_initial(true)
+    .load_required(false)
+    .wait_initial(false)
     .quick_select(false)
-    .loading("Loading Google Cloud catalog...")
-    .empty("No matching TPU catalog entries")
+    .loading("Checking TPU catalog…")
+    .empty("No matching TPU types or zones")
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -115,7 +107,15 @@ pub(crate) fn next(ctx: Ctx, settings: Settings, picks: Selection) -> Next<Strin
             kind,
             picks.tpu.as_deref(),
         );
-        return Next::Screen(catalog_screen(job, title, move |value| {
+        let initial = if kind == "locations" {
+            crate::gcp_catalog::known(&ctx, &settings.project, picks.tpu.as_deref())
+                .into_iter()
+                .map(|z| z.name)
+                .collect()
+        } else {
+            crate::gcp_facts::known_types(&ctx, &settings.project, picks.zone.as_deref())
+        };
+        return Next::Screen(catalog_screen_seeded(job, title, initial, move |value| {
             let mut chosen = picks.clone();
             match kind {
                 "locations" => chosen.zone = Some(value),
@@ -173,7 +173,7 @@ pub(crate) fn next(ctx: Ctx, settings: Settings, picks: Selection) -> Next<Strin
                 Ok(())
             })))
             .input_label("Duration")
-            .input_hint("Type a duration: 30m, 2h or 1d, then Enter/→")
+            .input_hint("30m, 2h or 1d · Enter/→ continue")
             .back_clears_input(false),
         );
     }
@@ -189,7 +189,7 @@ pub(crate) fn runtime_for(tpu: &str) -> Result<&'static str> {
         Some("v5e" | "v5litepod") => Ok("v2-alpha-tpuv5-lite"),
         Some("v5p") => Ok("v2-alpha-tpuv5"),
         Some("v6e") => Ok("v2-alpha-tpuv6e"),
-        _ => Err(Error::msg(format!("No automatic runtime is known for TPU type {tpu}. Choose an explicit image. Next: gpu up --tpu {} --runtime <image> --expire 2h", crate::pyfmt::shell_quote(tpu)))),
+        _ => Err(Error::msg(format!("Unknown runtime for {tpu}; supply --runtime. Next: gpu up --tpu {} --runtime <image> --expire 2h", crate::pyfmt::shell_quote(tpu)))),
     }
 }
 
@@ -275,6 +275,9 @@ pub fn choose(
                 choose_offer: false,
                 tpu_setup_error: None,
                 tpu_prices: None,
+                tpu_cached_prices: None,
+                tpu_types: Vec::new(),
+                tpu_catalog: None,
                 owner: owner.clone(),
             },
         );

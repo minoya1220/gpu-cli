@@ -137,83 +137,184 @@ A failed `up --expire` leaves the new instance running and prints its ID. `retry
 
 ## Google Cloud TPUs
 
-This adapter uses `gcloud compute tpus tpu-vm` (the Cloud TPU v2 API), not Compute Engine GPU VMs. It launches one TPU node, on-demand or Spot, with worker **0** used for SSH/editing. `v5e-1` is accepted as an alias for the API's `v5litepod-1`; `v6e-1` is passed through. Larger types may have multiple workers; distributed training orchestration is not included. Queued-resource provisioning, reservations, Google Cloud GPUs, AWS/Trainium and serverless `gpu run` are not implemented. Existing nodes owned by queued resources are listed, but `stop`, `down` and `expire` refuse to mutate them rather than leave an orphaned queued request.
-
-### Explicit one-time setup (owner/admin only)
-
-**No `gpu` command spawns `gcloud` before successful setup, except `gpu setup` itself after Google Cloud is explicitly selected.** TPU discovery shortcuts remain visible offline. The provider screen probes Vast.ai only and displays, for example, `Vast.ai  ✓ set up` and `Google Cloud  not set up`. A hand-written legacy `gcp` section is not setup consent.
-
-1. Install and authenticate a recent [Google Cloud CLI](https://cloud.google.com/sdk/docs/install): `gcloud auth login`. Choose an **existing dedicated, sacrificial project** with billing, TPU quota, a default VPC/subnet, and firewall access for SSH. `gcp-sandbox-355rm` is an example, never a built-in project. IAP-only/private-network SSH is not currently supported. TPU quota is independent of GPU quota; a budget that disables billing is only a backstop because reports can lag by hours.
-2. Run `gpu setup`, select **Google Cloud**, select your project, then choose from the **TPU zone list**. Type to filter, use ↑/↓ and Enter to select; zones are ordered approximately nearest-first using the system timezone and built-in Google region city coordinates. This is geographic distance, **not measured latency**; no network probe or third-party geolocation is used. Unknown regions sort last; unknown timezones preserve the existing/default ordering (`us-east5-b` or the saved zone first when available). The chosen zone is shown again in the confirmation plan. Runtime images are selected automatically at launch, not during setup. Review the exact project-scoped plan and type the project ID to confirm. No projects are ever created.
-3. Setup enables only missing **Compute, TPU, Cloud Tasks and Cloud Billing APIs** (Compute supplies the default identity and SSH infrastructure). It creates exactly **one explicit resource**, the named `gpu-expiry` queue, with unlimited retries and backoff at most 60 seconds. It reuses an equivalent existing queue unchanged and refuses conflicting/paused queues. It never creates service accounts, custom roles, IAM bindings, networks or firewalls, and never changes billing or quotas. Enabling APIs can cause **Google** to provision its default Compute identity, default network and managed service agents; setup does not administer those automatically provisioned resources.
-4. Both the VM and Cloud Tasks use the project's existing **default Compute service account**, `PROJECT_NUMBER-compute@developer.gserviceaccount.com`. Setup reads the identity and project IAM policy; it stops rather than granting anything if the account is unavailable or lacks a recognized unconditional project `roles/tpu.admin`, `roles/editor` or `roles/owner` grant. This conservative check does not assume conditional, inherited or custom grants are sufficient, and cannot rule out IAM deny policies. An administrator must review unsupported policies; setup never broadens permissions automatically. **All existing roles on this identity are also available inside the VM**, potentially including deletion of any TPU and access to other project resources. Only use trusted workloads/users in the sacrificial project. No local credentials or service-account keys are uploaded.
-5. Setup writes `gcp.project`, `zone`, the default service account, `expiry` and a completion/ownership journal to `~/.config/gpu/config.json` on **macOS and Linux**, or `$XDG_CONFIG_HOME/gpu/config.json` when nonempty. Other config is preserved. Project is always read from this config, never the ambient gcloud project. The provider then shows **Google Cloud  ✓ set up**. `--zone` overrides the saved zone; `--runtime` explicitly overrides the automatic image. Existing `gcp.runtime` values are ignored and removed when setup is rerun. Do not hand-edit the setup journal or copy a completion marker to a different project.
-
-For unattended use, all choices and explicit approval have flags:
-
 ```sh
-gpu setup --provider gcp --project gcp-sandbox-355rm --zone us-east5-b --location us-central1 --dry-run
-gpu setup --provider gcp --project gcp-sandbox-355rm --zone us-east5-b --location us-central1 --confirm-project gcp-sandbox-355rm
-```
-
-The zone screen checks **accelerator types in every candidate location**, filters out zones offering no TPU types, and shows their generations when the project's TPU API is already enabled. A location returned by Google's locations API alone is not proof it offers TPUs. If that API is disabled, it explicitly shows Google's [published TPU-capable zones](https://cloud.google.com/tpu/docs/regions-zones) instead: setup must not query a disabled API and trigger an enable prompt before consent. After confirmation and API enablement, it verifies that the selected zone actually offers TPU types before creating the queue. A zone list is not a stock/quota guarantee. For distance ordering, `TZ` supplies an explicit IANA name when set; otherwise the pinned `iana-time-zone` crate discovers it through one cross-platform API. Coordinates come from the IANA database's public-domain `zone1970.tab`, embedded in the binary (`src/data/zone1970.tab`), not platform-specific zoneinfo paths. Unmapped/unavailable names keep the fallback order. `--zone` skips the interactive list; the separate `--location` flag controls the expiry queue's region, not the TPU zone.
-
-`--dry-run` permits read-only project/API/queue discovery, never mutations or config writes. Without `--confirm-project`, non-interactive setup shows the plan and fails without changing anything. Failed steps stop plainly; rerun `gpu setup` to resume. The local journal is saved **before** each mutation so timeouts and interruptions remain undoable; earlier completed changes are not automatically rolled back. Keep the config until cleanup finishes, and do not run concurrent setup/cloud edits. Switching projects or queue regions requires removing the recorded setup first.
-
-The launcher still needs TPU lifecycle permissions, Cloud Tasks create/list/get/delete permissions and service-account `actAs`, plus SSH/OS Login permissions. Cloud Tasks' Google-managed service agent needs its existing `roles/cloudtasks.serviceAgent` grant to mint the default identity's OAuth token. Setup **does not repair IAM**; queue/task read-back does not prove future deletion authorization. Perform the disposable acceptance check below before relying on expiry. Keep the queue dedicated to `gpu`; HTTP target/auth overrides are rejected.
-
-### Undo Google Cloud setup
-
-Run `gpu setup`, select Google Cloud, then **Remove gpu setup**, or use:
-
-```sh
-gpu setup --provider gcp --remove --project gcp-sandbox-355rm --confirm-project gcp-sandbox-355rm
-```
-
-Removal first checks **every TPU zone** for gpu-owned nodes and the queue for **any pending tasks**. It refuses until you `gpu down` those TPUs; for an orphaned task after a failed launch, confirm the TPU is absent and use `gpu expire gcp:PROJECT:ZONE:NAME cancel`. Listing failures never mean it is safe to proceed. A disabled API is not proof that its resources are absent: restore it before removal if verification is unavailable. Then review and confirm the removal plan: delete the empty queue **only if setup created it**, disable **only APIs setup enabled**, and remove the local `gcp` section. Pre-existing APIs/queues and unrelated config remain untouched; dependent APIs are never force-disabled. An interrupted removal retains its journal and can be rerun. On completion, Google Cloud shows **not set up** and the no-gcloud gate applies again.
-
-`--remove --dry-run` previews removal without writing anything. Never delete the ownership journal to simulate undo: without it the CLI cannot safely identify its additions. Cloud API enablement can leave Google's automatically provisioned identities/network behind; undo does not delete identities/networks or edit IAM, projects, billing or quotas. Google may reserve a deleted queue name for **seven days**, so immediate re-setup of `gpu-expiry` can fail until that reservation expires. After removal starts, ordinary cloud commands are gated until setup is restored.
-
-### Rent, connect, and destroy a TPU
-
-```sh
-gpu up                                    # choose TPU (Google Cloud) on the GPU screen
-gpu up --provider gcp                      # jump straight to TPU choices; expiry is mandatory
+gpu setup                                # select Google Cloud, project, zone
 gpu up --tpu v6e-1 --no-repo --expire 2h --spot --dry-run
 gpu up --tpu v6e-1 --no-repo --expire 2h --spot --yes
-gpu ls                                    # labelled Vast and Google Cloud sections
-gpu ls --provider gcp                      # works without Vast installed/logged in
-gpu ls --provider vast --json              # legacy Vast JSON, unchanged
+gpu ls --provider gcp
 ```
 
-Non-interactive launches require `--tpu`, `--repo` or `--no-repo`, and `--expire`; zone must be supplied through config or flags. Runtime is automatic. `--on-demand` skips the capacity picker; on-demand is the non-interactive default. `--provider` is optional: TPU-specific flags imply Google Cloud, while `--provider gcp` jumps straight to its screens. Otherwise `gpu up` keeps the repository → mode → GPU flow, with the TPU category alongside GPU categories regardless of config. Selecting it continues to the TPU catalog/capacity screens and a mandatory expiry prompt if `--expire` was not supplied. The container/VM mode selected in the UI does not apply to a TPU VM. Common TPU search results are discovery shortcuts, not a live capacity catalog; select the category for Google's zone-specific type list. Vast table/JSON output is unchanged. Explicit Vast mode, GPU offer, reliability, price and disk-size flags are rejected for TPUs rather than ignored; `--provider vast` rejects TPU-specific flags.
+### Set up once
 
-The returned ID is `gcp:PROJECT:ZONE:NAME`. Copy it exactly (or omit the ID to pick). Project and zone embedded in the ID prevent later config changes from redirecting a destructive command:
+1. Install [gcloud](https://cloud.google.com/sdk/docs/install) and run `gcloud auth login`.
+   Use an **existing disposable project** with billing, TPU quota, a default
+   VPC/subnet and SSH firewall access. GPU quota does not cover TPUs.
+2. Run `gpu setup`, select Google Cloud, then review the project-scoped plan.
+   Type the project ID to approve. No TPU or project is created.
+3. Keep the undo journal in `~/.config/gpu/config.json` (macOS/Linux), or
+   `$XDG_CONFIG_HOME/gpu/config.json`. Other config stays intact.
+
+**No ordinary command invokes gcloud until setup succeeds.** The offline GPU
+screen still shows TPU choices; without setup, their price says `needs gpu setup`.
+A hand-written legacy `gcp` section is not consent. Project always comes from
+config, never gcloud's ambient project.
+
+Setup enables missing Compute, TPU, Cloud Tasks and Cloud Billing APIs. Its
+**only explicit resource is the `gpu-expiry` queue**: unlimited retries, backoff
+at most 60s, no HTTP target overrides. Compatible existing queues are reused
+unchanged; paused/conflicting queues are refused. It does not create identities,
+roles, IAM grants, networks or firewalls, or change billing/quotas. API enablement
+may cause Google to provision default identities, networks and service agents;
+undo leaves these Google-managed defaults alone.
+
+Both VM and expiry use the existing default Compute identity,
+`PROJECT_NUMBER-compute@developer.gserviceaccount.com`. **VM users inherit all
+its roles**, potentially including project-wide TPU deletion and other access.
+Use trusted workloads/users only. No local credentials or service-account keys
+are uploaded.
+
+```sh
+gpu setup --provider gcp --project PROJECT --zone us-east5-b --location us-central1 --dry-run
+gpu setup --provider gcp --project PROJECT --zone us-east5-b --location us-central1 --confirm-project PROJECT
+```
+
+`--location` is the queue region; `--zone` is the TPU default. Zone choices use
+bundled/cached facts immediately and refresh in the background when the API is
+enabled. Disabled APIs are not queried before approval. Setup verifies the
+selected zone live after enablement, before creating the queue. Lists do not
+guarantee stock or quota.
+
+Zones sort approximately nearest-first from the local IANA timezone and region
+city coordinates—not measured latency. There are no network probes/geolocation
+services. `TZ` overrides cross-platform timezone discovery; embedded public-domain
+`zone1970.tab` supplies timezone coordinates. Unknown regions sort last; unknown
+timezones keep default/saved ordering.
+
+<details>
+<summary>Permissions, partial setup and undo</summary>
+
+Setup reads the identity and project IAM policy. It requires a recognized
+unconditional project `roles/tpu.admin`, `roles/editor` or `roles/owner` grant.
+Conditional, inherited and custom grants need administrator review; deny policies
+can still block expiry. Setup never repairs IAM. The launcher also needs TPU
+lifecycle, Cloud Tasks create/list/get/delete, service-account `actAs`, and SSH/
+OS Login permissions. Google's Cloud Tasks service agent needs its existing
+`roles/cloudtasks.serviceAgent` grant for OAuth dispatch. Queue/task read-back
+does not prove future authorization.
+
+Dry runs only read; non-interactive setup requires `--confirm-project` to write.
+Intent is journaled **before** mutations. Failed steps retain earlier changes;
+rerun setup to resume. Keep the journal and avoid concurrent setup/cloud edits.
+Remove setup before switching project or queue region. Do not copy completion
+markers between projects.
+
+To undo, choose **Remove gpu setup**, or run:
+
+```sh
+gpu setup --provider gcp --remove --project PROJECT --confirm-project PROJECT
+```
+
+Removal checks one complete cross-location TPU inventory and all pending queue
+tasks. Owned TPUs or any pending task block removal: destroy the TPU, or verify
+absence and run `gpu expire ID cancel`. Read failures and disabled APIs never
+prove absence; restore access/API first. Removal deletes only an empty queue
+**it created**, disables only APIs **it enabled**, and removes local `gcp` config.
+Pre-existing APIs/queues, other config, projects, IAM, networks, billing and
+quotas stay untouched; dependent APIs are never force-disabled. Interrupted
+removal keeps its journal and blocks ordinary cloud commands until resumed.
+`--remove --dry-run` previews this. Deleting the journal is not undo.
+Google can reserve a deleted queue name for **seven days**, delaying re-setup.
+
+</details>
+
+### Rent, connect, destroy
+
+`gpu up` keeps the repository → mode → GPU flow, with TPU choices alongside
+Vast GPUs. `--provider gcp` skips to TPU choices; TPU flags imply that provider.
+The UI's container/VM choice is ignored for a TPU, but explicit Vast-only flags
+are rejected. `--provider vast` rejects TPU flags. Non-interactive TPU launches
+need `--tpu`, `--repo` or `--no-repo`, `--expire`, and a zone in config/flags.
+On-demand is the default; `--on-demand` skips the capacity picker.
+
+Real launches verify the exact type/zone **live before confirmation or arming**.
+Fully specified dry runs are offline; interactive pickers may read catalogs/prices.
+Stock/quota failures can still occur. Runtime is automatic:
+v2/v3/v4 `tpu-ubuntu2204-base`, v5e `v2-alpha-tpuv5-lite`, v5p `v2-alpha-tpuv5`,
+v6e `v2-alpha-tpuv6e`. `v5e-N` aliases `v5litepod-N`. Use `--runtime IMAGE` to
+override or support a new generation; old saved `gcp.runtime` is ignored.
+
+Copy the returned `gcp:PROJECT:ZONE:NAME` ID exactly; embedded scope protects
+against later config changes. Omit IDs to pick interactively.
 
 ```sh
 gpu ssh gcp:PROJECT:ZONE:NAME --exec
 gpu edit gcp:PROJECT:ZONE:NAME --editor code
-gpu stop gcp:PROJECT:ZONE:NAME               # on-demand, where supported; does not cancel expiry
-gpu down gcp:PROJECT:ZONE:NAME --yes         # delete TPU and boot disk
+gpu stop gcp:PROJECT:ZONE:NAME             # on-demand only; expiry stays armed
+gpu down gcp:PROJECT:ZONE:NAME --yes       # deletes node + boot disk
 ```
 
-`gpu ls` discovers TPU locations throughout the configured project, including launches with `--zone` overrides. A provider failure is reported as an incomplete listing (nonzero exit), never as an empty account. Combined JSON adds `provider` to each record; TPU records use the existing `id`, `gpu_name`, `actual_status` and `label` fields. Unknown price/uptime are not invented. Spot/preemptible TPUs cannot be stopped and restarted; destroy them instead. Separately attached disks, addresses and other independently created resources may still bill after TPU deletion.
+`gpu ls` uses one cross-location node list, including zone overrides. Queue
+inventory runs concurrently with the same in-memory OAuth token; orphan cleanup
+reuses that node snapshot, not a GET per task. Partial/failed reads exit nonzero,
+not “empty account.” Combined JSON adds `provider`; Vast-only JSON stays unchanged.
+Unknown price/uptime are not invented. Separate disks/addresses may still bill.
 
-At interactive launch, choose a zone again (or pass `--zone` to skip that screen). A selected TPU shortcut shows only zones offering that type; otherwise the type list comes from the chosen zone. Zones use the same nearest-first ordering as setup. **Before confirmation or task creation**, real launches check that the exact type is offered in the zone and report alternatives if not. Offline `--dry-run` does not check availability. Catalog support is not stock/quota: capacity can still run out.
+A known create rejection plus authenticated not-found removes its timer;
+ambiguous/time-out results keep it. `ls`, TPU `up`, `down` and `expire` reconcile
+only owned tasks whose exact node is absent from a complete authenticated
+inventory. Failed checks, existing nodes, unrelated tasks and tasks armed within
+60s are kept. After uncertain creation, inspect `gpu ls --provider gcp`.
 
-A known create rejection plus an authenticated node GET returning not-found removes the task and says so. Timeouts, authentication failures and ambiguous results keep it armed. `gpu ls` (combined or `--provider gcp`), TPU `up`, `down` and `expire` also reconcile **gpu-owned** tasks in the configured project's queue: delete only those whose exact target is verified absent by an authenticated GET. Existing nodes, failed checks and unrelated tasks are never cleaned up as orphans. Inspect `gpu ls --provider gcp` before retrying after an uncertain create.
+Worker **0** handles SSH/editing, including multi-worker types. Successful
+interactive launches offer the same editor picker as Vast. `gpu ssh` prints the
+command; `--exec` runs it. Editing needs READY and successful SSH, then maintains
+`~/.ssh/gpu_gcp_config`. IAP-only/private SSH is unsupported. Public repos clone
+into `/workspace/NAME`; no GitHub/cloud credentials transfer. VM users share a
+writable workspace. Install your own TPU framework; no CUDA/Nsight setup runs.
+Repo bootstrap failure does not disable expiry. Distributed orchestration,
+Google GPUs, reservations and queued-resource provisioning are unsupported;
+queued-resource-owned nodes cannot be stopped, destroyed or re-armed here.
 
-After a successful interactive TPU launch, the same **Open workspace** picker as Vast offers the last editor, **Select editor...**, or **Don't open**. A failed launch never tries to open an editor. Google owns SSH provisioning: `gpu ssh` prints the exact gcloud command; `--exec` runs it, using worker 0. `gpu edit` requires a READY node, probes with gcloud, and translates its resolved user/key/host into `~/.ssh/gpu_gcp_config`. It opens `/workspace` or the recorded repository directory with the same editor choices as Vast. Public repositories are cloned by a startup script; no GitHub or cloud credentials are transferred. The workspace is writable by VM users; use only trusted users on a workspace VM. No CUDA/Nsight installation or automatic TPU framework installation is performed; install the desired framework in the chosen base runtime. Repository bootstrap failure does not disable expiry.
+### Prices and cached facts
 
-### TPU price estimates
+Vast and TPU prices load **automatically in background Jobs**. Choices accept
+input immediately; `…` becomes a price or `price unavailable`. Ctrl-R retries
+failures; revisiting a screen reuses its Job/cache. There is no F2 step.
 
-F2 uses the read-only [Cloud Billing Catalog API](https://cloud.google.com/billing/v1/how-tos/catalog-api), authenticated with the existing gcloud login. **Rerun `gpu setup` on an older setup** to explicitly enable missing `cloudbilling.googleapis.com`; setup records ownership so undo never disables a pre-existing API. No API keys, IAM grants or billing-account changes are made. Pricing needs local `curl` 7.76+ (`--fail-with-body`). Tokens travel to curl on stdin, never command arguments, logs or caches; curl's user rc file, proxies and redirects are not used. Public Catalog data is cached for ten minutes in the XDG cache.
+`src/data/tpu_facts.json` bundles **no dollar amounts**: known types/generations,
+zone/type mappings, regions/coordinates, catalog service IDs and SKU metadata.
+Live caches extend types and override known zones. Project catalogs refresh
+in the background after setup (15-minute cache); SKU metadata lasts 30 days.
+A stale snapshot can never bypass live paid-launch preflight.
 
-Rows and launch confirmation quote the **whole TPU slice per hour**, not just one chip: Catalog chip/core/VM-hours are normalized using the selected type's chip count and documented host shapes. Prices distinguish on-demand and Spot, match the configured/selected zone's region, and exclude disks, network, taxes and account-specific discounts. No hard-coded rates or inferred Spot discount are used. Missing, ambiguous, tiered, unsupported-unit or inaccessible prices show **price unavailable**; a failed quote does not prevent an explicitly confirmed launch. Dry runs remain offline and do not fetch prices.
+Dollar values come from Google's authenticated [public SKU price API](https://cloud.google.com/billing/docs/reference/pricing-api/rest/v1beta/skus.price/get),
+using known [Catalog SKU IDs](https://cloud.google.com/billing/v1/how-tos/catalog-api).
+Latest prices are fetched in parallel, cached **per project/SKU for 10 minutes**,
+and reused across regions sharing a SKU. Cached estimates show their age.
+Quotes cover the whole slice, distinguish on-demand/Spot and match its region.
+Cloud TPU VM-hours and Compute Engine TPU chip-hours are normalized separately.
+All are USD list rates: storage, network, taxes and account discounts excluded.
+Missing, ambiguous, tiered, inaccessible or unsupported-unit rates are unavailable,
+never guessed; an explicitly confirmed paid launch may proceed without a quote.
 
-Runtime defaults follow Google's [common JAX/PyTorch images](https://cloud.google.com/tpu/docs/runtimes#pytorch_and_jax): v2/v3/v4 use `tpu-ubuntu2204-base`, v5e (`v5litepod`) uses `v2-alpha-tpuv5-lite`, v5p uses `v2-alpha-tpuv5`, and v6e uses `v2-alpha-tpuv6e`. There is no runtime question or saved runtime default to mismatch a later TPU choice. Use `gpu up --tpu v5e-1 --no-repo --expire 2h --runtime <image>` for a framework-specific image or an unknown/new generation; unknown generations fail before any paid create unless overridden.
+Needs local curl **7.66+** (`--parallel`). OAuth tokens stay in memory and go to
+curl on stdin—not argv, logs or caches. User curl config, proxies and redirects
+are disabled. Rerun old setup to explicitly enable Cloud Billing; ordinary
+commands never enable it or grant access silently.
 
-### TPU expiry: control-plane deletion, not a guest timer
+To regenerate facts (read-only; requires completed setup and Python 3):
+
+```sh
+python3 tools/update_tpu_facts.py --project PROJECT
+```
+
+The script queries TPU/Billing metadata, strips prices/account details, and uses
+`tools/gcp_region_locations.csv` for reviewed region coordinates. Offline input
+is supported with `--input FILE`. It uses v1 location discovery (matching gcloud;
+v2 omits the v4-only zone), then v2 accelerator types. Review the diff before
+committing. A refresh failure leaves the existing snapshot usable.
+
+### Expiry: works with laptop and VM offline
 
 ```sh
 gpu expire gcp:PROJECT:ZONE:NAME 1h30m
@@ -222,23 +323,58 @@ gpu expire gcp:PROJECT:ZONE:NAME show
 gpu expire gcp:PROJECT:ZONE:NAME cancel
 ```
 
-Scheduling authorizes destruction of the TPU and its boot disk. The same local-time/DST syntax as Vast applies. TPU launch **requires expiry**; `cancel` explicitly removes that protection. Deadlines must be 1 minute–29 days ahead. Flag durations start at CLI invocation; a duration entered interactively starts when submitted. Selection and provisioning consume that time, never extend it. The duration screen accepts values such as `30m`, `2h` and `1d`, validates them on screen, and Back returns to the capacity choice instead of quitting. Cloud Tasks stores the deadline rounded **down** to a whole second.
+Launch **requires** expiry, 1 minute–29 days ahead; scheduling authorizes node
+and boot-disk deletion. Local-time/DST rules match Vast. Flag durations start at
+invocation; typed durations start on submission. Selection/boot consume that
+time, never extend it; Cloud Tasks rounds down to a second. Cancel removes
+protection but cannot stop deletion already in flight.
 
-Cloud TPU v2's node `schedulingConfig` has no native max-run-duration or termination timestamp. Queued-resource `valid-until` controls provisioning validity, not a general running-node destruction deadline. Instead, `gpu` checks the dedicated Cloud Tasks queue, creates an authenticated HTTP **DELETE** task targeting the exact TPU node, and reads it back **before** sending the paid create request. Its OAuth token is minted by Google for the project's default Compute service account at dispatch. Neither the laptop nor the TPU VM supplies credentials or needs to stay online. Expiry survives laptop sleep, VM shutdown, Spot preemption, guest crashes and missing SSH. The same identity is attached to the VM, but expiry never uses guest credentials or transfers the owner's local credentials.
+Before paid creation, gpu creates and verifies a Cloud Tasks OAuth **DELETE**
+task for the exact node. Google mints its dispatch token; neither laptop nor
+guest credentials are needed. Stops, Spot preemption, missing SSH and guest
+crashes do not disarm it. Cloud TPU nodes have no native running-time deadline;
+queued-resource `valid-until` only limits provisioning.
 
-Safety limits:
+<details>
+<summary>Expiry safety limits—verify deletion independently</summary>
 
-- **Not an exact-time or billing SLA.** Cloud Tasks dispatch may be delayed; IAM/API/billing failures, queue pauses, rate limiting and regional outages can prevent deletion. Queue readiness and task read-back do not prove future authorization. A successful HTTP response acknowledges a long-running TPU delete operation, not its completion: a later operation failure is not retried by the task. Independently verify disappearance and billing.
-- The queue must have unlimited retries (`maxAttempts=-1`, no retry-duration limit), max backoff at most 60 seconds, no HTTP target overrides, and state RUNNING. Failed HTTP calls retry, but Google may increase backoff. Tasks have a **31-day retention limit from creation**, even with unlimited retries; the 29-day deadline cap leaves retry headroom. The raw TPU DELETE endpoint returns **404** for a missing node, and Cloud Tasks requires **2xx** to finish a task; the queue cannot reinterpret 404 as success. A node removed outside `gpu` can therefore leave a retrying task until the next reconciling `gpu` command or the 31-day retention limit. Those control-plane retries normally have negligible request cost, but are not a live TPU. This deliberately keeps the footprint at one queue rather than adding a hosted handler.
-- Do **not reuse a TPU name** until all its deletion tasks are gone: the API DELETE targets a resource name, not an immutable instance generation. CLI launches use new randomized names. A pre-armed task remains after laptop disconnection or an unverified create failure; this is deliberate, not proof that a TPU exists.
-- `show` reports pending tasks and queue state, not a guest heartbeat or proof of IAM health. No pending task can mean it already dispatched; inspect `gpu ls --provider gcp`. Once a delete is in flight, cancel cannot undo it.
-- Replacing a deadline creates/verifies the replacement **before** deleting old tasks. Interruption, concurrent changes or cleanup failure can leave multiple tasks; the earliest wins. Inspect `show` after any error. Do not run concurrent expiry changes on the same TPU.
-- The launch records its queue in TPU metadata. Keep expiry config until cleanup finishes, especially after failed launches or external deletion, when no node metadata remains. Manually created nodes without that metadata use the current configured queue.
-- `gpu down` cancels tasks only **after verifying node disappearance**. Automatic deletion cannot remove your laptop's SSH alias or independently created disks. Cloud Tasks usage itself may incur small charges. The $50 project budget, if configured, is not a substitute for a tested timer.
+- **Not an exact-time or billing SLA.** Pauses, IAM/API/billing failures, rate
+  limits and regional outages can delay/prevent deletion. HTTP success only
+  acknowledges a long-running delete operation; later operation failure is not
+  retried. Independently check disappearance and billing. A project budget is
+  only a backstop; reporting may lag hours.
+- Unlimited retries still have **31-day retention from task creation**; the
+  29-day deadline cap leaves headroom. Google may increase backoff. Missing-node
+  DELETE returns 404, but Cloud Tasks needs 2xx: external deletion may leave a
+  retrying task until reconciliation/retention expiry. These retries usually
+  cost little and are not a live TPU. No hosted handler is added.
+- **Never reuse a node name while its tasks remain.** DELETE addresses a name,
+  not an immutable generation. Launches use randomized names. A pre-armed task
+  after disconnection/unverified create is deliberate, not proof a node exists.
+- `show` reports pending tasks/queue state, not guest or IAM health. No pending
+  task may mean it dispatched. Replacements arm/verify first, then remove old
+  tasks; cleanup failure or concurrent expiry edits can leave several—earliest
+  wins. Inspect `show` after errors; avoid concurrent expiry edits.
+- Keep expiry config until cleanup, especially after failed creation/external
+  deletion. Node metadata records its queue; manual nodes fall back to config.
+  `gpu down` cancels tasks only after verified disappearance. Remote deletion
+  cannot remove laptop SSH aliases or independent disks. Cloud Tasks can bill
+  small usage charges.
 
-Sources: [TPU node scheduling fields](https://cloud.google.com/tpu/docs/reference/rest/v2/projects.locations.nodes#SchedulingConfig), [TPU VM create](https://cloud.google.com/sdk/gcloud/reference/compute/tpus/tpu-vm/create), [Cloud Tasks HTTP/OAuth task creation](https://cloud.google.com/sdk/gcloud/reference/tasks/create-http-task), [retry semantics](https://cloud.google.com/tasks/docs/configuring-queues), [task limits](https://cloud.google.com/tasks/docs/quotas), [TPU delete operation](https://cloud.google.com/tpu/docs/reference/rest/v2/projects.locations.nodes/delete).
+Sources: [node scheduling](https://cloud.google.com/tpu/docs/reference/rest/v2/projects.locations.nodes#SchedulingConfig),
+[OAuth tasks](https://cloud.google.com/sdk/gcloud/reference/tasks/create-http-task),
+[retries](https://cloud.google.com/tasks/docs/configuring-queues),
+[limits](https://cloud.google.com/tasks/docs/quotas),
+[delete operations](https://cloud.google.com/tpu/docs/reference/rest/v2/projects.locations.nodes/delete).
 
-**Owner-only paid acceptance check, not automated tests:** after setup, launch a disposable small TPU with `--expire 5m`, verify `show`, disconnect the laptop, and independently confirm deletion after the deadline. Repeat with on-demand stop and (where available) Spot. Check each supported runtime's SSH/editor/repository bootstrap. Test replacing a deadline, cancelling twice, manually destroying, and confirming task cleanup. Inspect Cloud Tasks attempt status and the TPU delete operation on failure; never expose tokens. These live checks have not been performed by the test suite.
+**Owner-only paid acceptance test (not run by automated tests):** launch a
+small disposable TPU with `--expire 5m`, verify `show`, disconnect, and independently
+confirm deletion. Repeat stopped/on-demand and Spot cases, each runtime's
+SSH/editor/bootstrap, deadline replacement, double cancellation, manual deletion
+and task cleanup. Inspect dispatch/delete-operation status on failures; never
+expose tokens.
+
+</details>
 
 ## Configuration
 
@@ -284,7 +420,7 @@ Tests use `Runner` mocks and PATH stubs, never real Vast or Google Cloud account
 
 `src/expiry.rs` sends `remote/expiry_remote.sh` over SSH stdin. The Linux host needs bash, curl, flock, setsid, writable `~/.local/state/gpu-expire`, and outbound HTTPS. No init manager or package installation is needed. The detached worker's readiness handshake and `/proc` identity are verified before success. State stores the deadline and worker identity, never the key. A shared lock serializes replacement, cancellation, and destruction.
 
-Local network calls use authenticated `gh`, `vastai`, and (for TPUs) `gcloud`, plus curl to Google's Billing Catalog using a captured gcloud OAuth token. TPU expiry runs in Cloud Tasks using the project's default Compute identity, not in a guest worker. The Vast remote expiry worker is the exception: it uses only Vast-injected `CONTAINER_ID` and `CONTAINER_API_KEY`, from its environment, `/etc/environment`, or PID 1. ID mismatch or a missing scoped key fails closed. No account key, local Vast config, or create-response key is uploaded. The key reaches curl on stdin, not argv; requests use no proxy or redirects. Never print raw Vast output or remote diagnostics that could contain credentials. Neovim release archives use pinned SHA-256 digests in `src/editors.rs`.
+Local network calls use authenticated `gh`, `vastai`, and (for TPUs) `gcloud`, plus authenticated, read-only curl calls to Google's TPU, Cloud Tasks and public pricing APIs. TPU expiry runs in Cloud Tasks using the project's default Compute identity, not in a guest worker. The Vast remote expiry worker is the exception: it uses only Vast-injected `CONTAINER_ID` and `CONTAINER_API_KEY`, from its environment, `/etc/environment`, or PID 1. ID mismatch or a missing scoped key fails closed. No account key, local Vast config, or create-response key is uploaded. The key reaches curl on stdin, not argv; requests use no proxy or redirects. Never print raw Vast output or remote diagnostics that could contain credentials. Neovim release archives use pinned SHA-256 digests in `src/editors.rs`.
 
 Vast references: [instance-scoped keys](https://docs.vast.ai/api-reference/hello-world), [container environment](https://docs.vast.ai/guides/instances/docker-environment), [destroy endpoint](https://docs.vast.ai/api-reference/instances/destroy-instance), [VM environment](https://docs.vast.ai/linux-virtual-machines).
 

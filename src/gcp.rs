@@ -213,7 +213,9 @@ pub fn absent(ctx: &Ctx, id: &TpuId) -> Result<bool> {
             {
                 return Ok(true);
             }
-            Err(Error::msg("Could not authenticate/verify TPU absence; deletion tasks were kept. Next: gpu ls --provider gcp"))
+            Err(Error::msg(
+                "TPU absence unverified; expiry tasks kept. Next: gpu ls --provider gcp",
+            ))
         }
         _ => Err(Error::msg(
             "Could not verify TPU absence; deletion tasks were kept. Next: gpu ls --provider gcp",
@@ -272,37 +274,106 @@ pub fn nodes(ctx: &Ctx, project: &str, zone: &str) -> Result<Vec<Dict>> {
     }
     Ok(found)
 }
+pub(crate) fn node_id(node: &Dict, project: &str) -> Result<TpuId> {
+    let parts: Vec<_> = text(node, "name")
+        .ok_or_else(bad_reply)?
+        .split('/')
+        .collect();
+    if parts.len() != 6
+        || parts[0] != "projects"
+        || parts[1] != project
+        || parts[2] != "locations"
+        || parts[4] != "nodes"
+        || ![parts[1], parts[3], parts[5]].iter().all(|s| component(s))
+    {
+        return Err(bad_reply());
+    }
+    Ok(TpuId {
+        project: project.into(),
+        zone: parts[3].into(),
+        name: parts[5].into(),
+    })
+}
+/// One authenticated cross-location list, never one process per TPU zone.
+pub fn all_nodes(ctx: &Ctx, project: &str) -> Result<Vec<Dict>> {
+    ctx.require_gcloud()?;
+    if !component(project) {
+        return Err(bad_reply());
+    }
+    let mut nodes = Vec::new();
+    let mut next = String::new();
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..30 {
+        let data=crate::gcp_http::get(ctx,project,&format!("https://tpu.googleapis.com/v2/projects/{project}/locations/-/nodes?pageSize=1000&pageToken={}",crate::gcp_http::encode(&next)))?;
+        if let Some(unreachable) = data.get("unreachable") {
+            if !unreachable.as_list().is_some_and(|xs| xs.is_empty()) {
+                return Err(Error::msg("Some TPU zones are unreachable; expiry tasks kept. Next: gpu ls --provider gcp"));
+            }
+        }
+        nodes.extend(objects(
+            data.get("nodes")
+                .cloned()
+                .unwrap_or(Value::List(Vec::new())),
+        )?);
+        if data
+            .iter()
+            .any(|(k, _)| !["nodes", "unreachable", "nextPageToken"].contains(&k.as_str()))
+        {
+            return Err(bad_reply());
+        }
+        next = match data.get("nextPageToken") {
+            None => String::new(),
+            Some(Value::Str(s)) => s.clone(),
+            _ => return Err(bad_reply()),
+        };
+        if next.is_empty() {
+            for node in &nodes {
+                node_id(node, project)?;
+            }
+            return Ok(nodes);
+        }
+        if !seen.insert(next.clone()) {
+            return Err(bad_reply());
+        }
+    }
+    Err(bad_reply())
+}
 pub fn list(ctx: &Ctx, settings: &Settings) -> Result<Vec<Dict>> {
-    let mut items = Vec::new();
-    // Discover every TPU zone, rather than silently omitting --zone overrides.
-    for zone in locations(ctx, &settings.project)? {
-        for node in nodes(ctx, &settings.project, &zone)? {
-            let name = text(&node, "name")
-                .and_then(|s| s.rsplit('/').next())
-                .filter(|s| component(s))
-                .ok_or_else(bad_reply)?;
-            let id = TpuId {
-                project: settings.project.clone(),
-                zone: zone.clone(),
-                name: name.into(),
-            };
+    let queue = crate::gcp_expiry::Queue::load(settings)?;
+    // Independent reads share one OAuth token and run concurrently. An
+    // incomplete node snapshot cannot authorize orphan deletion.
+    let (nodes, tasks) = std::thread::scope(|scope| {
+        let pending = scope.spawn(|| queue.pending(ctx));
+        (
+            all_nodes(ctx, &settings.project),
+            pending.join().unwrap_or_else(|_| Err(bad_reply())),
+        )
+    });
+    let nodes = nodes?;
+    queue.reconcile_inventory(ctx, &nodes, tasks?)?;
+    nodes
+        .iter()
+        .filter(|n| {
+            !text(n, "apiVersion")
+                .is_some_and(|v| v.starts_with("V1") || v == "API_VERSION_UNSPECIFIED")
+        })
+        .map(|node| {
+            let id = node_id(node, &settings.project)?;
             let mut item = Dict::new();
             item.insert("id", Value::str(id.cli()));
             item.insert("provider", Value::str("gcp"));
             item.insert(
                 "gpu_name",
-                Value::str(text(&node, "acceleratorType").unwrap_or("TPU")),
+                Value::str(text(node, "acceleratorType").unwrap_or("TPU")),
             );
             item.insert(
                 "actual_status",
-                Value::str(text(&node, "state").unwrap_or("UNKNOWN")),
+                Value::str(text(node, "state").unwrap_or("UNKNOWN")),
             );
             item.insert("label", Value::str("no-repo"));
-            items.push(item);
-        }
-    }
-    crate::gcp_expiry::Queue::load(settings)?.reconcile(ctx)?;
-    Ok(items)
+            Ok(item)
+        })
+        .collect()
 }
 
 /// Validate launch configuration locally, before leaving the hardware picker.
@@ -316,7 +387,7 @@ pub fn launch_setup(ctx: &Ctx, cfg: &Dict) -> Result<(Settings, crate::gcp_expir
     };
     load().map_err(|error: Error| {
         Error::msg(format!(
-            "{}\nConfig file: {}",
+            "{}\nConfig: {}",
             error.text(),
             crate::config::config_path(&ctx.env).display()
         ))
@@ -429,17 +500,20 @@ pub fn launch(ctx: &Ctx, flags: &UpFlags, cfg: &Dict, deadline: Option<Timestamp
         ))?;
         return Ok(());
     }
-    let price = match crate::gcp_prices::load(ctx, cfg, &picks.zone) {
-        Ok(prices) => prices.quote(&picks.tpu, picks.spot),
-        Err(e) => e.text().to_string(),
-    };
-    ctx.println(&format!(
-        "Launch Google Cloud {} in {} ({})? {price}. Excludes storage/network/taxes; discounts not included. Destroy at {deadline}.",
-        picks.tpu,
-        picks.zone,
-        if picks.spot { "Spot" } else { "on-demand" }
-    ))?;
-    if !flags.yes && !crate::prompt::confirm(ctx, "Type 'yes' to create this paid TPU: ")? {
+    let price =
+        match crate::gcp_prices::load_for(ctx, cfg, &picks.zone, Some((&picks.tpu, picks.spot))) {
+            Ok(prices) => prices.quote(&picks.tpu, picks.spot),
+            Err(e) => format!(
+                "price unavailable ({})",
+                e.text().split(". Next:").next().unwrap_or("read failed")
+            ),
+        };
+    let local = deadline
+        .to_zoned(crate::expiry::local_zone(&ctx.env))
+        .strftime("%b %d %H:%M %Z")
+        .to_string();
+    ctx.println(&format!("Launch {} {} in {}, {price}, delete at {local}.\nPaid; USD list. Storage/network/tax extra; discounts excluded.",picks.tpu,if picks.spot {"Spot"} else {"on-demand"},picks.zone))?;
+    if !flags.yes && !crate::prompt::confirm(ctx, "Type yes: ")? {
         return ctx.println("Cancelled.");
     }
     if deadline.as_second() <= ctx.clock.now().as_second() {
@@ -466,9 +540,16 @@ pub fn launch(ctx: &Ctx, flags: &UpFlags, cfg: &Dict, deadline: Option<Timestamp
         .iter()
         .any(|s| e.text().starts_with(s));
         if rejected && absent(ctx, &id).unwrap_or(false) && queue.cancel(ctx, &id).is_ok() {
-            return Err(Error::msg(format!("Could not create {}: {}. Verified that no node exists; its deletion task was removed. Next: gpu up --tpu {} --zone {} --spot --no-repo --expire 2h", id.cli(), e.text().split(". Next:").next().unwrap_or("request rejected"), picks.tpu, picks.zone)));
+            return Err(Error::msg(format!("Create {} rejected: {}. No node exists; deletion task removed. Next: gpu up --tpu {} --zone {} --spot --no-repo --expire 2h", id.cli(), e.text().split(". Next:").next().unwrap_or("request rejected"), picks.tpu, picks.zone)));
         }
-        return Err(Error::msg(format!("{}\nCreation of {} is unverified; its deletion task remains armed. Next: gpu ls --provider gcp", e.text().split(". Next:").next().unwrap_or("TPU create failed"), id.cli())));
+        return Err(Error::msg(format!(
+            "{}\nCreate {} unverified; deletion task remains armed. Next: gpu ls --provider gcp",
+            e.text()
+                .split(". Next:")
+                .next()
+                .unwrap_or("TPU create failed"),
+            id.cli()
+        )));
     }
     ctx.println(&format!(
         "Created TPU {}; deletion requested at {deadline}.\nNext: gpu ssh {} --exec",
@@ -549,7 +630,7 @@ pub fn lifecycle(ctx: &Ctx, id: &TpuId, cfg: &Dict, destroy: bool, yes: bool) ->
         return Err(Error::msg("TPU was not found. Next: gpu ls --provider gcp"));
     };
     if node.get("queuedResource").is_some_and(crate::pyfmt::truthy) {
-        return Err(Error::msg(format!("This TPU belongs to a queued resource; manage its owning request to avoid leaking it. Next: gcloud compute tpus queued-resources list --project={} --zone={}", id.project, id.zone)));
+        return Err(Error::msg(format!("Queued-resource TPU: manage its owning request, not just the node. Next: gcloud compute tpus queued-resources list --project={} --zone={}", id.project, id.zone)));
     }
     if !destroy {
         let schedule = node.get("schedulingConfig").and_then(Value::as_dict);
@@ -611,6 +692,10 @@ pub fn lifecycle(ctx: &Ctx, id: &TpuId, cfg: &Dict, destroy: bool, yes: bool) ->
             id.cli()
         ))
     } else {
-        ctx.println(&format!("Stopped TPU {}; any existing expiry is unchanged; storage charges may continue.\nNext: gpu down {}", id.cli(), id.cli()))
+        ctx.println(&format!(
+            "Stopped {}; expiry unchanged; storage may still bill.\nNext: gpu down {}",
+            id.cli(),
+            id.cli()
+        ))
     }
 }

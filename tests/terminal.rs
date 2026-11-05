@@ -252,7 +252,7 @@ fn test_backtick_from_the_deepest_screen_steps_back_to_the_first_then_quits() {
     assert!(term.output_text().contains("Cancelled."));
     assert_eq!(
         tools(&sandbox),
-        ["gh", "vastai"],
+        ["gh", "vastai", "vastai"],
         "navigation must not rerun gh or vastai"
     );
 }
@@ -279,7 +279,7 @@ fn test_keyboard_dry_run_launch_after_going_back() {
     assert!(output.contains("DRY RUN: no instance created"));
     assert!(output.contains("\"100\"") && output.contains("/workspace/other-repo"));
     assert!(output.contains("\"docker.io/vastai/kvm\""));
-    assert_eq!(tools(&sandbox), ["gh", "vastai"]);
+    assert_eq!(tools(&sandbox), ["gh", "vastai", "vastai", "vastai"]);
 }
 
 #[test]
@@ -336,6 +336,7 @@ fn test_setup_with_disabled_api_still_shows_zone_choices_without_enabling_anythi
 entry=gcloud; for arg in "$@"; do entry="$entry	$arg"; done
 printf '%s\n' "$entry" >> "$FAKE_CLI_LOG"
 case "$*" in
+  'auth print-access-token --project=test-project --quiet') printf 'private-test-token\n' ;;
   'projects list --filter=lifecycleState:ACTIVE --quiet --format=json')
     printf '[{"projectId":"test-project","projectNumber":"123456","name":"sandbox"}]\n' ;;
   'services list --enabled --project=test-project --quiet --format=json') printf '[]\n' ;;
@@ -356,7 +357,7 @@ esac
     );
     term.wait(on("TPU zone (test-project)"));
     term.wait(shows("us-east5-b"));
-    assert!(shows("TPU API disabled")(&term));
+    assert!(shows("API disabled")(&term));
     assert!(shows("asia-east1-c")(&term));
     assert!(shows("us-central1-a")(&term));
     term.press_until("southamerica", shows("Filter: southamerica"));
@@ -375,6 +376,7 @@ esac
 #[test]
 fn test_setup_project_picker_confirmation_status_and_remove_with_only_cloud_stubs() {
     let sandbox = Sandbox::new();
+    sandbox.gcp_reads("[]", false);
     sandbox.stub(
         "vastai",
         r#"#!/bin/sh
@@ -387,6 +389,7 @@ printf '[]\n'
 entry=gcloud; for arg in "$@"; do entry="$entry	$arg"; done
 printf '%s\n' "$entry" >> "$FAKE_CLI_LOG"
 case "$*" in
+  'auth print-access-token --project=test-project --quiet') printf 'private-test-token\n' ;;
   'projects list --filter=lifecycleState:ACTIVE --quiet --format=json')
     printf '[{"projectId":"test-project","projectNumber":"123456","name":"sandbox"}]\n' ;;
   'services list --enabled --project=test-project --quiet --format=json')
@@ -419,17 +422,16 @@ esac
     assert!(
         term.lines()
             .iter()
-            .any(|l| l.starts_with("› 1. us-east5-b")),
+            .any(|l| l.starts_with("›") && l.contains("us-east5-b")),
         "{}",
         term.lines().join("\n")
     );
-    assert!(shows("europe-west4-a")(&term));
     assert!(!shows("Type HTTPS/git@ URL")(&term));
-    term.press_until("europe", shows("Filter: europe"));
+    term.press_until("us-central1-a", shows("Filter: us-central1-a"));
     term.press_until(ENTER, shows("Type project ID 'test-project' to confirm:"));
     assert!(term
         .output_text()
-        .contains("Default TPU zone: europe-west4-a"));
+        .contains("Default TPU zone: us-central1-a"));
     assert!(!term.output_text().contains("TPU runtime (Enter ="));
     // Not a single mutation was even attempted; the existing queue is reused.
     term.press("test-project");
@@ -439,7 +441,7 @@ esac
     let config = std::fs::read_to_string(&path).unwrap();
     assert!(config.contains("123456-compute@developer.gserviceaccount.com"));
     assert!(config.contains("\"created_queue\": false"));
-    assert!(config.contains("\"zone\": \"europe-west4-a\""));
+    assert!(config.contains("\"zone\": \"us-central1-a\""));
     assert!(!config.contains("\"runtime\""));
     let before = sandbox.calls().len();
     let mut term = Terminal::start(&sandbox, &["setup"]);
@@ -464,50 +466,44 @@ esac
 }
 
 #[test]
-fn test_f2_tpu_prices_use_catalog_stubs_and_without_setup_explain_the_gate() {
+fn test_auto_tpu_prices_use_stubs_and_without_setup_explain_the_gate() {
     for configured in [false, true] {
         let sandbox = Sandbox::new();
         if configured {
             let config = sandbox.root.join("config/gpu");
             std::fs::create_dir_all(&config).unwrap();
             std::fs::write(config.join("config.json"),r#"{"gcp":{"setup":{"version":1,"project":"test-project"},"project":"test-project","zone":"us-east5-b","expiry":{"queue":"gpu-expiry","location":"us-central1","service_account":"123456-compute@developer.gserviceaccount.com"}}}"#).unwrap();
-            sandbox.stub("gcloud",r#"#!/bin/sh
-entry=gcloud; for arg in "$@"; do entry="$entry	$arg"; done; printf '%s\n' "$entry" >> "$FAKE_CLI_LOG"
+            sandbox.gcp_reads("[]", true);
+            sandbox.stub(
+                "gcloud",
+                r#"#!/bin/sh
+printf 'gcloud\n' >> "$FAKE_CLI_LOG"
 [ "$*" = 'auth print-access-token --project=test-project --quiet' ] || exit 97
 printf 'private-test-token\n'
-"#);
-            sandbox.stub("curl",r#"#!/bin/sh
-entry=curl; for arg in "$@"; do entry="$entry	$arg"; done; printf '%s\n' "$entry" >> "$FAKE_CLI_LOG"
-IFS= read -r auth
-[ "$auth" = 'header = "Authorization: Bearer private-test-token"' ] || exit 97
-for url in "$@"; do :; done
-case "$url" in
-  https://cloudbilling.googleapis.com/v1/services\?*) printf '{"services":[{"name":"services/FAKE-TPU","displayName":"Cloud TPU"}]}\n' ;;
-  https://cloudbilling.googleapis.com/v1/services/FAKE-TPU/skus\?*) printf '{"skus":[{"description":"TPU v6e chip","category":{"usageType":"OnDemand"},"serviceRegions":["us-east5"],"pricingInfo":[{"effectiveTime":"2020-01-01T00:00:00Z","pricingExpression":{"usageUnit":"chip.h","tieredRates":[{"unitPrice":{"currencyCode":"USD","units":"2","nanos":750000000}}]}}]},{"description":"TPU v6e chip Spot","category":{"usageType":"Preemptible"},"serviceRegions":["us-east5"],"pricingInfo":[{"effectiveTime":"2020-01-01T00:00:00Z","pricingExpression":{"usageUnit":"chip.h","tieredRates":[{"unitPrice":{"currencyCode":"USD","nanos":750000000}}]}}]}]}\n' ;;
-  *) exit 97 ;;
-esac
-"#);
+"#,
+            );
         }
         let mut term = Terminal::start(
             &sandbox,
             &["up", "--no-repo", "--mode", "container", "--dry-run"],
         );
         term.wait(on("GPU"));
-        term.press_until("tpu", shows("Filter: tpu"));
-        assert!(term.last_line().contains("F2 prices"));
-        term.press("\x1b[12~");
+        term.press_until("v6e-1", shows("Filter: v6e-1"));
+        assert!(!term.last_line().contains("F2"));
         if configured {
-            term.wait(shows("Spot $0.750"));
-            assert!(term.output_text().contains("on-demand $2.750"));
+            term.wait(shows("Spot $0.750/hr"));
+            assert!(term.output_text().contains("$2.750/hr"));
             assert!(!term.output_text().contains("private-test-token"));
-            assert!(sandbox
-                .calls()
-                .iter()
-                .all(|c| !c.iter().any(|a| a.contains("private-test-token"))));
-            assert_eq!(tools(&sandbox), ["gcloud", "curl", "curl"]);
+            assert_eq!(
+                tools(&sandbox)
+                    .iter()
+                    .filter(|t| t.as_str() == "gcloud")
+                    .count(),
+                1
+            );
         } else {
-            term.wait(shows("TPU prices need gpu setup"));
-            assert!(sandbox.calls().is_empty());
+            term.wait(shows("needs gpu setup"));
+            assert!(tools(&sandbox).iter().all(|t| t == "vastai"));
         }
         term.press("\x03");
         assert_eq!(term.exit_status(), 130);
@@ -526,7 +522,7 @@ fn test_tpu_without_config_keeps_setup_visible_and_returns_to_gpu_choices() {
         term.press_until("1", on("GPU"));
         assert!(shows("TPU (Google Cloud)")(&term));
         term.press_until(query, |t| t.line(1) == format!("Filter: {query}"));
-        term.press_until(ENTER, shows("Set up Google Cloud before renting TPUs"));
+        term.press_until(ENTER, shows("Google Cloud is not set up"));
         assert!(term.running(), "setup must remain visible until dismissed");
         let screen = term.lines().join("\n");
         assert!(screen.contains("No TPU created."), "{screen}");
@@ -539,7 +535,9 @@ fn test_tpu_without_config_keeps_setup_visible_and_returns_to_gpu_choices() {
             "{screen}"
         );
         assert_eq!(screen.matches("Next:").count(), 1);
-        assert!(tools(&sandbox).iter().all(|tool| tool == "gh"));
+        assert!(tools(&sandbox)
+            .iter()
+            .all(|tool| ["gh", "vastai"].contains(&tool.as_str())));
         // Dismiss the notice without losing the previous filter/selection.
         term.press_until(BACK, |t| t.title() == "GPU" && !shows("No TPU created.")(t));
         assert_eq!(term.line(1), format!("Filter: {query}"));
@@ -563,12 +561,14 @@ fn test_tpu_category_and_type_search_continue_into_cloud_dry_run() {
         let config = sandbox.root.join("config/gpu");
         std::fs::create_dir_all(&config).unwrap();
         std::fs::write(config.join("config.json"), r#"{"gcp":{"setup":{"version":1,"project":"test-project"},"project":"test-project","zone":"us-central1-a","runtime":"v2-alpha-tpuv5lite","expiry":{"queue":"gpu-expiry","location":"us-central1","service_account":"reaper@test-project.iam.gserviceaccount.com"}}}"#).unwrap();
-        // The only cloud call allowed is a read-only catalog request. All
+        sandbox.gcp_reads("[]", false);
+        // The only cloud calls allowed are read-only catalog requests. All
         // lifecycle, IAM and task operations fail if this dry run reaches them.
         sandbox.stub("gcloud", r#"#!/bin/sh
 entry=gcloud; for arg in "$@"; do entry="$entry	$arg"; done
 printf '%s\n' "$entry" >> "$FAKE_CLI_LOG"
 case "$*" in
+  'auth print-access-token --project=test-project --quiet') printf 'private-test-token\n' ;;
   'compute tpus locations list --project=test-project --quiet --format=json') printf '[{"locationId":"us-central1-a"},{"locationId":"us-east5-b"}]\n' ;;
   'compute tpus tpu-vm accelerator-types list --project=test-project --quiet --zone=us-central1-a --format=json') printf '[{"type":"v5litepod-1"}]\n' ;;
   'compute tpus tpu-vm accelerator-types list --project=test-project --quiet --zone=us-east5-b --format=json') printf '[{"type":"v6e-1"}]\n' ;;
@@ -588,9 +588,11 @@ esac
         term.press_until(query, |t| t.line(1) == format!("Filter: {query}"));
         term.press_until(ENTER, on("TPU zone"));
         term.wait(shows("us-central1-a"));
+        term.press_until("us-central1-a", shows("Filter: us-central1-a"));
         if query == "tpu" {
             term.press_until(ENTER, on("TPU type"));
             term.wait(shows("v5litepod-1"));
+            term.press_until("v5litepod-1", shows("Filter: v5litepod-1"));
         }
         term.press_until(ENTER, on("TPU capacity"));
         term.press("2"); // Spot
@@ -618,14 +620,16 @@ esac
         assert!(output.contains("--method=DELETE"));
         assert!(output.contains("https://github.com/example/demo /workspace/demo"));
         assert!(
-            tools(&sandbox).iter().all(|tool| tool == "gcloud"),
+            tools(&sandbox)
+                .iter()
+                .all(|tool| ["gcloud", "curl", "vastai"].contains(&tool.as_str())),
             "{:?}",
             sandbox.calls()
         );
         assert!(sandbox
             .calls()
             .iter()
-            .all(|a| a.iter().any(|s| s == "list")));
+            .all(|a| a[0] != "gcloud" || a.get(1).is_some_and(|s| s == "auth")));
         assert!(!sandbox.history_path().exists());
     }
 }

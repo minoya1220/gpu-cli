@@ -11,6 +11,9 @@ const CFG: &str = r#"{"gcp":{"setup":{"version":1,"project":"test-project"},"pro
 pub(crate) fn prices() -> Prices {
     Prices {
         region: "us-east5".into(),
+        cache_age: None,
+        clock: None,
+        unavailable: None,
         at: "2026-11-03T00:00:00Z".parse().unwrap(),
         skus: dicts(
             r#"[
@@ -24,19 +27,31 @@ pub(crate) fn prices() -> Prices {
     }
 }
 pub(crate) fn cache(env: &TestEnv) {
-    let prices = prices();
-    let mut d = Dict::new();
-    d.insert("at", Value::Int(prices.at.as_second()));
-    d.insert(
-        "skus",
-        Value::List(prices.skus.into_iter().map(Value::Dict).collect()),
-    );
-    std::fs::create_dir_all(env.cache.join("gpu")).unwrap();
-    std::fs::write(
-        env.cache.join("gpu/tpu-prices-test-project-us-east5.json"),
-        crate::pyjson::dumps(&Value::Dict(d), None),
-    )
-    .unwrap();
+    let p = prices();
+    let ctx = env.ctx().clock(&FakeClock::at(p.at)).build();
+    let entries = crate::gcp_facts::skus(&ctx)
+        .into_iter()
+        .filter(|m| {
+            crate::gcp::text(m, "generation") == Some("v6e")
+                && m.get("regions")
+                    .and_then(Value::as_list)
+                    .is_some_and(|v| v.contains(&Value::str("us-east5")))
+                && crate::gcp_facts::capacity(m).is_some()
+        })
+        .map(|m| {
+            let mut d = Dict::new();
+            d.insert("id", m.get("id").unwrap().clone());
+            d.insert("at", Value::Int(p.at.as_second()));
+            d.insert(
+                "sku",
+                Value::Dict(p.skus[usize::from(crate::gcp_facts::capacity(&m).unwrap())].clone()),
+            );
+            Value::Dict(d)
+        })
+        .collect();
+    let mut data = Dict::new();
+    data.insert("entries", Value::List(entries));
+    crate::gcp_http::write_cache(&ctx, "tpu-prices-test-project.json", data);
 }
 #[test]
 fn normalizes_units_slice_sizes_and_capacity_without_guessing_missing_rates() {
@@ -49,7 +64,7 @@ fn normalizes_units_slice_sizes_and_capacity_without_guessing_missing_rates() {
     assert_eq!(p.hourly("v4-32", false), Some(40.0));
     assert_eq!(p.hourly("v5e-1", true), None);
     assert_eq!(p.hourly("v99-1", false), None);
-    assert!(p.label("v6e-1").contains("on-demand $2.750 / Spot $0.750"));
+    assert!(p.label("v6e-1").contains("$2.750/hr · Spot $0.750/hr"));
     let mut ambiguous = p.clone();
     let mut duplicate = p.skus[0].clone();
     duplicate.insert("pricingInfo", json(r#"[{"effectiveTime":"2026-01-01T00:00:00Z","pricingExpression":{"usageUnit":"chip.h","tieredRates":[{"unitPrice":{"currencyCode":"USD","units":"999"}}]}}]"#));
@@ -131,21 +146,14 @@ fn fixture() -> (TestEnv, Ctx, Arc<FakeRunner>) {
         };
         assert!(config.contains("Authorization: Bearer sensitive-test-token"));
         assert!(config.contains("x-goog-user-project: test-project"));
-        let url = cmd.argv.last().unwrap();
-        assert!(url.starts_with("https://cloudbilling.googleapis.com/v1/services"));
-        if url.contains("/skus?") {
-            let p = prices();
-            let mut page = Dict::new();
-            page.insert(
-                "skus",
-                Value::List(p.skus.into_iter().map(Value::Dict).collect()),
-            );
-            return ok(&crate::pyjson::dumps(&Value::Dict(page), None));
-        }
-        if url.contains("pageToken=next%2F%2B") {
-            return ok(r#"{"services":[{"name":"services/TEST-TPU","displayName":"Cloud TPU"}]}"#);
-        }
-        ok(r#"{"services":[],"nextPageToken":"next/+"}"#)
+        super::gcp_transport::curl(cmd,|url| {
+            if url.contains("acceleratorTypes") {return (200,r#"{"acceleratorTypes":[{"type":"v6e-1"}]}"#.into());}
+            if url.contains("/locations?") {return (200,r#"{"locations":[{"locationId":"us-east5-b"}]}"#.into());}
+            let id=url.split("/skus/").nth(1).unwrap().split('/').next().unwrap();
+            let env=TestEnv::new();let probe=env.ctx().build();let meta=crate::gcp_facts::skus(&probe).into_iter().find(|m|crate::gcp::text(m,"id")==Some(id)).unwrap();
+            let spot=crate::gcp_facts::capacity(&meta)==Some(true);
+            (200,format!(r#"{{"currencyCode":"USD","rate":{{"unitInfo":{{"unit":"h","unitDescription":"hour","unitQuantity":{{"value":"1"}}}},"tiers":[{{"startAmount":{{"value":"0"}},"listPrice":{{"currencyCode":"USD","units":"{}","nanos":750000000}}}}]}}}}"#,if spot {0} else {2}))
+        }).unwrap()
     });
     let ctx = env
         .ctx()
@@ -155,20 +163,20 @@ fn fixture() -> (TestEnv, Ctx, Arc<FakeRunner>) {
     (env, ctx, runner)
 }
 #[test]
-fn authenticated_catalog_paginates_and_caches_public_data_not_tokens() {
+fn known_skus_batch_prices_and_cache_public_data_not_tokens() {
     let (env, ctx, runner) = fixture();
     let cfg = dict(CFG);
     let p = gcp_prices::load(&ctx, &cfg, "us-east5-b").unwrap();
     assert_eq!(p.hourly("v6e-1", false), Some(2.75));
-    assert_eq!(runner.calls().len(), 4);
+    assert_eq!(runner.calls().len(), 2);
     assert_eq!(
         gcp_prices::load(&ctx, &cfg, "us-east5-b")
             .unwrap()
             .hourly("v6e-1", true),
         Some(0.75)
     );
-    assert_eq!(runner.calls().len(), 4);
-    let raw = read(&env.cache.join("gpu/tpu-prices-test-project-us-east5.json"));
+    assert_eq!(runner.calls().len(), 2);
+    let raw = read(&env.cache.join("gpu/tpu-prices-test-project.json"));
     assert!(!raw.contains("sensitive-test-token"));
     assert!(!raw.contains("Authorization"));
     assert!(!out(&ctx).contains("sensitive-test-token"));
@@ -205,7 +213,7 @@ impl crate::wizard::Search for EmptySearch {
 }
 
 #[test]
-fn f2_on_tpu_rows_has_its_own_job_and_no_setup_note_is_visible() {
+fn tpu_prices_load_automatically_and_no_setup_note_is_visible() {
     for configured in [false, true] {
         let env = TestEnv::new();
         let ctx = env.ctx().build();
@@ -222,8 +230,11 @@ fn f2_on_tpu_rows_has_its_own_job_and_no_setup_note_is_visible() {
                 models: vec!["RTX 4090".into()],
                 recent_gpus: Vec::new(),
                 choose_offer: false,
-                tpu_setup_error: None,
+                tpu_setup_error: (!configured).then(|| "needs gpu setup".into()),
                 tpu_prices: Some(job),
+                tpu_cached_prices: None,
+                tpu_types: Vec::new(),
+                tpu_catalog: None,
                 owner: "example".into(),
             },
         );
@@ -237,15 +248,12 @@ fn f2_on_tpu_rows_has_its_own_job_and_no_setup_note_is_visible() {
         let seen = Arc::new(Mutex::new(false));
         let watched = seen.clone();
         let result = drive(screen, move |keys| {
-            keys.press(F2); // a completed Vast job must not hide TPU's F2 hint
-            keys.wait(|s| !s.footer.contains("F2") && !s.footer.contains("Loading prices"));
             keys.type_text("tpu");
-            assert!(keys.footer().contains("F2 prices"));
-            keys.press(F2);
+            assert!(!keys.footer().contains("F2"));
             if configured {
-                keys.wait(|s| s.labels.iter().any(|l| l.contains("Spot $0.750")));
+                keys.wait(|s| s.labels.iter().any(|l| l.contains("Spot $0.750/hr")));
             } else {
-                keys.wait(|s| s.footer.contains("TPU prices need gpu setup"));
+                keys.wait(|s| s.labels.iter().any(|l| l.contains("needs gpu setup")));
             }
             *watched.lock().unwrap() = true;
             keys.press(CTRL_C);
@@ -253,4 +261,40 @@ fn f2_on_tpu_rows_has_its_own_job_and_no_setup_note_is_visible() {
         assert_eq!(result, Outcome::Cancelled(130));
         assert!(*seen.lock().unwrap());
     }
+}
+
+#[test]
+fn shared_token_catalog_cache_and_fresh_preflight_do_not_duplicate_auth() {
+    let (_env, ctx, runner) = fixture();
+    let cfg = dict(CFG);
+    gcp_prices::load(&ctx, &cfg, "us-east5-b").unwrap();
+    crate::gcp_catalog::zones(&ctx, "test-project", None).unwrap();
+    let before = runner.calls().len();
+    crate::gcp_catalog::cached_types(&ctx, "test-project", "us-east5-b").unwrap();
+    assert_eq!(runner.calls().len(), before);
+    crate::gcp_catalog::verify(&ctx, "test-project", "us-east5-b", "v6e-1").unwrap();
+    assert_eq!(
+        runner.calls().len(),
+        before + 1,
+        "preflight must make a fresh read"
+    );
+    assert_eq!(
+        runner
+            .calls()
+            .iter()
+            .filter(|c| c.program() == "gcloud")
+            .count(),
+        1
+    );
+}
+#[test]
+fn compute_engine_hours_are_chip_hours_and_regions_share_sku_cache() {
+    let (_env, ctx, runner) = fixture();
+    let cfg = dict(CFG);
+    let p = gcp_prices::load_for(&ctx, &cfg, "us-east5-b", Some(("v6e-1", false))).unwrap();
+    assert_eq!(p.hourly("v6e-4", false), Some(11.0));
+    let count = runner.calls().len();
+    let cached = gcp_prices::load_for(&ctx, &cfg, "us-east5-a", Some(("v6e-1", false))).unwrap();
+    assert_eq!(runner.calls().len(), count);
+    assert_eq!(cached.cache_age, Some(0));
 }

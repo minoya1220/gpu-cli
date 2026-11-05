@@ -319,6 +319,20 @@ pub fn launch(ctx: &Ctx, args: &UpArgs, cfg: &Dict, deadline: Option<Timestamp>)
                 recent_gpus: recent,
                 choose_offer: !args.yes && args.offer.is_none(),
                 tpu_prices: Some(crate::gcp_prices::job(ctx, cfg)),
+                tpu_cached_prices: cfg
+                    .get("gcp")
+                    .and_then(crate::pyjson::Value::as_dict)
+                    .and_then(|d| crate::gcp::text(d, "zone"))
+                    .and_then(|z| crate::gcp_prices::cached(ctx, cfg, z)),
+                tpu_types: crate::gcp_facts::known_types(
+                    ctx,
+                    cfg.get("gcp")
+                        .and_then(crate::pyjson::Value::as_dict)
+                        .and_then(|d| crate::gcp::text(d, "project"))
+                        .unwrap_or(""),
+                    None,
+                ),
+                tpu_catalog: Some(crate::gcp_catalog::types_job(ctx, cfg)),
                 tpu_setup_error: crate::gcp::launch_setup(ctx, cfg)
                     .err()
                     .map(|e| e.text().to_string()),

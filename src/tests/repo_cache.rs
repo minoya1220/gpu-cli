@@ -20,6 +20,9 @@ pub fn flow(t: &TestEnv, job: Job<Vec<String>>) -> LaunchWizard {
             choose_offer: false,
             tpu_setup_error: None,
             tpu_prices: None,
+            tpu_cached_prices: None,
+            tpu_types: Vec::new(),
+            tpu_catalog: None,
             owner: "minoya1220".into(),
         },
     )

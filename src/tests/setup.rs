@@ -88,7 +88,7 @@ fn fixture() -> (TestEnv, Ctx, Arc<FakeRunner>, Arc<Mutex<State>>) {
     let state = Arc::new(Mutex::new(State::default()));
     let shared = state.clone();
     let config = env.config.join("gpu/config.json");
-    let runner = FakeRunner::new(move |cmd| {
+    let native = move |cmd: &Cmd| {
         let a = strs(&cmd.argv);
         if a == ["vastai", "show", "instances", "--raw"] {
             return ok("[]");
@@ -197,10 +197,10 @@ fn fixture() -> (TestEnv, Ctx, Arc<FakeRunner>, Arc<Mutex<State>>) {
                 ok(r#"[{"locationId":"us-east5-b"},{"locationId":"us-central1-a"}]"#)
             }
             ["compute", "tpus", "tpu-vm", "list", zone]
-                if ["--zone=us-east5-b", "--zone=us-central1-a"].contains(zone) =>
+                if ["--zone=us-east5-b", "--zone=us-central1-a", "--zone=-"].contains(zone) =>
             {
                 // Outside default zone: undo must not overlook it.
-                if s.owned_tpu && *zone == "--zone=us-central1-a" {
+                if s.owned_tpu && ["--zone=us-central1-a", "--zone=-"].contains(zone) {
                     ok(
                         r#"[{"name":"projects/test-project/locations/us-central1-a/nodes/test-tpu","labels":{"gpu-cli":"true"}}]"#,
                     )
@@ -233,6 +233,9 @@ fn fixture() -> (TestEnv, Ctx, Arc<FakeRunner>, Arc<Mutex<State>>) {
             }
             _ => panic!("unexpected cloud operation (no IAM/resource writes allowed): {a:?}"),
         }
+    };
+    let runner = super::gcp_transport::runner(move |cmd| {
+        super::gcp_transport::adapt(cmd, &native).unwrap_or_else(|| native(cmd))
     });
     let ctx = env.ctx().runner(&runner).build();
     (env, ctx, runner, state)
@@ -578,7 +581,7 @@ fn disabled_apis_are_not_treated_as_proof_that_resources_are_absent() {
         state.lock().unwrap().apis.retain(|s| s != api);
         let before = mutations(&runner).len();
         assert_eq!(main(&ctx, REMOVE), 1);
-        assert!(err(&ctx).contains("Cannot verify resource absence"));
+        assert!(err(&ctx).contains("absence unverified"));
         assert_eq!(mutations(&runner).len(), before);
         assert!(cfg(&env).get("gcp").is_some());
     }
@@ -619,12 +622,12 @@ fn missing_identity_and_failed_inventory_never_authorize_removal() {
     assert!(mutations(&runner).is_empty());
     state.lock().unwrap().identity = true;
     assert_eq!(main(&ctx, APPLY), 0, "{}", err(&ctx));
-    let inventory_fail = FakeRunner::new(|cmd| {
+    let inventory_fail = super::gcp_transport::runner(|cmd| {
         assert_eq!(cmd.program(), "gcloud");
         if cmd.argv[1..3] == ["services", "list"] {
             return ok(&names(&APIS.map(String::from)));
         }
-        assert_eq!(cmd.argv[1..4], ["compute", "tpus", "locations"]);
+        assert_eq!(cmd.argv[1..5], ["compute", "tpus", "tpu-vm", "list"]);
         Ok(Output::failed(1, "permission denied secret"))
     });
     let ctx = env.ctx().runner(&inventory_fail).build();
@@ -685,7 +688,7 @@ fn unset_up_cloud_is_blocked_at_the_single_process_boundary_for_all_commands() {
         let env = TestEnv::new();
         std::fs::create_dir(env.config.join("gpu")).unwrap();
         std::fs::write(env.config.join("gpu/config.json"), config).unwrap();
-        let runner = FakeRunner::new(|cmd| {
+        let runner = super::gcp_transport::runner(|cmd| {
             assert_eq!(
                 cmd.program(),
                 "vastai",
@@ -747,7 +750,7 @@ fn setup_zone_picker_loads_project_zones_highlights_default_and_filters_with_rea
         |keys| {
             keys.wait(|s| s.labels.len() == 2);
             assert_eq!(keys.labels(), ["us-east5-b — v6e", "us-central1-a — v6e"]);
-            assert!(keys.snapshot().notice.contains("quota/capacity"));
+            assert!(keys.snapshot().notice.contains("Quota and capacity"));
             keys.type_text("central1");
             assert_eq!(keys.labels(), ["us-central1-a — v6e"]);
             keys.press(ENTER);
@@ -775,14 +778,14 @@ fn setup_zone_picker_handles_disabled_api_and_absent_default_without_implicit_en
         crate::setup::zone_screen(&ctx, PROJECT, "us-east5-b", false),
         |keys| {
             keys.wait(|s| !s.labels.is_empty());
-            assert_eq!(keys.labels()[0], "us-east5-b");
-            assert!(keys.snapshot().notice.contains("TPU API disabled"));
+            assert_eq!(keys.labels()[0].split(" — ").next().unwrap(), "us-east5-b");
+            assert!(keys.snapshot().notice.contains("API disabled"));
             keys.type_text("europe-west4-b");
             keys.press(ENTER);
         },
     );
     assert_eq!(result, Outcome::Done("europe-west4-b".into()));
-    let runner = FakeRunner::new(|cmd| {
+    let runner = super::gcp_transport::runner(|cmd| {
         if cmd.argv[3] == "tpu-vm" {
             return ok(r#"[{"type":"v6e-1"}]"#);
         }
@@ -808,7 +811,7 @@ fn failed_zone_reconfiguration_keeps_the_previously_verified_default() {
     use crate::process::Runner;
     let (env, ctx, inner, _state) = fixture();
     assert_eq!(main(&ctx, APPLY), 0, "{}", err(&ctx));
-    let runner = FakeRunner::new(move |cmd| {
+    let runner = super::gcp_transport::runner(move |cmd| {
         if cmd.argv.iter().any(|s| s == "--zone=us-west1-b") {
             return ok("[]");
         }
@@ -832,7 +835,7 @@ fn unavailable_zone_stops_before_queue_creation_and_empty_catalog_never_skips_th
     use crate::picker::{testing::*, Outcome};
     use crate::process::Runner;
     let (env, _ctx, inner, _state) = fixture();
-    let runner = FakeRunner::new(move |cmd| {
+    let runner = super::gcp_transport::runner(move |cmd| {
         if strs(&cmd.argv).get(1..5) == Some(&["compute", "tpus", "locations", "list"])
             || strs(&cmd.argv).get(1..5)
                 == Some(&["compute", "tpus", "tpu-vm", "accelerator-types"])
@@ -853,7 +856,7 @@ fn unavailable_zone_stops_before_queue_creation_and_empty_catalog_never_skips_th
             keys.wait(|s| {
                 s.body
                     .iter()
-                    .any(|line| line.contains("No TPU-capable zones returned"))
+                    .any(|line| line.contains("No TPU zones returned"))
             });
             keys.press(ENTER);
             assert!(
@@ -870,7 +873,7 @@ fn unavailable_zone_stops_before_queue_creation_and_empty_catalog_never_skips_th
 fn provider_status_picker_real_keys_never_probes_gcloud() {
     use crate::picker::testing::*;
     let env = TestEnv::new();
-    let runner = FakeRunner::new(|cmd| {
+    let runner = super::gcp_transport::runner(|cmd| {
         assert_eq!(cmd.program(), "vastai");
         ok("[]")
     });

@@ -10,7 +10,7 @@ use crate::picker::{pick, Job, Next, Opt, Screen};
 use crate::pyjson::{self, Dict, Value};
 
 pub const GCP_NOT_SETUP: &str =
-    "Set up Google Cloud before renting TPUs. No Google Cloud command was run.\nNext: gpu setup";
+    "Next: gpu setup\nGoogle Cloud is not set up; no gcloud command ran.";
 const ZONE: &str = "us-east5-b";
 const QUEUE: &str = "gpu-expiry";
 // Compute supplies the default compute identity and SSH infrastructure.
@@ -242,6 +242,9 @@ pub(crate) fn zone_screen(
     preferred: &str,
     api_enabled: bool,
 ) -> Screen<String, String> {
+    let mut initial = crate::gcp_catalog::known(ctx, project, None);
+    initial.sort_by_key(|z| z.name != preferred);
+    crate::gcp_geo::order(&ctx.env, &mut initial, |z| &z.name);
     let worker = ctx.clone();
     let project = project.to_string();
     let title = format!("TPU zone ({project})");
@@ -272,7 +275,7 @@ pub(crate) fn zone_screen(
         move || {
             options
                 .result()
-                .unwrap_or_default()
+                .unwrap_or_else(|| initial.clone())
                 .into_iter()
                 .map(|zone| {
                     let label = if zone.types.is_empty() {
@@ -287,14 +290,15 @@ pub(crate) fn zone_screen(
         Next::Done,
     )
     .load(job)
-    .wait_initial(true)
+    .wait_initial(false)
     .quick_select(false)
-    .loading("Loading TPU-capable zones…")
-    .empty("No TPU-capable zones returned; Back returns, Enter retries a failed request")
+    .load_required(false)
+    .loading("Checking TPU zones…")
+    .empty("No TPU zones returned. Ctrl-R retries.")
     .notice(if api_enabled {
-        "Project TPU zones; quota/capacity is not guaranteed."
+        "Quota and capacity still need a live check."
     } else {
-        "Published TPU zones (TPU API disabled); project availability/quota is unverified."
+        "Known zones; project availability unverified (API disabled)."
     })
 }
 
@@ -457,7 +461,9 @@ impl Plan {
         if text(sa, "email") != Some(&self.account())
             || sa.get("disabled") == Some(&Value::Bool(true))
         {
-            return Err(Error::msg("Default compute service account is missing or disabled. Setup will not create or enable an identity."));
+            return Err(Error::msg(
+                "Default Compute identity missing/disabled; ask an admin. gpu creates no identity.",
+            ));
         }
         let policy = self.json(ctx, &["projects", "get-iam-policy", &self.project])?;
         let bindings = policy.as_dict().and_then(|d| d.get("bindings"));
@@ -471,9 +477,11 @@ impl Plan {
             false
         };
         if !granted {
-            return Err(Error::msg(format!("Default compute service account {} has no recognized unconditional project grant for tpu.nodes.delete. Expiry cannot be relied on; ask the project administrator to review its permissions. Setup changes no IAM (conditional, inherited and custom grants require administrator review).", self.account())));
+            return Err(Error::msg(format!("No recognized tpu.nodes.delete grant for {}.\nAsk an admin to review conditional/inherited/custom grants; gpu changes no IAM.", self.account())));
         }
-        ctx.println("Default compute identity has a TPU-delete allow grant; IAM deny policies and future changes can still defeat expiry. No IAM was changed.")
+        ctx.println(
+            "TPU-delete allow grant found; deny policies or later IAM changes can block expiry.",
+        )
     }
     fn confirm(&self, ctx: &Ctx, flags: &SetupFlags) -> Result<bool> {
         if flags.dry_run {
@@ -542,7 +550,9 @@ fn setup_gcp(ctx: &Ctx, cfg: &Dict, flags: &SetupFlags) -> Result<()> {
         .as_ref()
         .is_some_and(|p| p.project != project || p.number != number || p.location != location)
     {
-        return Err(Error::msg("Remove the recorded setup before changing project or queue region; its undo record must not be overwritten."));
+        return Err(Error::msg(
+            "Remove setup before changing project/queue region; keep its undo record.",
+        ));
     }
     let mut plan = Plan {
         project,
@@ -586,9 +596,12 @@ fn setup_gcp(ctx: &Ctx, cfg: &Dict, flags: &SetupFlags) -> Result<()> {
     if exists {
         plan.queue()?.check(ctx)?;
     }
-    ctx.println(&format!("Set up existing project {}. Use a dedicated, sacrificial project you do not mind gpu working in. No TPU is created.", plan.project))?;
     ctx.println(&format!(
-        "  Default TPU zone: {}; Cloud Tasks queue region: {}. Runtime is automatic at launch.",
+        "Set up {} (use a disposable project). No TPU created.",
+        plan.project
+    ))?;
+    ctx.println(&format!(
+        "  Default TPU zone: {}; queue region: {}. Runtime: automatic.",
         plan.zone, plan.location
     ))?;
     for api in &missing {
@@ -599,9 +612,15 @@ fn setup_gcp(ctx: &Ctx, cfg: &Dict, flags: &SetupFlags) -> Result<()> {
         if exists { "Reuse unchanged" } else { "Create" },
         plan.resource()
     ))?;
-    ctx.println(&format!("  Use existing default compute identity {} for BOTH VM and deletion tasks. Its existing roles are also available inside the VM.", plan.account()))?;
-    ctx.println("No explicit project, identity, role, IAM, network, billing or quota mutations. Enabling APIs may cause Google to provision its default Compute identity/network and managed service agents; undo leaves those Google-managed defaults alone. Only the gpu-expiry queue is explicitly created.")?;
-    ctx.println(&format!("Write setup/undo journal to {}. Retain it until removal; do not run concurrent setup or edit the same cloud resources during setup.", crate::config::config_path(&ctx.env).display()))?;
+    ctx.println(&format!(
+        "  Existing VM + expiry identity: {}. VM users inherit all its roles; trust them.",
+        plan.account()
+    ))?;
+    ctx.println("Only explicit resource: gpu-expiry queue. No project/identity/IAM/network/billing/quota edits.\nAPI enablement may add Google-managed identities/networks; undo keeps them.")?;
+    ctx.println(&format!(
+        "Keep undo record: {}.\nNo concurrent setup or cloud edits.",
+        crate::config::config_path(&ctx.env).display()
+    ))?;
     if !plan.confirm(ctx, flags)? {
         return Ok(());
     }
@@ -693,29 +712,27 @@ fn ensure_unused(ctx: &Ctx, plan: &Plan, enabled: &[String]) -> Result<bool> {
             ),
         ] {
             if may_have_resources && !enabled.iter().any(|s| s == api) {
-                return Err(Error::msg(format!("Cannot verify resource absence while {api} is disabled. Have the project administrator restore it before retrying removal; no resources were removed.")));
+                return Err(Error::msg(format!("{api} disabled: absence unverified; nothing removed. Ask an admin to restore it.")));
             }
         }
     }
     if enabled.iter().any(|s| s == "tpu.googleapis.com") {
-        for zone in gcp::locations(ctx, &plan.project)? {
-            for node in gcp::nodes(ctx, &plan.project, &zone)? {
-                let owned = node
-                    .get("labels")
+        for node in gcp::all_nodes(ctx, &plan.project)? {
+            let id = gcp::node_id(&node, &plan.project)?;
+            let owned = node
+                .get("labels")
+                .and_then(Value::as_dict)
+                .and_then(|d| text(d, "gpu-cli"))
+                == Some("true")
+                || node
+                    .get("metadata")
                     .and_then(Value::as_dict)
-                    .and_then(|d| text(d, "gpu-cli"))
-                    == Some("true")
-                    || node
-                        .get("metadata")
-                        .and_then(Value::as_dict)
-                        .is_some_and(|d| text(d, "gpu-expiry-queue").is_some());
-                if owned {
-                    let name = text(&node, "name")
-                        .and_then(|s| s.rsplit('/').next())
-                        .filter(|s| component(s))
-                        .ok_or_else(gcp::bad_reply)?;
-                    return Err(Error::msg(format!("Remove the gpu-owned TPU before undoing setup. Next: gpu down gcp:{}:{zone}:{name}", plan.project)));
-                }
+                    .is_some_and(|d| text(d, "gpu-expiry-queue").is_some());
+            if owned {
+                return Err(Error::msg(format!(
+                    "Destroy this TPU before removing setup. Next: gpu down {}",
+                    id.cli()
+                )));
             }
         }
     }
@@ -732,7 +749,7 @@ fn ensure_unused(ctx: &Ctx, plan: &Plan, enabled: &[String]) -> Result<bool> {
             ],
         )?)?;
         if !tasks.is_empty() {
-            return Err(Error::msg("Pending expiry tasks remain; remove their TPUs with gpu down first, or cancel orphaned tasks with gpu expire <id> cancel. Next: gpu ls --provider gcp"));
+            return Err(Error::msg("Pending tasks block removal; use gpu down or gpu expire ID cancel. Next: gpu ls --provider gcp"));
         }
     }
     Ok(exists)
@@ -772,7 +789,7 @@ fn remove_gcp(ctx: &Ctx, cfg: &Dict, flags: &SetupFlags) -> Result<()> {
             ctx.println(&format!("  Disable API enabled by gpu: {api}"))?;
         }
     }
-    ctx.println("Remove local gcp config. Keep all pre-existing APIs and other config. Never delete projects or change IAM, billing or quotas.")?;
+    ctx.println("Remove local gcp config; keep pre-existing APIs/queues and other config. No project/IAM/billing/quota edits.")?;
     if !plan.confirm(ctx, flags)? {
         return Ok(());
     }

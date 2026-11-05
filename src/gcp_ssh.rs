@@ -67,7 +67,7 @@ pub fn stanza(id: &TpuId, command: &str) -> Result<String> {
                     .iter()
                     .any(|s| s.eq_ignore_ascii_case(key))
                     {
-                        return Err(Error::msg(format!("Unsupported gcloud SSH option; use the direct connection instead. Next: gpu ssh {} --exec", id.cli())));
+                        return Err(Error::msg(format!("Unsupported SSH option; use a direct connection. Next: gpu ssh {} --exec", id.cli())));
                     }
                     lines.push(format!("  {key} {}\n", quote(val)?));
                 } else {

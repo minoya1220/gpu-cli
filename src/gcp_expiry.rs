@@ -19,13 +19,16 @@ pub fn validate_deadline(ctx: &Ctx, at: Timestamp) -> Result<()> {
     // Tasks permits 30 days ahead with 31-day retention from creation. Leave
     // two days for retries and a minute for submitting the create request.
     if !(60..=29 * 86400).contains(&seconds) {
-        return Err(Error::msg("TPU expiry must be 1 minute to 29 days away, including selection/boot time. Next: gpu up --provider gcp --expire 2h"));
+        return Err(Error::msg("Expiry must be 1 minute–29 days away; selection/boot uses that time. Next: gpu up --provider gcp --expire 2h"));
     }
     Ok(())
 }
 impl Queue {
     pub fn load(settings: &Settings) -> Result<Self> {
-        let d = settings.expiry.as_ref().ok_or_else(|| Error::msg("Configure gcp.expiry (Cloud Tasks queue, location and service_account) before renting a TPU. Next: gpu up --provider gcp --help"))?;
+        let d = settings
+            .expiry
+            .as_ref()
+            .ok_or_else(|| Error::msg("Expiry queue not configured. Next: gpu setup"))?;
         let get = |key| {
             text(d, key).filter(|s| component(s)).map(String::from).ok_or_else(|| Error::msg(format!("Set gcp.expiry.{key} in gpu/config.json. Next: gpu up --provider gcp --help")))
         };
@@ -159,13 +162,9 @@ impl Queue {
             .is_some_and(|name| name.starts_with("gpu-expire-") && component(name))
     }
     fn tasks(&self, ctx: &Ctx, id: &TpuId) -> Result<Vec<Dict>> {
-        let data = gcp::json(
-            ctx,
-            self.args("list"),
-            &format!("gpu expire {} show", id.cli()),
-        )?;
+        let data = self.pending(ctx)?;
         let url = id.url();
-        Ok(gcp::objects(data)?
+        Ok(data
             .into_iter()
             .filter(|d| {
                 let own_name = self.own_task_name(d);
@@ -191,55 +190,96 @@ impl Queue {
         }
         Ok(())
     }
-    /// Opportunistic cleanup only for this queue's gpu-owned exact DELETEs.
-    /// A failed presence check must never remove a safety task.
-    pub fn reconcile(&self, ctx: &Ctx) -> Result<()> {
-        let tasks = gcp::objects(gcp::json(ctx, self.args("list"), "gpu ls --provider gcp")?)?;
-        for task in tasks {
-            let own = self.own_task_name(&task);
-            let Some(http) = task.get("httpRequest").and_then(Value::as_dict) else {
-                continue;
-            };
-            let account = http
+    pub(crate) fn pending(&self, ctx: &Ctx) -> Result<Vec<Dict>> {
+        crate::gcp_http::pages(
+            ctx,
+            &self.project,
+            &format!(
+                "https://cloudtasks.googleapis.com/v2/{}/tasks?responseView=BASIC",
+                self.resource()
+            ),
+            "tasks",
+            1000,
+        )
+    }
+    fn target(&self, task: &Dict) -> Option<TpuId> {
+        if !self.own_task_name(task) {
+            return None;
+        }
+        let http = task.get("httpRequest")?.as_dict()?;
+        if text(http, "httpMethod") != Some("DELETE")
+            || http
                 .get("oauthToken")
                 .and_then(Value::as_dict)
-                .and_then(|d| text(d, "serviceAccountEmail"));
-            if !own
-                || account != Some(&self.service_account)
-                || text(http, "httpMethod") != Some("DELETE")
-            {
-                continue;
-            }
-            let Some(path) = text(http, "url")
-                .and_then(|u| u.strip_prefix("https://tpu.googleapis.com/v2/projects/"))
-            else {
+                .and_then(|d| text(d, "serviceAccountEmail"))
+                != Some(&self.service_account)
+        {
+            return None;
+        }
+        let path = text(http, "url")?.strip_prefix("https://tpu.googleapis.com/v2/projects/")?;
+        let p: Vec<_> = path.split('/').collect();
+        if p.len() != 5
+            || p[0] != self.project
+            || p[1] != "locations"
+            || p[3] != "nodes"
+            || ![p[0], p[2], p[4]].iter().all(|s| gcp::component(s))
+        {
+            return None;
+        }
+        Some(TpuId {
+            project: p[0].into(),
+            zone: p[2].into(),
+            name: p[4].into(),
+        })
+    }
+    pub(crate) fn reconcile_inventory(
+        &self,
+        ctx: &Ctx,
+        nodes: &[Dict],
+        tasks: Vec<Dict>,
+    ) -> Result<()> {
+        let present = nodes
+            .iter()
+            .filter_map(|n| text(n, "name"))
+            .collect::<std::collections::HashSet<_>>();
+        for task in tasks {
+            let Some(id) = self.target(&task) else {
                 continue;
             };
-            let p: Vec<_> = path.split('/').collect();
-            if p.len() != 5
-                || p[0] != self.project
-                || p[1] != "locations"
-                || p[3] != "nodes"
-                || ![p[0], p[2], p[4]].iter().all(|s| gcp::component(s))
-            {
+            if present.contains(id.resource().as_str()) {
                 continue;
             }
-            let id = TpuId {
-                project: p[0].into(),
-                zone: p[2].into(),
-                name: p[4].into(),
-            };
-            match gcp::absent(ctx, &id) {
-                Ok(true) => self.delete_tasks(ctx, &id, &[task])?,
-                Ok(false) => {}
-                Err(_) => ctx.eprintln(&format!(
-                    "Could not verify {}; kept its expiry task. Next: gpu expire {} show",
-                    id.cli(),
-                    id.cli()
-                ))?,
+            // An arming task can briefly precede its node. Never reap that window.
+            let created = text(&task, "createTime")
+                .and_then(|t| t.parse::<Timestamp>().ok())
+                .map(|t| t.as_second())
+                .or_else(|| {
+                    text(&task, "name")?
+                        .rsplit('/')
+                        .next()?
+                        .strip_prefix("gpu-expire-")?
+                        .split('-')
+                        .next()?
+                        .parse::<i64>()
+                        .ok()
+                });
+            if !created.is_some_and(|at| ctx.clock.now().as_second().saturating_sub(at) >= 60) {
+                continue;
             }
+            self.delete_tasks(ctx, &id, &[task])?;
         }
         Ok(())
+    }
+    /// Complete cross-location inventory proves absence without a GET per task.
+    pub fn reconcile(&self, ctx: &Ctx) -> Result<()> {
+        let (nodes, tasks) = std::thread::scope(|scope| {
+            let pending = scope.spawn(|| self.pending(ctx));
+            (
+                gcp::all_nodes(ctx, &self.project),
+                pending.join().unwrap_or_else(|_| Err(gcp::bad_reply())),
+            )
+        });
+        self.reconcile_inventory(ctx, &nodes?, tasks?)
     }
 
     pub fn cancel(&self, ctx: &Ctx, id: &TpuId) -> Result<()> {
@@ -326,13 +366,13 @@ pub fn manage(
     let queue = queue_for_node(cfg, id, &node)?;
     if action == "cancel" {
         queue.cancel(ctx, id)?;
-        return ctx.println(&format!("Cancelled TPU expiry; billing continues. An in-flight delete cannot be undone.\nNext: gpu down {}", id.cli()));
+        return ctx.println(&format!("Expiry cancelled; billing continues. In-flight deletion cannot be stopped.\nNext: gpu down {}", id.cli()));
     }
     queue.check(ctx)?;
     let old = queue.tasks(ctx, id)?;
     if action == "show" {
         if old.is_empty() {
-            return Err(Error::msg("No pending deletion task; expiry is NOT armed (it may already have dispatched). Next: gpu ls --provider gcp"));
+            return Err(Error::msg("No pending task; expiry unarmed or already dispatched. Next: gpu ls --provider gcp"));
         }
         for task in old {
             ctx.println(&format!("TPU {}: deletion dispatch/retry scheduled for {}; queue is RUNNING (API/IAM health is not guaranteed).", id.cli(), text(&task, "scheduleTime").unwrap_or("unknown")))?;
@@ -344,5 +384,9 @@ pub fn manage(
     // deadlines wins; never silently lose the only safety task.
     queue.arm(ctx, id, deadline)?;
     queue.delete_tasks(ctx, id, &old).map_err(|_| Error::msg(format!("New expiry is armed but old tasks remain; an earlier deadline may still destroy this TPU. Next: gpu expire {} show", id.cli())))?;
-    ctx.println(&format!("Scheduled TPU {} for deletion at {deadline}; laptop and VM may be offline.\nNext: gpu expire {} show", id.cli(), id.cli()))
+    ctx.println(&format!(
+        "Delete {} at {deadline}; works offline.\nNext: gpu expire {} show",
+        id.cli(),
+        id.cli()
+    ))
 }

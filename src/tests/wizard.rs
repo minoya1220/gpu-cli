@@ -90,6 +90,9 @@ fn wizard(
             choose_offer,
             tpu_setup_error: None,
             tpu_prices: None,
+            tpu_cached_prices: None,
+            tpu_types: Vec::new(),
+            tpu_catalog: None,
             owner: "minoya1220".into(),
         },
     )
@@ -167,6 +170,9 @@ fn test_repository_shortcuts_full_list_and_global_filter() {
                 choose_offer: false,
                 tpu_setup_error: None,
                 tpu_prices: None,
+                tpu_cached_prices: None,
+                tpu_types: Vec::new(),
+                tpu_catalog: None,
                 owner: "minoya1220".into(),
             },
         );
@@ -247,6 +253,9 @@ fn test_short_repository_lists_keep_static_digits_and_omit_all() {
                 choose_offer: false,
                 tpu_setup_error: None,
                 tpu_prices: None,
+                tpu_cached_prices: None,
+                tpu_types: Vec::new(),
+                tpu_catalog: None,
                 owner: "minoya1220".into(),
             },
         );
@@ -336,7 +345,7 @@ fn test_offer_search_never_blocks_navigation() {
 }
 
 #[test]
-fn test_f2_prices_are_shared_by_gpu_screens_and_loaded_once_per_mode() {
+fn test_auto_prices_are_shared_by_gpu_screens_and_loaded_once_per_mode() {
     let t = TestEnv::new();
     let search = FakeSearch::new();
     let flow = wizard(&t, &search, &Arc::new(AtomicUsize::new(0)), &[], false);
@@ -346,20 +355,17 @@ fn test_f2_prices_are_shared_by_gpu_screens_and_loaded_once_per_mode() {
         keys.wait(|s| s.labels.contains(&"gpu-kernels".to_string()));
         keys.press_until("0", on("Mode"));
         keys.press_until(ENTER, on("GPU"));
-        keys.press(F2);
         keys.wait_for("container prices", || {
             watched.stats_calls() == ["container"]
         });
         keys.wait(|s| s.labels.join(" ").contains("(1 model, from $1.735/hr)"));
         keys.press_until(ENTER, on("Datacenter Blackwell/Hopper"));
         labels.lock().unwrap().extend(keys.labels());
-        keys.press(F2);
         keys.press_until(BACK, on("GPU"));
         keys.press_until(BACK, on("Mode"));
         keys.press(DOWN);
         keys.press_until(ENTER, on("GPU"));
-        assert!(!keys.labels().join(" ").contains("from $")); // vm prices not loaded yet
-        keys.press(F2);
+        assert!(!keys.footer().contains("F2"));
         keys.wait_for("vm prices", || watched.stats_calls() == ["container", "vm"]);
         keys.type_text("4090");
         keys.press(ENTER);
@@ -374,7 +380,7 @@ fn test_f2_prices_are_shared_by_gpu_screens_and_loaded_once_per_mode() {
     assert_eq!(result, Outcome::Done(expected));
     assert_eq!(
         *gpu_labels.lock().unwrap(),
-        ["B200  $1.735/hr (1 offer)", "H100 SXM"]
+        ["B200  $1.735/hr (1 offer)", "H100 SXM · price unavailable"]
     );
 }
 
@@ -406,13 +412,24 @@ fn test_gpu_screen_caps_valid_recents_at_three_and_always_lists_tpus() {
                 labels
                     .iter()
                     .filter(|s| s.starts_with("Recent:"))
-                    .cloned()
+                    .map(|s| s
+                        .split("  ")
+                        .next()
+                        .unwrap()
+                        .split(" · ")
+                        .next()
+                        .unwrap()
+                        .to_string())
                     .collect::<Vec<_>>(),
                 ["Recent: RTX 4090", "Recent: B200", "Recent: Tesla T4"]
             );
-            assert!(labels.contains(&TPU_CATEGORY.to_string()));
+            assert!(labels.iter().any(|l| l.starts_with(TPU_CATEGORY)));
             // Select the visible category without filtering; no offer screen.
-            for _ in 0..labels.iter().position(|s| s == TPU_CATEGORY).unwrap() {
+            for _ in 0..labels
+                .iter()
+                .position(|s| s.starts_with(TPU_CATEGORY))
+                .unwrap()
+            {
                 keys.press(DOWN);
             }
             keys.press(ENTER);
@@ -427,7 +444,7 @@ fn test_gpu_screen_caps_valid_recents_at_three_and_always_lists_tpus() {
     );
     assert_eq!(repo_calls.load(Ordering::SeqCst), 0);
     assert!(search.offer_calls().is_empty());
-    assert!(search.stats_calls().is_empty());
+    assert!(search.stats_calls().len() <= 1);
 }
 
 #[test]
@@ -455,7 +472,7 @@ fn test_gpu_search_finds_tpu_category_and_types_without_cloud_config() {
             })
         );
         assert!(search.offer_calls().is_empty());
-        assert!(search.stats_calls().is_empty());
+        assert!(search.stats_calls().len() <= 1);
     }
 }
 

@@ -105,6 +105,9 @@ struct State {
     choose_offer: bool,
     tpu_setup_error: Option<String>,
     tpu_prices: Job<Arc<crate::gcp_prices::Prices>>,
+    tpu_cached_prices: Option<Arc<crate::gcp_prices::Prices>>,
+    tpu_types: Vec<String>,
+    tpu_catalog: Option<Job<Vec<String>>>,
     prices: RefCell<HashMap<String, Job<Stats>>>,
 }
 
@@ -127,6 +130,9 @@ pub struct WizardOptions {
     /// Local config preflight only; no cloud calls on a screen transition.
     pub tpu_setup_error: Option<String>,
     pub tpu_prices: Option<Job<Arc<crate::gcp_prices::Prices>>>,
+    pub tpu_cached_prices: Option<Arc<crate::gcp_prices::Prices>>,
+    pub tpu_types: Vec<String>,
+    pub tpu_catalog: Option<Job<Vec<String>>>,
     pub owner: String,
 }
 
@@ -154,9 +160,12 @@ impl LaunchWizard {
                 recent_gpus,
                 choose_offer: options.choose_offer,
                 tpu_setup_error: options.tpu_setup_error,
+                tpu_cached_prices: options.tpu_cached_prices,
+                tpu_types: options.tpu_types,
+                tpu_catalog: options.tpu_catalog,
                 tpu_prices: options
                     .tpu_prices
-                    .unwrap_or_else(|| Job::new(|| Err("TPU prices need gpu setup".into()))),
+                    .unwrap_or_else(|| Job::new(|| Err("needs gpu setup".into()))),
                 prices: RefCell::new(HashMap::new()),
             }),
         }
@@ -388,97 +397,188 @@ impl LaunchWizard {
         )
     }
 
+    fn tpu_types(&self) -> Vec<String> {
+        let mut types = self.state.tpu_types.clone();
+        types.extend(TPU_TYPES.iter().map(|s| s.to_string()));
+        if let Some(job) = &self.state.tpu_catalog {
+            types.extend(job.result().unwrap_or_default());
+        }
+        types = types
+            .into_iter()
+            .map(|s| {
+                s.strip_prefix("v5litepod-")
+                    .map(|n| format!("v5e-{n}"))
+                    .unwrap_or(s)
+            })
+            .collect();
+        types.sort();
+        types.dedup();
+        types
+    }
+    fn tpu_prices(&self) -> Option<Arc<crate::gcp_prices::Prices>> {
+        if self.state.tpu_prices.state() == JobState::Failed {
+            None
+        } else {
+            self.state
+                .tpu_prices
+                .result()
+                .or_else(|| self.state.tpu_cached_prices.clone())
+        }
+    }
+    fn price_suffix(state: JobState) -> &'static str {
+        if matches!(state, JobState::Idle | JobState::Running) {
+            " · …"
+        } else {
+            " · price unavailable"
+        }
+    }
+    fn tpu_label(&self, tpu: Option<&str>) -> String {
+        if let Some(prices) = self.tpu_prices() {
+            return tpu.map(|t| prices.label(t)).unwrap_or_else(|| {
+                prices.category_label(
+                    &self
+                        .tpu_types()
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>(),
+                )
+            });
+        }
+        let base = tpu
+            .map(|t| format!("TPU {t}"))
+            .unwrap_or_else(|| TPU_CATEGORY.into());
+        if self.state.tpu_setup_error.is_some() {
+            format!("{base} · needs gpu setup")
+        } else {
+            format!(
+                "{base}{}",
+                Self::price_suffix(self.state.tpu_prices.state())
+            )
+        }
+    }
     fn gpu_screen(&self, picks: Picks) -> WizardScreen {
         let prices = self.price_job(picks.mode.as_deref().unwrap_or(""));
-        let (wizard, stats_job) = (self.clone(), prices.clone());
-        let options = move || {
-            let stats = stats_job.result().unwrap_or_default();
-            let s = &wizard.state;
-            let mut options: Vec<Opt<Choice>> = s
-                .recent_gpus
-                .iter()
-                .map(|gpu| {
-                    Opt::new(
-                        Choice::Gpu(gpu.clone()),
-                        format!("Recent: {}", model_label(gpu, &stats)),
-                    )
-                })
-                .collect();
-            options.extend(s.categories.iter().map(|(name, members)| {
-                Opt::new(
-                    Choice::Category(name.clone()),
-                    category_label(name, members, &stats),
-                )
-            }));
-            let label = s
-                .tpu_prices
-                .result()
-                .map(|p| p.category_label(&TPU_TYPES))
-                .unwrap_or_else(|| TPU_CATEGORY.into());
-            options.push(Opt::new(Choice::Tpu(TpuChoice::ChooseType), label));
-            options
-        };
-        let (wizard, stats_job) = (self.clone(), prices.clone());
-        let search = move || {
-            let stats = stats_job.result().unwrap_or_default();
-            let mut options: Vec<_> = wizard
-                .state
-                .models
-                .iter()
-                .map(|gpu| Opt::new(Choice::Gpu(gpu.clone()), model_label(gpu, &stats)))
-                .collect();
-            let label = wizard
-                .state
-                .tpu_prices
-                .result()
-                .map(|p| p.category_label(&TPU_TYPES))
-                .unwrap_or_else(|| TPU_CATEGORY.into());
-            options.push(Opt::new(Choice::Tpu(TpuChoice::ChooseType), label));
-            options.extend(TPU_TYPES.iter().map(|tpu| {
-                Opt::new(
-                    Choice::Tpu(TpuChoice::Type((*tpu).into())),
-                    wizard
-                        .state
-                        .tpu_prices
-                        .result()
-                        .map(|p| p.label(tpu))
-                        .unwrap_or_else(|| format!("TPU {tpu} (Google Cloud)")),
-                )
-            }));
-            options
-        };
-        let wizard = self.clone();
-        let select = move |choice: Choice| match choice {
-            Choice::Category(name) => Next::Screen(wizard.category_screen(picks.clone(), name)),
-            Choice::Tpu(tpu) => match &wizard.state.tpu_setup_error {
-                Some(message) => {
-                    let hint = "No TPU created. Press \u{2190} or ` to return; Ctrl-C quits.";
-                    Next::Notice(format!("{message}\n\n{hint}"))
+        let this = self.clone();
+        let opts = self.clone();
+        let search = self.clone();
+        let cloud = self.clone();
+        let vast_context = prices.clone();
+        let options = {
+            let prices = prices.clone();
+            move || {
+                let stats = prices.result().unwrap_or_default();
+                let status = prices.state();
+                let mut options = Vec::new();
+                for model in &opts.state.recent_gpus {
+                    let mut label = format!("Recent: {}", model_label(model, &stats));
+                    if !stats.contains_key(model) {
+                        label.push_str(Self::price_suffix(status));
+                    }
+                    options.push(Opt::new(Choice::Gpu(model.clone()), label));
                 }
-                None => wizard.next(Picks {
+                for (category, models) in &opts.state.categories {
+                    let mut label = category_label(category, models, &stats);
+                    if !models.iter().any(|m| stats.contains_key(m)) {
+                        label.push_str(Self::price_suffix(status));
+                    }
+                    options.push(Opt::new(Choice::Category(category.clone()), label));
+                }
+                options.push(Opt::new(
+                    Choice::Tpu(TpuChoice::ChooseType),
+                    opts.tpu_label(None),
+                ));
+                options
+            }
+        };
+        let searching = {
+            let prices = prices.clone();
+            move || {
+                let stats = prices.result().unwrap_or_default();
+                let status = prices.state();
+                let mut options = search
+                    .state
+                    .models
+                    .iter()
+                    .map(|m| {
+                        let mut label = model_label(m, &stats);
+                        if !stats.contains_key(m) {
+                            label.push_str(Self::price_suffix(status));
+                        }
+                        Opt::new(Choice::Gpu(m.clone()), label)
+                    })
+                    .collect::<Vec<_>>();
+                options.push(Opt::new(
+                    Choice::Tpu(TpuChoice::ChooseType),
+                    search.tpu_label(None),
+                ));
+                options.extend(search.tpu_types().into_iter().map(|t| {
+                    Opt::new(
+                        Choice::Tpu(TpuChoice::Type(t.clone())),
+                        search.tpu_label(Some(&t)),
+                    )
+                }));
+                options
+            }
+        };
+        let follow = picks.clone();
+        let mut screen = Screen::new("GPU", options, move |choice| match choice {
+            Choice::Gpu(gpu) => this.next(Picks {
+                gpu: Some(gpu),
+                ..follow.clone()
+            }),
+            Choice::Tpu(tpu) => match &this.state.tpu_setup_error {
+                Some(message) => Next::Notice(format!("{message}\nNo TPU created.")),
+                None => this.next(Picks {
                     tpu: Some(tpu),
-                    ..picks.clone()
+                    ..follow.clone()
                 }),
             },
-            Choice::Gpu(gpu) => wizard.next(Picks {
-                gpu: Some(gpu),
-                ..picks.clone()
-            }),
-            _ => Next::Done(picks.clone()),
-        };
-        let cloud_prices = self.state.tpu_prices.clone();
-        Screen::new("GPU", options, select)
-            .search(search)
-            .price_source(move |choice| {
-                if matches!(choice, Choice::Tpu(_)) {
-                    Rc::new(cloud_prices.clone())
+            Choice::Category(category) => {
+                Next::Screen(this.category_screen(follow.clone(), category))
+            }
+            _ => unreachable!(),
+        })
+        .search(searching)
+        .quick_select(false)
+        .prices(prices)
+        .prices(self.state.tpu_prices.clone())
+        .selection_note(move |choice| {
+            if matches!(choice, Choice::Tpu(_)) {
+                if let Some(prices) = cloud.tpu_prices() {
+                    let cache = prices.cache_note();
+                    format!(
+                        "TPU prices: {} · USD list{}",
+                        prices.region,
+                        if cache.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" · {cache}")
+                        }
+                    )
+                } else if cloud.state.tpu_setup_error.is_some() {
+                    String::new()
                 } else {
-                    Rc::new(prices.clone())
+                    crate::redact::redact_text(&cloud.state.tpu_prices.error())
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .to_string()
                 }
-            })
-            // Digits belong to names such as "RTX 4090".
-            .quick_select(false)
-            .empty("No known GPU models")
+            } else {
+                crate::redact::redact_text(&vast_context.error())
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .to_string()
+            }
+        });
+        if self.state.tpu_setup_error.is_none() {
+            screen = screen.prices(self.state.tpu_prices.clone());
+        }
+        if let Some(job) = &self.state.tpu_catalog {
+            screen = screen.background(job.clone());
+        }
+        screen
     }
 
     fn category_screen(&self, picks: Picks, category: String) -> WizardScreen {
@@ -495,7 +595,13 @@ impl LaunchWizard {
                 .unwrap_or_default();
             members
                 .iter()
-                .map(|gpu| Opt::new(Choice::Gpu(gpu.clone()), model_label(gpu, &stats)))
+                .map(|gpu| {
+                    let mut label = model_label(gpu, &stats);
+                    if !stats.contains_key(gpu) {
+                        label.push_str(Self::price_suffix(stats_job.state()));
+                    }
+                    Opt::new(Choice::Gpu(gpu.clone()), label)
+                })
                 .collect()
         };
         let wizard = self.clone();

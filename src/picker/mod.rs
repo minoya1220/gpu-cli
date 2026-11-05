@@ -75,7 +75,7 @@ type Settled<V, R> = Box<dyn Fn() -> Option<Next<V, R>>>;
 ///
 /// `options` is called on every redraw, so labels can reflect data that loads
 /// later. `select` returns the next screen, or the flow's final result.
-type PriceSource<V> = Box<dyn Fn(&V) -> Rc<dyn AnyJob>>;
+type SelectionNote<V> = Box<dyn Fn(&V) -> String>;
 
 pub struct Screen<V, R> {
     pub title: String,
@@ -87,9 +87,9 @@ pub struct Screen<V, R> {
     pub load: Option<Box<dyn AnyJob>>,
     pub loading: String,
     pub empty: String,
-    /// F2 starts it; `options` should read its result.
-    pub prices: Option<Rc<dyn AnyJob>>,
-    pub price_source: Option<PriceSource<V>>,
+    /// Starts on open, never blocks choices. Results update labels on redraw.
+    pub background: Vec<Rc<dyn AnyJob>>,
+    pub selection_note: Option<SelectionNote<V>>,
     /// Digits choose directly on unfiltered lists with explicit digits or at most nine rows.
     pub quick_select: bool,
     /// Optional background load: static choices remain usable while it runs or fails.
@@ -119,8 +119,8 @@ impl<V: PickValue, R: 'static> Screen<V, R> {
             load: None,
             loading: "Loading...".into(),
             empty: "Nothing to choose from".into(),
-            prices: None,
-            price_source: None,
+            background: Vec::new(),
+            selection_note: None,
             quick_select: true,
             load_required: true,
             text_input: false,
@@ -154,13 +154,15 @@ impl<V: PickValue, R: 'static> Screen<V, R> {
         self
     }
 
-    pub fn prices(mut self, job: impl AnyJob + 'static) -> Self {
-        self.prices = Some(Rc::new(job));
+    pub fn background(mut self, job: impl AnyJob + 'static) -> Self {
+        self.background.push(Rc::new(job));
         self
     }
-
-    pub fn price_source(mut self, source: impl Fn(&V) -> Rc<dyn AnyJob> + 'static) -> Self {
-        self.price_source = Some(Box::new(source));
+    pub fn prices(self, job: impl AnyJob + 'static) -> Self {
+        self.background(job)
+    }
+    pub fn selection_note(mut self, note: impl Fn(&V) -> String + 'static) -> Self {
+        self.selection_note = Some(Box::new(note));
         self
     }
 
@@ -221,19 +223,6 @@ struct View<V, R> {
 }
 
 impl<V: PickValue, R: 'static> View<V, R> {
-    fn price_job(&self) -> Option<Rc<dyn AnyJob>> {
-        let entries = self.entries();
-        self.screen
-            .price_source
-            .as_ref()
-            .and_then(|source| {
-                entries
-                    .get(self.current(entries.len()))
-                    .map(|opt| source(&opt.value))
-            })
-            .or_else(|| self.screen.prices.clone())
-    }
-
     fn new(screen: Screen<V, R>) -> View<V, R> {
         View {
             screen: Rc::new(screen),
@@ -385,6 +374,11 @@ impl<V: PickValue, R: 'static> Core<V, R> {
     /// Start the top screen's load (`retry` restarts a failed one).
     pub fn open(&mut self, retry: bool) {
         let screen = self.view().screen.clone();
+        for job in &screen.background {
+            if job.state() == JobState::Idle || (retry && job.state() == JobState::Failed) {
+                job.start(Box::new(|| {}));
+            }
+        }
         let Some(load) = screen.load.as_deref() else {
             return;
         };
@@ -477,11 +471,6 @@ impl<V: PickValue, R: 'static> Core<V, R> {
                 self.view_mut().set_filter(filter);
             }
             Key::CtrlR => self.open(true),
-            Key::F2 => {
-                if let Some(prices) = self.view().price_job() {
-                    prices.start(Box::new(|| {}));
-                }
-            }
             Key::CtrlC => self.exit(Outcome::Cancelled(130)),
             Key::CtrlD => self.exit(Outcome::Cancelled(1)),
             Key::Paste(text) => {
@@ -492,7 +481,7 @@ impl<V: PickValue, R: 'static> Core<V, R> {
                 }
             }
             Key::Char(c) => self.type_char(c),
-            Key::Escape | Key::Ignored => {}
+            Key::Escape | Key::Ignored | Key::F2 => {}
         }
     }
 
@@ -602,11 +591,14 @@ impl<V: PickValue, R: 'static> Core<V, R> {
         }
         let entries = view.entries();
         if entries.is_empty() {
-            let text = if view.filter.is_empty() {
-                format!("  {}", screen.empty)
-            } else {
-                "  No matches".into()
-            };
+            let text =
+                if load.is_some_and(|l| matches!(l.state(), JobState::Idle | JobState::Running)) {
+                    format!("  {}", screen.loading)
+                } else if view.filter.is_empty() {
+                    format!("  {}", screen.empty)
+                } else {
+                    "  No matches".into()
+                };
             return (one(Style::Note, text), None);
         }
         let current = view.current(entries.len());
@@ -614,6 +606,12 @@ impl<V: PickValue, R: 'static> Core<V, R> {
         let mut lines: Vec<Line> = Vec::new();
         if !screen.notice.is_empty() {
             lines.extend(one(Style::Error, format!("  {}", screen.notice)));
+        }
+        if let Some(note) = &screen.selection_note {
+            let text = note(&entries[current].value);
+            if !text.is_empty() {
+                lines.extend(one(Style::Note, format!("  {text}")));
+            }
         }
         let mut cursor_line = None;
         for (index, option) in entries.iter().enumerate() {
@@ -688,22 +686,13 @@ impl<V: PickValue, R: 'static> Core<V, R> {
         } else {
             hints.push("`/\u{2190} quit (twice)".into());
         }
-        if !screen.load_required && load.is_some_and(|l| l.state() == JobState::Failed) {
-            hints.push("Ctrl-R retry repositories".into());
-        }
-        if let Some(prices) = view.price_job() {
-            match prices.state() {
-                JobState::Idle => hints.push("F2 prices".into()),
-                JobState::Running => hints.push("Loading prices...".into()),
-                JobState::Failed => {
-                    let error = prices.error();
-                    hints.push(format!(
-                        "F2 retry prices ({})",
-                        crate::pyfmt::splitlines(&error).first().unwrap_or(&"")
-                    ));
-                }
-                JobState::Done => {}
-            }
+        if (!screen.load_required && load.is_some_and(|l| l.state() == JobState::Failed))
+            || screen
+                .background
+                .iter()
+                .any(|j| j.state() == JobState::Failed)
+        {
+            hints.push("Ctrl-R retry".into());
         }
         hints.join("  ")
     }

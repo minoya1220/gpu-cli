@@ -68,7 +68,7 @@ fn fixture() -> (TestEnv, Ctx, Arc<FakeRunner>, Arc<Mutex<State>>) {
     std::fs::write(path.join("config.json"), CONFIG).unwrap();
     let state = Arc::new(Mutex::new(State::default()));
     let shared = state.clone();
-    let runner = FakeRunner::new(move |cmd| {
+    let native = move |cmd: &Cmd| {
         let mut state = shared.lock().unwrap();
         let a = strs(&cmd.argv);
         if a[0] == "vastai" {
@@ -152,7 +152,8 @@ fn fixture() -> (TestEnv, Ctx, Arc<FakeRunner>, Arc<Mutex<State>>) {
         assert_eq!(a[3], "tpu-vm");
         match a[4] {
             "accelerator-types" => if state.empty_types { ok("[]") } else { ok(r#"[{"type":"v6e-1"}]"#) },
-            "list" => ok(&list(if arg(cmd,"zone") == "us-east5-b" {state.nodes.clone()} else {Vec::new()})),
+            "list" if state.fail_presence => Ok(Output::failed(1,"PERMISSION_DENIED")),
+            "list" => ok(&list(if ["us-east5-b","-"].contains(&arg(cmd,"zone").as_str()) {state.nodes.clone()} else {Vec::new()})),
             "describe" if state.fail_presence => Ok(Output::failed(1,"PERMISSION_DENIED: secret")),
             "describe" => match state.nodes.iter().find(|n| crate::gcp::text(n,"name").is_some_and(|name| name.ends_with(&format!("/{}", a[5])))) {
                 Some(n) => ok(&value(n.clone())), None => Ok(Output::failed(1,"NOT_FOUND: node does not exist")),
@@ -174,6 +175,9 @@ fn fixture() -> (TestEnv, Ctx, Arc<FakeRunner>, Arc<Mutex<State>>) {
             "ssh" => { assert!(a.contains(&"--command=true")); ok("") },
             _ => panic!("unexpected cloud request: {a:?}"),
         }
+    };
+    let runner = FakeRunner::new(move |cmd| {
+        super::gcp_transport::adapt(cmd, &native).unwrap_or_else(|| native(cmd))
     });
     let ctx = env
         .ctx()
@@ -273,10 +277,7 @@ fn unknown_generations_need_an_explicit_runtime_and_known_defaults_can_be_overri
     args.extend(["--tpu", "v99-1", "--dry-run"]);
     assert_eq!(main(&ctx, &args), 1);
     let message = err(&ctx);
-    assert!(
-        message.contains("No automatic runtime is known"),
-        "{message}"
-    );
+    assert!(message.contains("Unknown runtime"), "{message}");
     assert!(message.contains("--runtime <image>"));
     for tpu in ["v99-1", "v5e-1"] {
         let mut args = UP.to_vec();
@@ -397,7 +398,7 @@ fn stockout_with_verified_absence_cleans_its_task_and_reports_one_next_command()
     assert!(message.contains("try another zone or Spot"), "{message}");
     assert_eq!(message.matches("Next:").count(), 1);
     assert!(!message.contains("do-not-print"));
-    assert!(message.contains("deletion task was removed"));
+    assert!(message.contains("deletion task removed"));
     assert!(state.lock().unwrap().tasks.is_empty());
 }
 
@@ -413,7 +414,9 @@ fn lists_are_provider_labelled_and_gcp_only_does_not_require_vast() {
     assert!(!printed.contains("not-for-output"));
     let start = runner.calls().len();
     assert_eq!(main(&ctx, &["ls", "--json", "--provider", "gcp"]), 0);
-    assert!(runner.argvs()[start..].iter().all(|a| a[0] == "gcloud"));
+    assert!(runner.argvs()[start..]
+        .iter()
+        .all(|a| ["gcloud", "curl"].contains(&a[0].as_str())));
     assert!(out(&ctx).contains("\"provider\": \"gcp\""));
 }
 
@@ -519,9 +522,9 @@ fn expiry_replaces_safely_shows_and_cancels_without_guest_access() {
     assert!(runner
         .argvs()
         .iter()
-        .all(|a| a[0] == "gcloud" && !a.contains(&"ssh".into())));
+        .all(|a| ["gcloud", "curl"].contains(&a[0].as_str()) && !a.contains(&"ssh".into())));
     assert_eq!(main(&ctx, &["expire", ID, "show"]), 1);
-    assert!(err(&ctx).contains("NOT armed"));
+    assert!(err(&ctx).contains("unarmed"));
 }
 
 #[test]
@@ -609,6 +612,7 @@ fn tpu_flag_routes_without_provider_and_catalog_jobs_use_real_keys() {
         ("locations", "TPU zone", "us-east5-b"),
         ("accelerator-types", "TPU type", "v6e-1"),
     ] {
+        let _ = std::fs::remove_file(env.cache.join("gpu/tpu-catalog-test-project.json"));
         let gate = super::picker::Gate::default();
         let worker_gate = gate.clone();
         let inner = runner.clone();
@@ -634,7 +638,7 @@ fn tpu_flag_routes_without_provider_and_catalog_jobs_use_real_keys() {
         gate.set();
         assert_eq!(result, Outcome::Done(expected.to_string()));
     }
-    assert_eq!(runner.calls().len(), 4);
+    assert_eq!(runner.calls().len(), 5);
 }
 
 #[test]
@@ -646,7 +650,7 @@ fn catalog_choices_share_a_stack_and_back_does_not_refetch() {
         panic!("missing first screen")
     };
     let result = drive(first, move |keys| {
-        keys.wait(|s| s.title == "TPU zone" && !s.labels.is_empty());
+        keys.wait(|s| s.title == "TPU zone" && s.labels == ["us-east5-b", "us-central1-a"]);
         keys.press_until(ENTER, on("TPU type"));
         keys.wait(|s| s.labels.contains(&"v6e-1".to_string()));
         keys.press_until(ENTER, on("TPU capacity"));
@@ -656,7 +660,7 @@ fn catalog_choices_share_a_stack_and_back_does_not_refetch() {
         keys.press(CTRL_C);
     });
     assert_eq!(result, Outcome::Cancelled(130));
-    assert_eq!(runner.calls().len(), 4);
+    assert_eq!(runner.calls().len(), 3);
 }
 
 #[test]
@@ -740,7 +744,7 @@ fn declining_creation_or_destruction_never_creates_paid_resources() {
 #[test]
 fn malformed_node_list_never_verifies_destruction() {
     let (env, _, _, _) = fixture();
-    let runner = FakeRunner::new(|cmd| {
+    let runner = super::gcp_transport::runner(|cmd| {
         if cmd.argv[1] == "tasks" {
             return ok("[]");
         }
@@ -750,7 +754,7 @@ fn malformed_node_list_never_verifies_destruction() {
     let ctx = env.ctx().runner(&runner).build();
     assert_eq!(main(&ctx, &["down", ID, "--yes"]), 1);
     assert!(err(&ctx).contains("incomplete reply"));
-    assert_eq!(runner.calls().len(), 2);
+    assert_eq!(runner.calls().len(), 3);
 }
 
 #[test]
@@ -760,7 +764,7 @@ fn impossible_type_is_rejected_before_confirmation_or_arming() {
     assert_eq!(main(&ctx, UP), 1);
     let message = err(&ctx);
     assert!(
-        message.contains("v6e-1 is not offered in us-east5-b"),
+        message.contains("v6e-1 unavailable in us-east5-b"),
         "{message}"
     );
     assert!(!runner
@@ -783,9 +787,10 @@ fn orphan_reconciliation_requires_authenticated_absence_and_preserves_other_task
         s.nodes.clear();
         s.fail_presence = true;
     }
-    assert_eq!(main(&ctx, &["ls", "--provider", "gcp"]), 0);
+    assert_eq!(main(&ctx, &["ls", "--provider", "gcp"]), 1);
     assert_eq!(state.lock().unwrap().tasks.len(), 2);
-    assert!(err(&ctx).contains("kept its expiry task"));
+    assert!(err(&ctx).contains("access was denied"));
+    ctx.clock.sleep(61.0);
     state.lock().unwrap().fail_presence = false;
     assert_eq!(main(&ctx, &["ls", "--provider", "gcp"]), 0, "{}", err(&ctx));
     let s = state.lock().unwrap();
@@ -806,6 +811,13 @@ fn ambiguous_create_keeps_timer_and_next_command_reconciles_a_verified_orphan() 
     assert_eq!(main(&ctx, UP), 1);
     assert_eq!(state.lock().unwrap().tasks.len(), 1);
     assert!(err(&ctx).contains("deletion task remains armed"));
+    assert_eq!(main(&ctx, &["ls", "--provider", "gcp"]), 0);
+    assert_eq!(
+        state.lock().unwrap().tasks.len(),
+        1,
+        "do not reap a newly armed task"
+    );
+    ctx.clock.sleep(61.0);
     assert_eq!(main(&ctx, &["ls", "--provider", "gcp"]), 0, "{}", err(&ctx));
     assert!(state.lock().unwrap().tasks.is_empty());
 }
@@ -821,9 +833,9 @@ fn launch_confirmation_quotes_cached_catalog_prices_for_both_capacity_modes() {
         }
         assert_eq!(main(&ctx, &args), 0, "{}", err(&ctx));
         assert!(out(&ctx).contains(if spot {
-            "$0.750/hr USD list (us-east5)"
+            "$0.750/hr (cached 0s)"
         } else {
-            "$2.750/hr USD list (us-east5)"
+            "$2.750/hr (cached 0s)"
         }));
     }
 }
@@ -877,5 +889,59 @@ fn identifiers_and_ssh_stanzas_reject_injection() {
         "sh -c evil",
     ] {
         assert!(crate::gcp_ssh::stanza(&id, command).is_err());
+    }
+}
+
+#[test]
+fn list_uses_constant_calls_independent_of_location_count() {
+    for zones in [1, 130] {
+        let (env, _, _, _) = fixture();
+        let runner = FakeRunner::new(move |cmd| {
+            if cmd.program() == "gcloud" {
+                assert_eq!(cmd.argv[1], "auth");
+                return ok("test-token");
+            }
+            super::gcp_transport::curl(cmd, |url| {
+                if url.contains("/locations?") {
+                    panic!("must not enumerate {zones} zones for ls");
+                }
+                assert!(
+                    url.contains("/locations/-/nodes?")
+                        || url.contains("/queues/gpu-expiry/tasks?")
+                );
+                (200, "{}".into())
+            })
+            .unwrap()
+        });
+        let ctx = env.ctx().runner(&runner).build();
+        assert_eq!(main(&ctx, &["ls", "--provider", "gcp"]), 0, "{}", err(&ctx));
+        assert_eq!(
+            runner.calls().len(),
+            3,
+            "one token + concurrent node/task reads"
+        );
+    }
+}
+#[test]
+fn incomplete_inventory_never_proves_absence() {
+    for payload in [
+        r#"{"nodes":[],"unreachable":["us-east5-b"]}"#,
+        r#"{"nodes":[],"nextPageToken":5}"#,
+        r#"{"acceleratorTypes":[]}"#,
+    ] {
+        let (env, _, _, _) = fixture();
+        let runner = FakeRunner::new(move |cmd| {
+            if cmd.program() == "gcloud" {
+                assert_eq!(cmd.argv[1], "auth");
+                return ok("test-token");
+            }
+            super::gcp_transport::curl(cmd, |_| (200, payload.into())).unwrap()
+        });
+        let ctx = env.ctx().runner(&runner).build();
+        assert!(crate::gcp::all_nodes(&ctx, "test-project").is_err());
+        assert!(!runner
+            .argvs()
+            .iter()
+            .any(|a| a.iter().any(|s| s == "delete")));
     }
 }

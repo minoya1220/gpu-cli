@@ -6,46 +6,7 @@ pub fn region(zone: &str) -> Option<&str> {
     zone.rsplit_once('-').map(|(region, _)| region)
 }
 fn region_coordinates(region: &str) -> Option<(f64, f64)> {
-    Some(match region {
-        "us-west1" => (45.60, -121.18),
-        "us-west2" => (34.05, -118.24),
-        "us-west3" => (40.76, -111.89),
-        "us-west4" => (36.17, -115.14),
-        "us-central1" => (41.26, -95.86),
-        "us-central2" => (36.30, -95.31),
-        "us-east1" => (33.20, -80.01),
-        "us-east4" => (39.04, -77.49),
-        "us-east5" => (39.96, -82.99),
-        "us-south1" => (32.78, -96.80),
-        "northamerica-northeast1" => (45.50, -73.57),
-        "northamerica-northeast2" => (43.65, -79.38),
-        "southamerica-east1" => (-23.55, -46.63),
-        "southamerica-west1" => (-33.45, -70.67),
-        "europe-west1" => (50.45, 3.82),
-        "europe-west2" => (51.51, -0.13),
-        "europe-west3" => (50.11, 8.68),
-        "europe-west4" => (53.44, 6.84),
-        "europe-west6" => (47.38, 8.54),
-        "europe-west8" => (45.46, 9.19),
-        "europe-west9" => (48.86, 2.35),
-        "europe-north1" => (60.57, 27.20),
-        "europe-central2" => (52.23, 21.01),
-        "asia-east1" => (24.07, 120.56),
-        "asia-east2" => (22.32, 114.17),
-        "asia-northeast1" => (35.68, 139.69),
-        "asia-northeast2" => (34.69, 135.50),
-        "asia-northeast3" => (37.57, 126.98),
-        "asia-south1" => (19.08, 72.88),
-        "asia-south2" => (28.61, 77.21),
-        "asia-southeast1" => (1.35, 103.82),
-        "asia-southeast2" => (-6.21, 106.85),
-        "australia-southeast1" => (-33.87, 151.21),
-        "australia-southeast2" => (-37.81, 144.96),
-        "me-west1" => (32.09, 34.78),
-        "me-central1" => (25.29, 51.53),
-        "africa-south1" => (-26.20, 28.05),
-        _ => return None,
-    })
+    crate::gcp_facts::region_coordinates(region)
 }
 // Public-domain IANA tzdb data, embedded so the mapping does not depend on an
 // OS-specific zoneinfo installation. Source: https://data.iana.org/time-zones/tzdb/zone1970.tab

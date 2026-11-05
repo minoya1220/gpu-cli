@@ -88,6 +88,26 @@ impl Sandbox {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
+    pub fn gcp_reads(&self, nodes: &str, prices: bool) {
+        std::fs::write(
+            self.root.join("gcp-nodes.json"),
+            format!("{{\"nodes\":{nodes}}}"),
+        )
+        .unwrap();
+        if prices {
+            std::fs::write(self.root.join("gcp-prices"), "").unwrap();
+        }
+        let data = gpu::pyjson::loads(include_str!("../../src/data/tpu_facts.json")).unwrap();
+        let spot=data.as_dict().unwrap().get("skus").unwrap().as_list().unwrap().iter().filter_map(gpu::pyjson::Value::as_dict).find(|d|matches!(d.get("description"),Some(gpu::pyjson::Value::Str(s)) if s=="TpuV6e attached to Spot Preemptible VMs running in Columbus")).unwrap();
+        let gpu::pyjson::Value::Str(id) = spot.get("id").unwrap() else {
+            panic!("SKU id")
+        };
+        self.stub(
+            "curl",
+            &include_str!("gcp_reads.sh").replace("@SPOT_ID@", id),
+        );
+    }
+
     pub fn env(&self) -> Vec<(String, String)> {
         let path = |p: &Path| p.to_string_lossy().into_owned();
         vec![

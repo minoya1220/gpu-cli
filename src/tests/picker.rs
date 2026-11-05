@@ -478,7 +478,7 @@ fn test_failed_load_shows_error_and_enter_retries() {
 }
 
 #[test]
-fn test_f2_loads_prices_in_the_background_once() {
+fn test_prices_start_in_the_background_once_without_f2() {
     let (gate, calls) = (Gate::default(), Arc::new(AtomicUsize::new(0)));
     let prices = gated(vec![("one".to_string(), "$1".to_string())], &gate, &calls);
     let observer = prices.observer();

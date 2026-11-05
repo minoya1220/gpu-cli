@@ -261,6 +261,10 @@ pub struct Ctx {
     pub env: Arc<Env>,
     runner: Arc<dyn Runner>,
     gcp_setup_session: bool,
+    pub(crate) gcp_tokens: Arc<Mutex<BTreeMap<String, String>>>,
+    pub(crate) gcp_price_lock: Arc<Mutex<()>>,
+    pub(crate) gcp_catalog_lock: Arc<Mutex<()>>,
+    pub(crate) gcp_sku_lock: Arc<Mutex<()>>,
     pub clock: Arc<dyn Clock>,
     pub console: Arc<Console>,
     pub ui: Arc<Ui>,
@@ -272,6 +276,10 @@ impl Ctx {
             env: Arc::new(Env::from_process()),
             runner: Arc::new(RealRunner),
             gcp_setup_session: false,
+            gcp_tokens: Arc::default(),
+            gcp_price_lock: Arc::default(),
+            gcp_catalog_lock: Arc::default(),
+            gcp_sku_lock: Arc::default(),
             clock: Arc::new(RealClock {
                 start: Instant::now(),
             }),
@@ -294,6 +302,10 @@ impl Ctx {
             console,
             ui,
             gcp_setup_session: false,
+            gcp_tokens: Arc::default(),
+            gcp_price_lock: Arc::default(),
+            gcp_catalog_lock: Arc::default(),
+            gcp_sku_lock: Arc::default(),
         }
     }
 

@@ -18,6 +18,7 @@ mod gcp_preferences;
 pub mod gcp_prices;
 mod gcp_retry;
 pub mod gcp_ssh;
+mod gcp_types;
 pub mod gcp_wizard;
 mod gcp_zones;
 pub mod history;

@@ -559,8 +559,12 @@ esac
         assert!(shows("TPU (Google Cloud)")(&term));
         term.press_until(query, |t| t.line(1) == format!("Filter: {query}"));
         if query == "tpu" {
-            term.press_until(ENTER, on("TPU type"));
-            term.press_until("v5e-1", shows("Filter: v5e-1"));
+            term.press_until(ENTER, on("TPU generation"));
+            term.press_until("v5e", shows("Filter: v5e"));
+            term.press_until(RIGHT, on("v5e size"));
+        }
+        if query == "v5e" {
+            term.press_until(ENTER, on("v5e size"));
         }
         term.press_until(ENTER, on("TPU capacity"));
         term.press_until("2", on("TPU zone"));
@@ -735,9 +739,10 @@ printf 'test-token\n'
             "--dry-run",
         ],
     );
-    term.wait(on("TPU type"));
-    term.press_until("v6e-1", shows("Filter: v6e-1"));
-    term.wait(shows("Spot $2.750/hr"));
+    term.wait(on("TPU generation"));
+    term.press_until("v6e", shows("Filter: v6e"));
+    term.press_until(RIGHT, on("v6e size"));
+    term.wait(shows("1 chip · $2.750/hr · Spot $2.750/hr"));
     term.press_until(ENTER, on("TPU zone"));
     term.wait(shows("us-east (1 zone)"));
     assert!(
@@ -756,4 +761,48 @@ printf 'test-token\n'
     term.wait(shows("us-east5-b · $0.750/hr"));
     term.press("\x03");
     assert_eq!(term.exit_status(), 130);
+}
+
+#[test]
+fn test_cloud_generation_and_size_back_restore_gpu_page_for_left_and_backtick() {
+    for back in [LEFT, BACK] {
+        let sandbox = Sandbox::new();
+        let config = sandbox.root.join("config/gpu");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(config.join("config.json"),r#"{"gcp":{"setup":{"version":1,"project":"test-project"},"project":"test-project","expiry":{"queue":"gpu-expiry","location":"us-central1","service_account":"reaper@test-project.iam.gserviceaccount.com"}}}"#).unwrap();
+        sandbox.gcp_reads("[]", true);
+        sandbox.stub(
+            "gcloud",
+            r#"#!/bin/sh
+printf 'gcloud\n' >> "$FAKE_CLI_LOG"
+[ "$*" = 'auth print-access-token --project=test-project --quiet' ] || exit 97
+printf 'test-token\n'
+"#,
+        );
+        let mut term = Terminal::start(
+            &sandbox,
+            &["up", "--no-repo", "--expire", "2h", "--dry-run"],
+        );
+        term.wait(on("Mode"));
+        term.press_until("1", on("GPU"));
+        term.press_until("tpu", shows("Filter: tpu"));
+        assert!(
+            term.lines().iter().filter(|l| l.contains("TPU v")).count() <= 6,
+            "root must show generations, not every size"
+        );
+        term.press_until(RIGHT, on("TPU generation"));
+        assert!(!term.last_line().contains("quit (twice)"));
+        term.press_until(RIGHT, on("v5e size"));
+        assert!(shows("chip")(&term));
+        assert!(!term.last_line().contains("quit (twice)"));
+        term.press_until(back, on("TPU generation"));
+        term.press_until(back, on("GPU"));
+        assert_eq!(term.line(1), "Filter: tpu");
+        term.press("\x03");
+        assert_eq!(term.exit_status(), 130);
+        assert!(!sandbox
+            .calls()
+            .iter()
+            .any(|c| c.iter().any(|a| a == "create" || a == "create-http-task")));
+    }
 }

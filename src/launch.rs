@@ -196,6 +196,7 @@ pub fn prompt_for_picks(
             gpu: Some(gpu),
             offer: None,
             tpu: None,
+            cloud: None,
         },
         offers,
     ))
@@ -301,6 +302,7 @@ pub fn launch(ctx: &Ctx, args: &UpArgs, cfg: &Dict, deadline: Option<Timestamp>)
         gpu: args.gpu.clone(),
         offer: None,
         tpu: None,
+        cloud: None,
     };
     let (picks, offer) = if ctx.interactive() {
         let repo_ctx = ctx.clone();
@@ -329,6 +331,7 @@ pub fn launch(ctx: &Ctx, args: &UpArgs, cfg: &Dict, deadline: Option<Timestamp>)
                     None,
                 ),
                 tpu_catalog: Some(crate::gcp_catalog::types_job(ctx, cfg)),
+                tpu_transition: Some(crate::gcp_wizard::transition(ctx, args, cfg, deadline)),
                 tpu_setup_error: crate::gcp::launch_setup(ctx, cfg)
                     .err()
                     .map(|e| e.text().to_string()),
@@ -337,8 +340,8 @@ pub fn launch(ctx: &Ctx, args: &UpArgs, cfg: &Dict, deadline: Option<Timestamp>)
         );
         let picks = wizard.run(ctx, picks)?;
         if picks.tpu.is_some() {
-            // The picker only returns a provider choice. Cloud work starts here,
-            // after its input loop has exited, never in a screen transition.
+            // Provision only after the shared picker completes. Its cloud reads
+            // run in Jobs; Back never crosses a torn-down picker boundary.
             return crate::gcp::launch_from_picker(ctx, args, &picks, cfg, deadline);
         }
         let offer = match &picks.offer {

@@ -89,6 +89,7 @@ fn wizard(
             recent_gpus: recent.iter().map(|s| s.to_string()).collect(),
             choose_offer,
             tpu_setup_error: None,
+            tpu_transition: None,
             tpu_prices: None,
             tpu_cached_prices: None,
             tpu_types: Vec::new(),
@@ -151,6 +152,7 @@ fn test_back_walks_every_screen_without_refetching_or_quitting() {
         gpu: Some("RTX 4090".into()),
         offer: Some(offer(1, "RTX 4090", 0.5)),
         tpu: None,
+        cloud: None,
     };
     assert_eq!(result, Outcome::Done(expected));
     assert_eq!(repo_calls.load(Ordering::SeqCst), 1);
@@ -169,6 +171,7 @@ fn test_repository_shortcuts_full_list_and_global_filter() {
                 recent_gpus: Vec::new(),
                 choose_offer: false,
                 tpu_setup_error: None,
+                tpu_transition: None,
                 tpu_prices: None,
                 tpu_cached_prices: None,
                 tpu_types: Vec::new(),
@@ -252,6 +255,7 @@ fn test_short_repository_lists_keep_static_digits_and_omit_all() {
                 recent_gpus: Vec::new(),
                 choose_offer: false,
                 tpu_setup_error: None,
+                tpu_transition: None,
                 tpu_prices: None,
                 tpu_cached_prices: None,
                 tpu_types: Vec::new(),
@@ -376,6 +380,7 @@ fn test_auto_prices_are_shared_by_gpu_screens_and_loaded_once_per_mode() {
         gpu: Some("RTX 4090".into()),
         offer: None,
         tpu: None,
+        cloud: None,
     };
     assert_eq!(result, Outcome::Done(expected));
     assert_eq!(
@@ -451,7 +456,7 @@ fn test_gpu_screen_caps_valid_recents_at_three_and_always_lists_tpus() {
 fn test_gpu_search_finds_tpu_category_and_types_without_cloud_config() {
     for (query, expected) in [
         ("tpu", TpuChoice::ChooseType),
-        ("v5e", TpuChoice::Type("v5e-1".into())),
+        ("v5e", TpuChoice::Type("v5e".into())),
         ("v6e-1", TpuChoice::Type("v6e-1".into())),
     ] {
         let t = TestEnv::new();
@@ -460,6 +465,9 @@ fn test_gpu_search_finds_tpu_category_and_types_without_cloud_config() {
         let start = Picks::new(named("other"), Some("vm"), None);
         let result = run(&flow, start.clone(), move |keys| {
             keys.type_text(query);
+            if query == "tpu" {
+                assert!(keys.labels().len() <= 7, "show generations, not all sizes");
+            }
             assert!(!keys.labels().is_empty());
             assert!(keys.labels().iter().all(|s| s.contains("TPU")));
             keys.press(ENTER);

@@ -404,18 +404,27 @@ pub fn launch_from_picker(
     cfg: &Dict,
     deadline: Option<Timestamp>,
 ) -> Result<()> {
+    let flags = picker_flags(args, picks);
+    let deadline = picks.cloud.as_ref().and_then(|s| s.expiry_at).or(deadline);
+    launch(ctx, &flags, cfg, deadline)
+}
+pub(crate) fn picker_flags(args: &crate::launch::UpArgs, picks: &crate::wizard::Picks) -> UpFlags {
     let repo = picks.repo.clone().unwrap_or(crate::repos::Repo::NoRepo);
     let tpu = match &picks.tpu {
         Some(crate::wizard::TpuChoice::Type(tpu)) => Some(tpu.clone()),
         _ => None,
     };
-    let flags = UpFlags {
+    UpFlags {
         provider: Some("gcp".into()),
-        tpu,
-        zone: None,
+        tpu: picks.cloud.as_ref().and_then(|s| s.tpu.clone()).or(tpu),
+        zone: picks.cloud.as_ref().and_then(|s| s.zone.clone()),
         runtime: None,
-        spot: false,
-        on_demand: false,
+        spot: picks.cloud.as_ref().and_then(|s| s.spot).unwrap_or(false),
+        on_demand: picks
+            .cloud
+            .as_ref()
+            .and_then(|s| s.spot)
+            .is_some_and(|spot| !spot),
         repo: if repo == crate::repos::Repo::NoRepo {
             None
         } else {
@@ -434,8 +443,25 @@ pub fn launch_from_picker(
         expire: args.expire.clone(),
         reliability: args.reliability,
         unverified: args.unverified,
-    };
-    launch(ctx, &flags, cfg, deadline)
+    }
+}
+
+pub(crate) fn validate_tpu_flags(flags: &UpFlags) -> Result<()> {
+    if flags.mode.is_some()
+        || flags.gpu.is_some()
+        || flags.num_gpus != 1
+        || flags.max_price.is_some()
+        || flags.interruptible
+        || flags.offer.is_some()
+        || flags.disk.is_some()
+        || flags.reliability.is_some()
+        || flags.unverified
+    {
+        return Err(Error::msg(
+            "Vast GPU/offer/disk flags do not apply to TPUs. Next: gpu up --provider gcp --help",
+        ));
+    }
+    Ok(())
 }
 
 pub fn launch(ctx: &Ctx, flags: &UpFlags, cfg: &Dict, deadline: Option<Timestamp>) -> Result<()> {
@@ -453,20 +479,7 @@ pub(crate) fn launch_with_retry(
     ) -> Result<Option<crate::gcp_retry::Choice>>,
 ) -> Result<()> {
     let (settings, queue) = launch_setup(ctx, cfg)?;
-    if flags.mode.is_some()
-        || flags.gpu.is_some()
-        || flags.num_gpus != 1
-        || flags.max_price.is_some()
-        || flags.interruptible
-        || flags.offer.is_some()
-        || flags.disk.is_some()
-        || flags.reliability.is_some()
-        || flags.unverified
-    {
-        return Err(Error::msg(
-            "Vast GPU/offer/disk flags do not apply to TPUs. Next: gpu up --provider gcp --help",
-        ));
-    }
+    validate_tpu_flags(flags)?;
     let mut picks = crate::gcp_wizard::choose(ctx, flags, &settings, cfg, deadline)?;
     let deadline = picks.deadline;
     let mut confirm = !flags.yes;
@@ -480,6 +493,7 @@ pub(crate) fn launch_with_retry(
             queue.reconcile(ctx)?;
             crate::gcp_catalog::verify(ctx, &settings.project, &picks.zone, &picks.tpu)?;
             crate::gcp_preferences::remember(ctx, &settings.project, &picks.zone);
+            crate::gcp_preferences::remember_type(ctx, &settings.project, &picks.tpu);
         }
         let id = TpuId {
             project: settings.project.clone(),

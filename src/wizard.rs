@@ -26,6 +26,7 @@ pub const TPU_CATEGORY: &str = "TPU (Google Cloud)";
 #[derive(Clone, Debug, PartialEq)]
 pub enum TpuChoice {
     ChooseType,
+    /// A generation shortcut, or a complete generation-size accelerator name.
     Type(String),
 }
 
@@ -37,6 +38,7 @@ pub struct Picks {
     pub gpu: Option<String>,
     pub offer: Option<Dict>,
     pub tpu: Option<TpuChoice>,
+    pub(crate) cloud: Option<crate::gcp_wizard::Selection>,
 }
 
 impl Picks {
@@ -47,6 +49,7 @@ impl Picks {
             gpu: gpu.map(String::from),
             offer: None,
             tpu: None,
+            cloud: None,
         }
     }
 }
@@ -58,6 +61,7 @@ pub enum Choice {
     AllRepos,
     CloneUrl,
     Text(String),
+    Cloud(String),
     Mode(String),
     Gpu(String),
     Tpu(TpuChoice),
@@ -87,6 +91,8 @@ impl Search for OfferSearch {
     }
 }
 
+pub type CloudTransition = Rc<dyn Fn(LaunchWizard, Picks) -> Next<Choice, Picks>>;
+
 type WizardScreen = Screen<Choice, Picks>;
 type Step = Next<Choice, Picks>;
 
@@ -104,6 +110,7 @@ struct State {
     recent_gpus: Vec<String>,
     choose_offer: bool,
     tpu_setup_error: Option<String>,
+    tpu_transition: Option<CloudTransition>,
     tpu_prices: Job<Arc<crate::gcp_prices::Prices>>,
     tpu_cached_prices: Option<Arc<crate::gcp_prices::Prices>>,
     tpu_types: Vec<String>,
@@ -129,6 +136,7 @@ pub struct WizardOptions {
     pub choose_offer: bool,
     /// Local config preflight only; no cloud calls on a screen transition.
     pub tpu_setup_error: Option<String>,
+    pub tpu_transition: Option<CloudTransition>,
     pub tpu_prices: Option<Job<Arc<crate::gcp_prices::Prices>>>,
     pub tpu_cached_prices: Option<Arc<crate::gcp_prices::Prices>>,
     pub tpu_types: Vec<String>,
@@ -160,6 +168,7 @@ impl LaunchWizard {
                 recent_gpus,
                 choose_offer: options.choose_offer,
                 tpu_setup_error: options.tpu_setup_error,
+                tpu_transition: options.tpu_transition,
                 tpu_cached_prices: options.tpu_cached_prices,
                 tpu_types: options.tpu_types,
                 tpu_catalog: options.tpu_catalog,
@@ -434,15 +443,26 @@ impl LaunchWizard {
     }
     fn tpu_label(&self, tpu: Option<&str>) -> String {
         if let Some(prices) = self.tpu_prices() {
-            return tpu.map(|t| prices.label(t)).unwrap_or_else(|| {
-                prices.category_label(
-                    &self
-                        .tpu_types()
-                        .iter()
-                        .map(String::as_str)
-                        .collect::<Vec<_>>(),
-                )
-            });
+            return tpu
+                .map(|t| {
+                    if t.contains('-') {
+                        prices.label(t)
+                    } else {
+                        let types = crate::gcp_types::members(&self.tpu_types(), t);
+                        prices
+                            .category_label(&types.iter().map(String::as_str).collect::<Vec<_>>())
+                            .replacen(TPU_CATEGORY, &format!("TPU {t}"), 1)
+                    }
+                })
+                .unwrap_or_else(|| {
+                    prices.category_label(
+                        &self
+                            .tpu_types()
+                            .iter()
+                            .map(String::as_str)
+                            .collect::<Vec<_>>(),
+                    )
+                });
         }
         let base = tpu
             .map(|t| format!("TPU {t}"))
@@ -492,7 +512,7 @@ impl LaunchWizard {
         };
         let searching = {
             let prices = prices.clone();
-            move || {
+            move |query: &str| {
                 let stats = prices.result().unwrap_or_default();
                 let status = prices.state();
                 let mut options = search
@@ -511,7 +531,13 @@ impl LaunchWizard {
                     Choice::Tpu(TpuChoice::ChooseType),
                     search.tpu_label(None),
                 ));
-                options.extend(search.tpu_types().into_iter().map(|t| {
+                let types = search.tpu_types();
+                let values = if query.contains('-') {
+                    types
+                } else {
+                    crate::gcp_types::generations(&types)
+                };
+                options.extend(values.into_iter().map(|t| {
                     Opt::new(
                         Choice::Tpu(TpuChoice::Type(t.clone())),
                         search.tpu_label(Some(&t)),
@@ -528,17 +554,24 @@ impl LaunchWizard {
             }),
             Choice::Tpu(tpu) => match &this.state.tpu_setup_error {
                 Some(message) => Next::Notice(format!("{message}\nNo TPU created.")),
-                None => this.next(Picks {
-                    tpu: Some(tpu),
-                    ..follow.clone()
-                }),
+                None => {
+                    let picks = Picks {
+                        tpu: Some(tpu),
+                        ..follow.clone()
+                    };
+                    if let Some(flow) = &this.state.tpu_transition {
+                        flow(this.clone(), picks)
+                    } else {
+                        this.next(picks)
+                    }
+                }
             },
             Choice::Category(category) => {
                 Next::Screen(this.category_screen(follow.clone(), category))
             }
             _ => unreachable!(),
         })
-        .search(searching)
+        .search_filtered(searching)
         .quick_select(false)
         .prices(prices)
         .prices(self.state.tpu_prices.clone())

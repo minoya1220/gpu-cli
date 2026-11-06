@@ -25,3 +25,27 @@ pub(crate) fn remember(ctx: &Ctx, project: &str, zone: &str) {
         let _ = crate::history::record_picks(&ctx.env, &[(&key(project), zone)]);
     }
 }
+
+pub(crate) fn generation(ctx: &Ctx, project: &str) -> Option<String> {
+    crate::history::recent_picks(&ctx.env, &format!("gcp_generation:{project}"))
+        .into_iter()
+        .find(|g| gcp::component(g))
+}
+pub(crate) fn accelerator(ctx: &Ctx, project: &str, generation: &str) -> Option<String> {
+    crate::history::recent_picks(&ctx.env, &format!("gcp_size:{project}:{generation}"))
+        .into_iter()
+        .find(|t| crate::gcp_types::generation(t) == Some(generation))
+}
+pub(crate) fn remember_type(ctx: &Ctx, project: &str, tpu: &str) {
+    let Some(generation) = crate::gcp_types::generation(tpu) else {
+        return;
+    };
+    let public = crate::gcp_types::public(tpu.into());
+    let _ = crate::history::record_picks(
+        &ctx.env,
+        &[
+            (&format!("gcp_generation:{project}"), generation),
+            (&format!("gcp_size:{project}:{generation}"), &public),
+        ],
+    );
+}

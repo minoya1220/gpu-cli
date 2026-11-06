@@ -19,6 +19,7 @@ pub fn flow(t: &TestEnv, job: Job<Vec<String>>) -> LaunchWizard {
             recent_gpus: Vec::new(),
             choose_offer: false,
             tpu_setup_error: None,
+            tpu_transition: None,
             tpu_prices: None,
             tpu_cached_prices: None,
             tpu_types: Vec::new(),

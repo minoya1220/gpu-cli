@@ -231,6 +231,7 @@ fn tpu_prices_load_automatically_and_no_setup_note_is_visible() {
                 recent_gpus: Vec::new(),
                 choose_offer: false,
                 tpu_setup_error: (!configured).then(|| "needs gpu setup".into()),
+                tpu_transition: None,
                 tpu_prices: Some(job),
                 tpu_cached_prices: None,
                 tpu_types: Vec::new(),

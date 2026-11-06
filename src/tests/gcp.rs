@@ -662,8 +662,11 @@ fn catalog_choices_share_a_stack_and_back_does_not_refetch() {
         panic!("missing first screen")
     };
     let result = drive(first, move |keys| {
-        keys.wait(on("TPU type"));
-        keys.type_text("v6e-1");
+        keys.wait(on("TPU generation"));
+        assert!(keys.labels().len() <= 7);
+        keys.type_text("v6e");
+        keys.press_until(RIGHT, on("v6e size"));
+        assert!(keys.labels().iter().all(|l| l.contains("chip")));
         keys.press_until(ENTER, on("TPU capacity"));
         keys.press_until(ENTER, on("TPU zone"));
         keys.wait(|s| s.labels == ["us-east (1 zone)", "us-central (1 zone)"]);
@@ -673,7 +676,8 @@ fn catalog_choices_share_a_stack_and_back_does_not_refetch() {
         keys.press_until(BACK, on("us-east zones"));
         keys.press_until(BACK, on("TPU zone"));
         keys.press_until(BACK, on("TPU capacity"));
-        keys.press_until(BACK, on("TPU type"));
+        keys.press_until(BACK, on("v6e size"));
+        keys.press_until(BACK, on("TPU generation"));
         keys.press(CTRL_C);
     });
     assert_eq!(result, Outcome::Cancelled(130));
@@ -1285,6 +1289,14 @@ fn remembered_zone_is_project_scoped_and_does_not_replace_config() {
         crate::gcp_preferences::last(&ctx, "test-project"),
         Some("us-east5-a".into())
     );
+    assert_eq!(
+        crate::gcp_preferences::generation(&ctx, "test-project"),
+        Some("v6e".into())
+    );
+    assert_eq!(
+        crate::gcp_preferences::accelerator(&ctx, "test-project", "v6e"),
+        Some("v6e-1".into())
+    );
     assert_eq!(crate::gcp_preferences::last(&ctx, "other-project"), None);
     let cfg = dict(&read(&env.config.join("gpu/config.json")));
     assert_eq!(
@@ -1338,4 +1350,120 @@ fn type_filter_counts_and_prices_exclude_unsupported_remembered_zone() {
     assert!(
         matches!(result,Outcome::Done(ref zone) if ["us-east5-a","us-east5-b"].contains(&zone.as_str()))
     );
+}
+
+#[test]
+fn full_type_cli_alias_is_offline_and_preserves_canonical_accelerator_name() {
+    let (_env, ctx, runner, _state) = fixture();
+    assert_eq!(
+        main(
+            &ctx,
+            &[
+                "up",
+                "--type",
+                "v5e-4",
+                "--zone",
+                "us-east5-b",
+                "--no-repo",
+                "--spot",
+                "--expire",
+                "2h",
+                "--dry-run"
+            ]
+        ),
+        0,
+        "{}",
+        err(&ctx)
+    );
+    assert!(out(&ctx).contains("--accelerator-type=v5litepod-4"));
+    assert!(runner.calls().is_empty());
+}
+#[test]
+fn generation_and_size_preferences_are_scoped_and_highlight_without_reordering() {
+    use crate::picker::{testing::*, Next, Outcome};
+    let (_env, ctx, _runner, _state) = fixture();
+    crate::gcp_preferences::remember_type(&ctx, "test-project", "v5p-16");
+    assert_eq!(
+        crate::gcp_preferences::generation(&ctx, "other-project"),
+        None
+    );
+    let settings = crate::gcp::Settings::load(&dict(CONFIG)).unwrap();
+    let Next::Screen(first) = crate::gcp_wizard::next(ctx, settings, Default::default()) else {
+        panic!("generation")
+    };
+    let result = drive(first, |keys| {
+        keys.wait(on("TPU generation"));
+        assert!(keys.labels().len() <= 7);
+        assert!(keys
+            .snapshot()
+            .body
+            .iter()
+            .any(|s| s.starts_with('›') && s.contains("v5p")));
+        keys.press_until(RIGHT, on("v5p size"));
+        assert!(keys.labels()[0].starts_with("8 TensorCores · 4 chips"));
+        assert!(keys
+            .snapshot()
+            .body
+            .iter()
+            .any(|s| s.starts_with('›') && s.contains("16 TensorCores · 8 chips")));
+        assert!(!keys.labels().iter().any(|s| s.contains("pod")));
+        keys.press_until(BACK, on("TPU generation"));
+        keys.press(CTRL_C);
+    });
+    assert_eq!(result, Outcome::Cancelled(130));
+}
+#[test]
+fn mapped_cloud_completion_still_waits_for_cached_repository_validation() {
+    use crate::picker::{testing::*, Job, Next, Outcome};
+    let (env, ctx, _runner, _state) = fixture();
+    crate::repos::save_cached_repos(&ctx.env, "owner", &["demo".into()]).unwrap();
+    let gate = super::picker::Gate::default();
+    let blocked = gate.clone();
+    let cfg = crate::config::load_config(&ctx.env).unwrap();
+    let wizard = crate::wizard::LaunchWizard::new(
+        &env.env(),
+        crate::wizard::WizardOptions {
+            repos: Job::new(move || {
+                assert!(blocked.wait());
+                Ok(vec!["demo".into()])
+            }),
+            search: None,
+            models: Vec::new(),
+            recent_gpus: Vec::new(),
+            choose_offer: false,
+            tpu_setup_error: None,
+            tpu_transition: Some(crate::gcp_wizard::transition(
+                &ctx,
+                &crate::launch::UpArgs {
+                    num_gpus: 1,
+                    ..Default::default()
+                },
+                &cfg,
+                Some("2026-11-03T02:00:00Z".parse().unwrap()),
+            )),
+            tpu_prices: None,
+            tpu_cached_prices: None,
+            tpu_types: Vec::new(),
+            tpu_catalog: None,
+            owner: "owner".into(),
+        },
+    );
+    let Next::Screen(first) = wizard.next(crate::wizard::Picks::new(None, Some("container"), None))
+    else {
+        panic!("repo")
+    };
+    let result = drive(first, |keys| {
+        keys.wait(|s| s.labels.iter().any(|l| l.contains("demo")));
+        keys.press_until(ENTER, on("GPU"));
+        keys.press_until(ENTER, on("TPU generation"));
+        keys.type_text("v6e");
+        keys.press_until(RIGHT, on("v6e size"));
+        keys.press_until(ENTER, on("TPU capacity"));
+        keys.press_until(ENTER, on("TPU zone"));
+        keys.type_text("us-east5-b");
+        keys.press_until(ENTER, on("Checking repositories"));
+        keys.press(CTRL_C);
+    });
+    gate.set();
+    assert_eq!(result, Outcome::Cancelled(130));
 }

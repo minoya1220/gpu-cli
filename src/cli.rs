@@ -105,8 +105,8 @@ pub struct UpFlags {
     /// Provider (optional; TPU flags or a TPU picked on the GPU screen use gcp)
     #[arg(long, value_parser = ["vast", "gcp"])]
     pub provider: Option<String>,
-    /// TPU accelerator type, e.g. v5e-1 or v6e-1
-    #[arg(long)]
+    /// Full TPU accelerator type, e.g. v5e-1 or v6e-1
+    #[arg(long, visible_alias = "type")]
     pub tpu: Option<String>,
     /// Google Cloud zone (overrides gcp.zone)
     #[arg(long)]

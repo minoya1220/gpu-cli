@@ -67,6 +67,7 @@ pub enum Next<V, R> {
 }
 
 type Options<V> = Box<dyn Fn() -> Vec<Opt<V>>>;
+type SearchOptions<V> = Box<dyn Fn(&str) -> Vec<Opt<V>>>;
 /// Checks text entry; the error is shown inline.
 pub type Validate = Box<dyn Fn(&str) -> std::result::Result<(), String>>;
 type Settled<V, R> = Box<dyn Fn() -> Option<Next<V, R>>>;
@@ -82,7 +83,7 @@ pub struct Screen<V, R> {
     pub options: Options<V>,
     pub select: Box<dyn Fn(V) -> Next<V, R>>,
     /// Options searched instead of `options` while a filter is typed.
-    pub search: Option<Options<V>>,
+    pub search: Option<SearchOptions<V>>,
     /// Must finish before options are shown; starts when the screen first opens.
     pub load: Option<Box<dyn AnyJob>>,
     pub loading: String,
@@ -137,8 +138,66 @@ impl<V: PickValue, R: 'static> Screen<V, R> {
     }
 
     pub fn search(mut self, search: impl Fn() -> Vec<Opt<V>> + 'static) -> Self {
+        self.search = Some(Box::new(move |_| search()));
+        self
+    }
+
+    /// Query-aware discovery without expanding all variants for a broad filter.
+    pub fn search_filtered(mut self, search: impl Fn(&str) -> Vec<Opt<V>> + 'static) -> Self {
         self.search = Some(Box::new(search));
         self
+    }
+
+    /// Adapt a nested flow without ending the current loop or losing its stack.
+    pub(crate) fn remap<W: PickValue, S: 'static>(
+        self,
+        wrap: Rc<dyn Fn(V) -> W>,
+        unwrap: Rc<dyn Fn(W) -> V>,
+        done: Rc<dyn Fn(R) -> Next<W, S>>,
+    ) -> Screen<W, S> {
+        let options = self.options;
+        let output = wrap.clone();
+        let select = self.select;
+        let w = wrap.clone();
+        let u = unwrap.clone();
+        let d = done.clone();
+        let search = self.search.map(|source| {
+            let w = wrap.clone();
+            Box::new(move |q: &str| map_options(source(q), &w)) as SearchOptions<W>
+        });
+        let note = self.selection_note.map(|note| {
+            let u = unwrap.clone();
+            Box::new(move |value: &W| note(&u(value.clone()))) as SelectionNote<W>
+        });
+        let settled = self.on_settled.map(|callback| {
+            let w = wrap.clone();
+            let u = unwrap.clone();
+            let d = done.clone();
+            Box::new(move || callback().map(|n| map_next(n, w.clone(), u.clone(), d.clone())))
+                as Settled<W, S>
+        });
+        Screen {
+            title: self.title,
+            options: Box::new(move || map_options(options(), &output)),
+            select: Box::new(move |v| map_next(select(u(v)), w.clone(), unwrap.clone(), d.clone())),
+            search,
+            selection_note: note,
+            on_settled: settled,
+            load: self.load,
+            loading: self.loading,
+            empty: self.empty,
+            background: self.background,
+            quick_select: self.quick_select,
+            load_required: self.load_required,
+            text_input: self.text_input,
+            input_label: self.input_label,
+            input_hint: self.input_hint,
+            back_clears_input: self.back_clears_input,
+            validate: self.validate,
+            notice: self.notice,
+            wait_initial: self.wait_initial,
+            initial_cursor: self.initial_cursor,
+        }
     }
 
     pub fn load(mut self, job: impl AnyJob + 'static) -> Self {
@@ -220,6 +279,29 @@ impl<V: PickValue, R: 'static> Screen<V, R> {
     }
 }
 
+fn map_options<V, W>(options: Vec<Opt<V>>, wrap: &Rc<dyn Fn(V) -> W>) -> Vec<Opt<W>> {
+    options
+        .into_iter()
+        .map(|o| Opt {
+            value: wrap(o.value),
+            label: o.label,
+            digit: o.digit,
+        })
+        .collect()
+}
+fn map_next<V: PickValue, R: 'static, W: PickValue, S: 'static>(
+    next: Next<V, R>,
+    wrap: Rc<dyn Fn(V) -> W>,
+    unwrap: Rc<dyn Fn(W) -> V>,
+    done: Rc<dyn Fn(R) -> Next<W, S>>,
+) -> Next<W, S> {
+    match next {
+        Next::Screen(s) => Next::Screen(s.remap(wrap, unwrap, done)),
+        Next::Notice(m) => Next::Notice(m),
+        Next::Done(r) => done(r),
+    }
+}
+
 /// A screen on the navigation stack with its filter and cursor.
 struct View<V, R> {
     screen: Rc<Screen<V, R>>,
@@ -257,7 +339,7 @@ impl<V: PickValue, R: 'static> View<V, R> {
             return Vec::new();
         }
         let source = match &self.screen.search {
-            Some(search) if !self.filter.is_empty() => search(),
+            Some(search) if !self.filter.is_empty() => search(&self.filter),
             _ => (self.screen.options)(),
         };
         let needle = casefold(&self.filter);

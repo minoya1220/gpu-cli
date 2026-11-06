@@ -32,8 +32,8 @@ In the terminal picker:
 
 - Type to filter, use ↑/↓ to move, and Enter or → to select.
 - Press backtick (`) or ← to clear the filter, then go back. On the first screen, press twice to quit. Ctrl-C or Ctrl-D quits from any screen; Esc does nothing.
-- The GPU screen shows at most **three Recent** rows, GPU categories, and **TPU (Google Cloud)**. Type `tpu` to find the TPU category, or `v5e` / `v6e-1` to pick a common TPU type directly. TPU discovery is visible even before Google Cloud is configured. Before Google Cloud setup, selecting it keeps a notice pointing to `gpu setup` on screen, including the exact config file path; no Google Cloud command runs and no TPU is created. Press ← or backtick to return to the GPU choices, or Ctrl-C to quit.
-- GPU/TPU prices load automatically without blocking input. TPU rows need `gpu setup`; cached estimates show their age. Choose a TPU type first, then its area and priced zone. Digits filter names; on short, unfiltered lists, 1-9 select directly.
+- The GPU screen shows at most **three Recent** rows, GPU categories, and **TPU (Google Cloud)**. Type `tpu` to find the TPU category, `v5e` for a generation, or `v6e-1` for a full TPU type. TPU discovery is visible even before Google Cloud is configured. Before Google Cloud setup, selecting it keeps a notice pointing to `gpu setup` on screen, including the exact config file path; no Google Cloud command runs and no TPU is created. Press ← or backtick to return to the GPU choices, or Ctrl-C to quit.
+- GPU/TPU prices load automatically without blocking input. TPU rows need `gpu setup`; cached estimates show their age. Choose a TPU generation and size, then its area and priced zone. Digits filter names; on short, unfiltered lists, 1-9 select directly.
 - On the Repository screen, **1–7** select the first seven repos, **8** opens **All repositories...** (when there are more than seven), **9** opens **Clone from URL...**, and **0** selects **No repository** at the bottom. Type to filter across all repos, including those not initially shown.
 - Choose **No repository** or **Clone from URL...** without waiting for GitHub. Paste a URL or `owner/name`, then Enter. Backspace edits; arrows select or go back, not move the text cursor.
 - Press Enter to retry a failed offer load; Ctrl-R retries repositories. With piped input, the CLI uses numbered line prompts instead.
@@ -182,13 +182,19 @@ gpu setup --provider gcp --project PROJECT --location us-central1 --confirm-proj
 or validate a TPU zone: that belongs to launch. Existing explicit `gcp.zone`
 settings remain compatible; setup's old `--zone` flag now points to launch.
 
-At launch, choose **TPU type → capacity → area → zone**, then the deadline.
-Direct type/capacity flags skip their screens. Type rows show price estimates
-for the displayed reference region. Areas include only zones offering that
+At launch, choose **generation → size → capacity → area → zone**, then the
+deadline. Generation and size are remembered per project. Size rows show prices
+for the displayed reference region; Spot/on-demand estimates load without
+blocking input. v5e/v6e suffixes count **chips**; v2/v3/v4/v5p suffixes count
+**TensorCores** (two per chip), not pods. Rows show both counts where applicable.
+Full `--tpu v6e-1` / `--type v6e-1` names still work and skip generation/size;
+capacity flags skip their screen. Areas include only zones offering that
 type; counts are matching zones, not stock. Enter/→ opens that area's zones,
 each priced for the chosen type and Spot/on-demand mode. There are no per-zone
-type badges. Back restores the previous screen; typing a full zone name on the
-area screen searches matching zones directly.
+type badges. Typing a full zone name on the area screen searches matching zones
+directly. Back/Left/backtick returns one
+screen at a time, including from the TPU screens to the GPU picker that opened
+them. A direct `--provider gcp` invocation has no earlier GPU page.
 
 The last chosen zone is remembered per project in local history. Its area and
 zone are highlighted when they still offer the selected type, without changing

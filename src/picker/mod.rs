@@ -539,22 +539,23 @@ impl<V: PickValue, R: 'static> Core<V, R> {
             return;
         }
         // A selection notice is modal: don't change hidden choices or let
-        // buffered Enter presses dismiss setup instructions before they are read.
+        // buffered selection presses dismiss setup instructions before they are read.
         if self.view().selection_notice.is_some()
-            && !matches!(key, Key::Left | Key::Char('`') | Key::CtrlC | Key::CtrlD)
+            && !matches!(key, Key::Left | Key::CtrlC | Key::CtrlD)
         {
             return;
         }
         // Any key but a back key disarms the first-screen quit, including ignored keys.
-        let back = matches!(key, Key::Left | Key::Char('`'));
+        let back = matches!(key, Key::Left);
         if !back {
             self.quit_pending = false;
         }
         match key {
             Key::Up => self.move_cursor(-1),
             Key::Down => self.move_cursor(1),
-            Key::Enter | Key::Right => self.enter(),
-            Key::Left | Key::Char('`') => {
+            Key::Right => self.enter(),
+            Key::Enter if self.view().screen.text_input => self.enter(),
+            Key::Left => {
                 if self.view().selection_notice.is_some() {
                     self.view_mut().selection_notice = None;
                 } else if !self.view().filter.is_empty() && self.view().screen.back_clears_input {
@@ -582,8 +583,8 @@ impl<V: PickValue, R: 'static> Core<V, R> {
                     self.view_mut().set_filter(filter);
                 }
             }
+            Key::Char('`') | Key::Enter | Key::Escape | Key::Ignored | Key::F2 => {}
             Key::Char(c) => self.type_char(c),
-            Key::Escape | Key::Ignored | Key::F2 => {}
         }
     }
 
@@ -757,36 +758,41 @@ impl<V: PickValue, R: 'static> Core<V, R> {
     pub fn footer(&self) -> String {
         let view = self.view();
         if view.selection_notice.is_some() {
-            return "`/\u{2190} return to choices  Ctrl-C quit".into();
+            return "\u{2190} return to choices  Ctrl-C quit".into();
         }
         let screen = &view.screen;
         let load = screen.load.as_deref();
         let mut hints: Vec<String> = if screen.text_input {
             vec!["Enter/\u{2192} continue".into(), "Backspace edit".into()]
         } else if view.load_failed_required() {
-            vec!["Enter/\u{2192} retry".into()]
+            vec!["\u{2192} retry".into()]
         } else {
-            let mut hints = vec![
+            vec![
                 "\u{2191}/\u{2193} move".to_string(),
-                "Enter/\u{2192} select".into(),
-            ];
-            if view.quick_select(&view.entries()) {
-                hints.push(if view.entries().iter().any(|o| o.digit == Some(0)) {
-                    "0-9 select".into()
-                } else {
-                    "1-9 select".into()
-                });
-            }
-            hints
+                "\u{2192} select".into(),
+            ]
         };
         if !view.filter.is_empty() && screen.back_clears_input {
-            hints.push("`/\u{2190} clear".into());
+            hints.push("\u{2190} clear".into());
         } else if self.quit_pending {
-            hints.push("Press `/\u{2190} again to quit".into());
+            hints.push("Press \u{2190} again to quit".into());
         } else if self.stack.len() > 1 {
-            hints.push("`/\u{2190} back".into());
+            hints.push("\u{2190} back".into());
         } else {
-            hints.push("`/\u{2190} quit (twice)".into());
+            hints.push("\u{2190} quit (twice)".into());
+        }
+        if !screen.text_input && !view.load_failed_required() {
+            let entries = view.entries();
+            if view.quick_select(&entries) {
+                hints.push(
+                    if entries.iter().any(|o| o.digit == Some(0)) {
+                        "0-9 select"
+                    } else {
+                        "1-9 select"
+                    }
+                    .into(),
+                );
+            }
         }
         if (!screen.load_required && load.is_some_and(|l| l.state() == JobState::Failed))
             || screen

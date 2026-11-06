@@ -730,7 +730,7 @@ fn tpu_flag_routes_without_provider_and_catalog_jobs_use_real_keys() {
                 release.set();
                 keys.wait(on(title));
                 keys.wait(|s| s.labels.contains(&expected.to_string()));
-                keys.press(ENTER);
+                keys.press(RIGHT);
             },
         );
         gate.set();
@@ -753,12 +753,12 @@ fn catalog_choices_share_a_stack_and_back_does_not_refetch() {
         keys.type_text("v6e");
         keys.press_until(RIGHT, on("v6e size"));
         assert!(keys.labels().iter().all(|l| l.contains("chip")));
-        keys.press_until(ENTER, on("TPU capacity"));
-        keys.press_until(ENTER, on("TPU zone"));
+        keys.press_until(RIGHT, on("TPU capacity"));
+        keys.press_until(RIGHT, on("TPU zone"));
         keys.wait(|s| s.labels == ["us-east     1  zone", "us-central  1  zone"]);
         keys.press_until(RIGHT, on("us-east zones"));
-        assert!(!keys.labels().iter().any(|l| l.contains(" — ")));
-        keys.press_until(ENTER, on("Destroy after (e.g. 2h)"));
+        assert!(!keys.labels().iter().any(|l| l.contains('\u{2014}')));
+        keys.press_until(RIGHT, on("Destroy after (e.g. 2h)"));
         keys.press_until(BACK, on("us-east zones"));
         keys.press_until(BACK, on("TPU zone"));
         keys.press_until(BACK, on("TPU capacity"));
@@ -794,7 +794,7 @@ fn expiry_entry_has_duration_help_validation_and_back_to_capacity() {
         panic!("missing capacity screen")
     };
     let result = drive(first, |keys| {
-        keys.press_until(ENTER, on("Destroy after (e.g. 2h)"));
+        keys.press_until(RIGHT, on("Destroy after (e.g. 2h)"));
         assert!(keys
             .snapshot()
             .body
@@ -804,16 +804,16 @@ fn expiry_entry_has_duration_help_validation_and_back_to_capacity() {
         assert!(keys.footer().contains("back"));
         assert!(!keys.footer().contains("quit (twice)"));
         keys.type_text("30s");
-        keys.press(ENTER);
+        keys.press(RIGHT);
         assert!(keys
             .snapshot()
             .body
             .iter()
             .any(|s| s.contains("1 minute to 29 days")));
         keys.press_until(BACK, on("TPU capacity"));
-        keys.press_until(ENTER, on("Destroy after (e.g. 2h)"));
+        keys.press_until(RIGHT, on("Destroy after (e.g. 2h)"));
         keys.type_text("1d");
-        keys.press(ENTER);
+        keys.press(RIGHT);
     });
     let Outcome::Done(selection) = result else {
         panic!("{result:?}")
@@ -1239,7 +1239,7 @@ fn retry_can_return_to_grouped_zone_picker_without_authorizing_payment() {
             keys.press_until("2", on("TPU zone"));
             assert!(keys.labels().iter().any(|s| s.starts_with("us-east ")));
             keys.type_text("us-east5-a");
-            keys.press(ENTER);
+            keys.press(RIGHT);
         },
     );
     assert_eq!(
@@ -1425,8 +1425,8 @@ fn type_filter_counts_and_prices_exclude_unsupported_remembered_zone() {
             assert!(!keys
                 .labels()
                 .iter()
-                .any(|s| s.contains("central") || s.contains(" — ")));
-            keys.press(ENTER);
+                .any(|s| s.contains("central") || s.contains('\u{2014}')));
+            keys.press(RIGHT);
         },
     );
     assert!(
@@ -1536,14 +1536,14 @@ fn mapped_cloud_completion_still_waits_for_cached_repository_validation() {
     };
     let result = drive(first, |keys| {
         keys.wait(|s| s.labels.iter().any(|l| l.contains("demo")));
-        keys.press_until(ENTER, on("GPU"));
-        keys.press_until(ENTER, on("TPU generation"));
+        keys.press_until(RIGHT, on("GPU"));
+        keys.press_until(RIGHT, on("TPU generation"));
         keys.type_text("v6e");
         keys.press_until(RIGHT, on("v6e size"));
-        keys.press_until(ENTER, on("TPU capacity"));
-        keys.press_until(ENTER, on("TPU zone"));
+        keys.press_until(RIGHT, on("TPU capacity"));
+        keys.press_until(RIGHT, on("TPU zone"));
         keys.type_text("us-east5-b");
-        keys.press_until(ENTER, on("Checking repositories"));
+        keys.press_until(RIGHT, on("Checking repositories"));
         keys.press(CTRL_C);
     });
     gate.set();

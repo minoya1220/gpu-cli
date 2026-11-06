@@ -239,10 +239,10 @@ fn test_after_up_real_keys() {
             for _ in 0..choice {
                 keys.press(DOWN);
             }
-            keys.press(ENTER);
+            keys.press(RIGHT);
             if (last.is_some() && choice == 1) || (choice == 0 && last.is_none()) {
                 keys.wait(on("Editor"));
-                keys.press(ENTER);
+                keys.press(RIGHT);
             }
         });
         assert_eq!(
@@ -261,7 +261,7 @@ fn test_editor_real_keys() {
             for _ in 0..index {
                 keys.press(DOWN);
             }
-            keys.press(ENTER);
+            keys.press(RIGHT);
         });
         assert_eq!(result, Outcome::Done(expected.to_string()));
     }

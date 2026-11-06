@@ -394,9 +394,7 @@ impl LaunchWizard {
         let owner = self.state.owner.clone();
         let validate = move |value: &str| -> std::result::Result<(), String> {
             if value.is_empty() {
-                return Err(
-                    "Enter a repository, or `/\u{2190} back to choose No repository".into(),
-                );
+                return Err("Type a repository, or \u{2190} back to choose No repository".into());
             }
             resolve_repo(value, &owner)
                 .map(|_| ())

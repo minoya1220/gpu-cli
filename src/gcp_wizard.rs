@@ -112,7 +112,7 @@ fn next_with(ctx: Ctx, settings: Settings, cfg: Dict, picks: Selection) -> Next<
             || {
                 vec![
                     Opt::new("on-demand".to_string(), "On-demand"),
-                    Opt::new("spot".to_string(), "Spot — may be interrupted"),
+                    Opt::new("spot".to_string(), "Spot (may be interrupted)"),
                 ]
             },
             move |value| {

@@ -300,24 +300,24 @@ fn test_back_walks_every_screen_without_refetching_or_quitting() {
     let watched = search.clone();
     let result = run(&flow, Picks::default(), move |keys| {
         keys.wait(|s| s.labels == ["gpu-kernels", "other", "Clone from URL...", "No repository"]);
-        keys.press_until(ENTER, on("Mode"));
-        keys.press_until(ENTER, on("GPU"));
-        keys.press_until(ENTER, on("Datacenter Blackwell/Hopper"));
-        keys.press_until(ENTER, on("Offer: B200"));
+        keys.press_until(RIGHT, on("Mode"));
+        keys.press_until(RIGHT, on("GPU"));
+        keys.press_until(RIGHT, on("Datacenter Blackwell/Hopper"));
+        keys.press_until(RIGHT, on("Offer: B200"));
         for title in ["Datacenter Blackwell/Hopper", "GPU", "Mode", "Repository"] {
             assert!(keys.press_until(BACK, on(title)) < quick());
         }
         // Forward again with different choices; earlier picks must not leak.
         keys.press_until("2", on("Mode"));
         keys.press(DOWN);
-        keys.press_until(ENTER, on("GPU"));
+        keys.press_until(RIGHT, on("GPU"));
         keys.type_text("4090");
-        keys.press_until(ENTER, on("Offer: RTX 4090"));
+        keys.press_until(RIGHT, on("Offer: RTX 4090"));
         keys.wait_for("the vm offer search", || {
             watched.offer_calls().last() == Some(&("vm".to_string(), Some("RTX 4090".to_string())))
         });
         keys.wait(|s| !s.labels.is_empty());
-        keys.press(ENTER);
+        keys.press(RIGHT);
     });
     let expected = Picks {
         repo: named("other"),
@@ -385,17 +385,17 @@ fn test_repository_shortcuts_full_list_and_global_filter() {
                         keys.press_until(BACK, on("Repository"));
                         keys.press_until("8", on("All repositories"));
                         keys.type_text("project-12");
-                        keys.press(ENTER);
+                        keys.press(RIGHT);
                     }
                     "9" => {
                         keys.press_until("9", on("Clone from URL"));
                         keys.type_text("owner/external");
-                        keys.press(ENTER);
+                        keys.press(RIGHT);
                     }
                     "filter" => {
                         keys.type_text("project-12");
                         assert_eq!(keys.labels(), ["project-12"]);
-                        keys.press(ENTER);
+                        keys.press(RIGHT);
                     }
                     digit => keys.press(digit),
                 }
@@ -462,7 +462,7 @@ fn test_short_repository_lists_keep_static_digits_and_omit_all() {
 }
 
 #[test]
-fn test_backtick_twice_on_the_first_real_screen_quits() {
+fn test_left_twice_on_the_first_real_screen_quits() {
     let t = TestEnv::new();
     let repo_calls = Arc::new(AtomicUsize::new(0));
     let flow = wizard(&t, &FakeSearch::new(), &repo_calls, &[], true);
@@ -471,7 +471,7 @@ fn test_backtick_twice_on_the_first_real_screen_quits() {
         &flow,
         Picks::new(named("gpu-kernels"), Some("container"), None),
         |keys| {
-            keys.press_until(ENTER, on("Datacenter Blackwell/Hopper"));
+            keys.press_until(RIGHT, on("Datacenter Blackwell/Hopper"));
             keys.press_until(BACK, on("GPU"));
             keys.press(BACK);
             keys.press(BACK);
@@ -507,11 +507,11 @@ fn test_offer_search_never_blocks_navigation() {
         Picks::new(named("gpu-kernels"), Some("container"), None),
         move |keys| {
             keys.type_text("t4");
-            assert!(keys.press_until(ENTER, on("Offer: Tesla T4")) < quick());
+            assert!(keys.press_until(RIGHT, on("Offer: Tesla T4")) < quick());
             keys.wait_for("the offer search", || {
                 watched.offer_calls() == [("container".to_string(), Some("Tesla T4".to_string()))]
             });
-            keys.press(ENTER); // still searching: nothing to select
+            keys.press(RIGHT); // still searching: nothing to select
             assert_eq!(keys.title(), "Offer: Tesla T4");
             assert!(keys.press_until(BACK, on("GPU")) < quick());
             keys.press(CTRL_C);
@@ -531,21 +531,21 @@ fn test_auto_prices_are_shared_by_gpu_screens_and_loaded_once_per_mode() {
     let result = run(&flow, Picks::default(), move |keys| {
         keys.wait(|s| s.labels.contains(&"gpu-kernels".to_string()));
         keys.press_until("0", on("Mode"));
-        keys.press_until(ENTER, on("GPU"));
+        keys.press_until(RIGHT, on("GPU"));
         keys.wait_for("container prices", || {
             watched.stats_calls() == ["container"]
         });
         keys.wait(|s| s.labels.join(" ").contains("(1 model, from $1.735/hr)"));
-        keys.press_until(ENTER, on("Datacenter Blackwell/Hopper"));
+        keys.press_until(RIGHT, on("Datacenter Blackwell/Hopper"));
         labels.lock().unwrap().extend(keys.labels());
         keys.press_until(BACK, on("GPU"));
         keys.press_until(BACK, on("Mode"));
         keys.press(DOWN);
-        keys.press_until(ENTER, on("GPU"));
+        keys.press_until(RIGHT, on("GPU"));
         assert!(!keys.footer().contains("F2"));
         keys.wait_for("vm prices", || watched.stats_calls() == ["container", "vm"]);
         keys.type_text("4090");
-        keys.press(ENTER);
+        keys.press(RIGHT);
     });
     let expected = Picks {
         repo: Some(Repo::NoRepo),
@@ -603,7 +603,7 @@ fn test_gpu_screen_caps_valid_recents_at_three_and_always_lists_tpus() {
             {
                 keys.press(DOWN);
             }
-            keys.press(ENTER);
+            keys.press(RIGHT);
         },
     );
     assert_eq!(
@@ -636,7 +636,7 @@ fn test_gpu_search_finds_tpu_category_and_types_without_cloud_config() {
             }
             assert!(!keys.labels().is_empty());
             assert!(keys.labels().iter().all(|s| s.contains("TPU")));
-            keys.press(ENTER);
+            keys.press(RIGHT);
         });
         assert_eq!(
             result,
@@ -661,7 +661,7 @@ fn test_recent_gpus_come_first_and_digits_filter_gpu_names() {
         false,
     );
     let start = Picks::new(named("r"), Some("container"), None);
-    let result = run(&flow, start.clone(), |keys| keys.press(ENTER));
+    let result = run(&flow, start.clone(), |keys| keys.press(RIGHT));
     assert_eq!(
         result,
         Outcome::Done(Picks {
@@ -671,7 +671,7 @@ fn test_recent_gpus_come_first_and_digits_filter_gpu_names() {
     );
     let result = run(&flow, start.clone(), |keys| {
         keys.type_text("5090");
-        keys.press(ENTER);
+        keys.press(RIGHT);
     });
     assert_eq!(
         result,

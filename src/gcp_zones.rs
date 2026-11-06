@@ -286,7 +286,7 @@ mod tests {
                     .body
                     .iter()
                     .any(|line| line.starts_with('›') && line.contains("us-west1-c")));
-                keys.press(ENTER);
+                keys.press(RIGHT);
             },
         );
         assert_eq!(result, Outcome::Done("us-west1-c".into()));

@@ -784,7 +784,7 @@ fn provider_status_picker_real_keys_never_probes_gcloud() {
             .labels()
             .contains(&"Google Cloud  not set up".to_string()));
         keys.press(DOWN);
-        keys.press(ENTER);
+        keys.press(RIGHT);
     });
     assert_eq!(result, crate::picker::Outcome::Done("gcp".to_string()));
     assert!(runner.argvs().iter().all(|a| a[0] == "vastai"));

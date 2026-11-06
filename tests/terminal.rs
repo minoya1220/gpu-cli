@@ -16,10 +16,11 @@ use rustix::event::{poll, PollFd, PollFlags, Timespec};
 use rustix::pty::{grantpt, openpt, ptsname, unlockpt, OpenptFlags};
 
 const ENTER: &str = "\r";
-const BACK: &str = "`";
+const BACK: &str = LEFT;
 const LEFT: &str = "\x1b[D";
 const RIGHT: &str = "\x1b[C";
 const DOWN: &str = "\x1b[B";
+const UP: &str = "\x1b[A";
 // Home, End, PageUp, PageDown, Delete, F5, Shift-Left, Shift-Right, Ctrl-Left.
 const SPECIAL_KEYS: [&str; 9] = [
     "\x1b[H",
@@ -238,18 +239,18 @@ fn gpu_up(sandbox: &Sandbox) -> Terminal {
 }
 
 #[test]
-fn test_backtick_from_the_deepest_screen_steps_back_to_the_first_then_quits() {
+fn test_left_from_the_deepest_screen_steps_back_to_the_first_then_quits() {
     let sandbox = Sandbox::new();
     let mut term = gpu_up(&sandbox);
     term.wait(shows("gpu-kernels"));
     assert_eq!(term.title(), "Repository");
-    term.press_until(ENTER, on("Mode"));
-    term.press_until(ENTER, on("GPU"));
+    term.press_until(RIGHT, on("Mode"));
+    term.press_until(RIGHT, on("GPU"));
     for c in ["4", "0", "9", "0"] {
         term.press(c);
     }
     term.wait(|t| t.line(1) == "Filter: 4090");
-    term.press_until(ENTER, on("Offer: RTX 4090"));
+    term.press_until(RIGHT, on("Offer: RTX 4090"));
     term.wait(shows("id=100"));
 
     type Shown = Box<dyn Fn(&Terminal) -> bool>;
@@ -274,9 +275,9 @@ fn test_backtick_from_the_deepest_screen_steps_back_to_the_first_then_quits() {
         );
     }
     term.press_until(BACK, |t| {
-        t.last_line().contains("Press `/\u{2190} again to quit")
+        t.last_line().contains("Press \u{2190} again to quit")
     });
-    assert!(term.running(), "one ` on the first screen must not quit");
+    assert!(term.running(), "one Left on the first screen must not quit");
     term.press(BACK);
     assert_eq!(term.exit_status(), 1);
     assert!(term.output_text().contains("Cancelled."));
@@ -292,8 +293,8 @@ fn test_keyboard_dry_run_launch_after_going_back() {
     let sandbox = Sandbox::new();
     let mut term = gpu_up(&sandbox);
     term.wait(shows("other-repo"));
-    term.press_until(ENTER, on("Mode"));
-    term.press_until(ENTER, on("GPU"));
+    term.press_until(RIGHT, on("Mode"));
+    term.press_until(RIGHT, on("GPU"));
     term.press_until(BACK, on("Mode"));
     term.press_until(BACK, on("Repository"));
     term.press_until("2", on("Mode")); // explicit repository shortcut
@@ -301,9 +302,9 @@ fn test_keyboard_dry_run_launch_after_going_back() {
     for c in ["t", "4"] {
         term.press(c);
     }
-    term.press_until(ENTER, on("Offer: Tesla T4"));
+    term.press_until(RIGHT, on("Offer: Tesla T4"));
     term.wait(shows("id=100"));
-    term.press(ENTER);
+    term.press(RIGHT);
     assert_eq!(term.exit_status(), 0);
     let output = term.output_text();
     assert!(output.contains("DRY RUN: no instance created"));
@@ -325,16 +326,16 @@ fn test_new_repository_choices_dry_run_in_terminal() {
             Some(repo) => {
                 term.press_until("9", on("Clone from URL"));
                 term.press(&format!("\x1b[200~{repo}\x1b[201~"));
-                term.press_until(ENTER, on("Mode"));
+                term.press_until(RIGHT, on("Mode"));
             }
         }
         term.press_until("1", on("GPU"));
         for c in ["t", "4"] {
             term.press(c);
         }
-        term.press_until(ENTER, on("Offer: Tesla T4"));
+        term.press_until(RIGHT, on("Offer: Tesla T4"));
         term.wait(shows("id=100"));
-        term.press(ENTER);
+        term.press(RIGHT);
         assert_eq!(term.exit_status(), 0);
         let output = term.output_text();
         assert!(output.contains("DRY RUN: no instance created"));
@@ -524,7 +525,7 @@ fn test_tpu_without_config_keeps_setup_visible_and_returns_to_gpu_choices() {
         term.press_until("1", on("GPU"));
         assert!(shows("TPU (Google Cloud)")(&term));
         term.press_until(query, |t| t.line(1) == format!("Filter: {query}"));
-        term.press_until(ENTER, shows("Google Cloud is not set up"));
+        term.press_until(RIGHT, shows("Google Cloud is not set up"));
         assert!(term.running(), "setup must remain visible until dismissed");
         let screen = term.lines().join("\n");
         assert!(screen.contains("No TPU created."), "{screen}");
@@ -545,7 +546,7 @@ fn test_tpu_without_config_keeps_setup_visible_and_returns_to_gpu_choices() {
         assert_eq!(term.line(1), format!("Filter: {query}"));
         term.press_until(BACK, |t| !t.line(1).starts_with("Filter:"));
         term.press("4090");
-        term.press_until(ENTER, on("Offer: RTX 4090"));
+        term.press_until(RIGHT, on("Offer: RTX 4090"));
         term.wait(shows("id=100"));
         term.press("\x03");
         assert_eq!(term.exit_status(), 130);
@@ -589,26 +590,26 @@ esac
         assert!(shows("TPU (Google Cloud)")(&term));
         term.press_until(query, |t| t.line(1) == format!("Filter: {query}"));
         if query == "tpu" {
-            term.press_until(ENTER, on("TPU generation"));
+            term.press_until(RIGHT, on("TPU generation"));
             term.press_until("v5e", shows("Filter: v5e"));
             term.press_until(RIGHT, on("v5e size"));
         }
         if query == "v5e" {
-            term.press_until(ENTER, on("v5e size"));
+            term.press_until(RIGHT, on("v5e size"));
         }
-        term.press_until(ENTER, on("TPU capacity"));
+        term.press_until(RIGHT, on("TPU capacity"));
         term.press_until("2", on("TPU zone"));
         term.press_until("us-central1-a", shows("Filter: us-central1-a"));
-        term.press(ENTER);
+        term.press(RIGHT);
         if query == "v5e" {
             term.wait(on("Destroy after (e.g. 2h)"));
             assert!(shows("30m, 2h or 1d")(&term));
             term.press("30s");
-            term.press_until(ENTER, shows("Choose 1 minute to 29 days"));
+            term.press_until(RIGHT, shows("Choose 1 minute to 29 days"));
             term.press_until(BACK, on("TPU zone"));
-            term.press_until(ENTER, on("Destroy after (e.g. 2h)"));
+            term.press_until(RIGHT, on("Destroy after (e.g. 2h)"));
             term.press("2h");
-            term.press(ENTER);
+            term.press(RIGHT);
         }
         assert_eq!(term.exit_status(), 0);
         let output = term.output_text();
@@ -696,12 +697,12 @@ fn test_ctrl_c_quits_while_an_offer_search_is_still_running() {
     let sandbox = Sandbox::new();
     let mut term = gpu_up(&sandbox);
     term.wait(shows("gpu-kernels"));
-    term.press_until(ENTER, on("Mode"));
-    term.press_until(ENTER, on("GPU"));
+    term.press_until(RIGHT, on("Mode"));
+    term.press_until(RIGHT, on("GPU"));
     for c in ["4", "0", "9", "0"] {
         term.press(c);
     }
-    term.press_until(ENTER, on("Offer: RTX 4090"));
+    term.press_until(RIGHT, on("Offer: RTX 4090"));
     let start = term.press("\x03");
     assert_eq!(term.exit_status(), 130);
     assert!(start.elapsed() < Duration::from_secs(1));
@@ -777,7 +778,7 @@ printf 'test-token\n'
     term.press_until(RIGHT, on("v6e size"));
     term.wait(shows("Spot $2.750/hr"));
     assert_aligned(&term, "Spot ");
-    term.press_until(ENTER, on("TPU zone"));
+    term.press_until(RIGHT, on("TPU zone"));
     term.wait(shows("us-east     1  zone"));
     assert_aligned(&term, "  zone");
     assert!(
@@ -789,7 +790,7 @@ printf 'test-token\n'
     );
     term.press_until(RIGHT, on("us-central zones"));
     term.wait(shows("us-central1-a  $2.750/hr"));
-    assert!(!shows(" — v6e")(&term));
+    assert!(term.lines().iter().all(|line| !line.contains('\u{2014}')));
     term.press_until(BACK, on("TPU zone"));
     term.press("\x1b[A");
     term.press_until(RIGHT, on("us-east zones"));
@@ -856,12 +857,12 @@ fn test_tpu_post_launch_editor_then_edit_and_cursor_use_instance_picker() {
     assert!(config.contains("User \"developer\""));
     assert!(config.contains("google_compute_engine"));
     assert!(!config.contains("test-token"));
-    // A blank destruction confirmation intentionally cancels. Enter on the
-    // instance picker must not leak a newline into the following confirmation.
+    // A blank destruction confirmation intentionally cancels. Selecting an
+    // instance must not leak input into the following confirmation.
     for approve in [false, true] {
         let mut down = Terminal::start(&sandbox, &["down"]);
         down.wait(shows("Google Cloud"));
-        down.press_until(ENTER, shows("Destroy TPU"));
+        down.press_until(RIGHT, shows("Destroy TPU"));
         down.press(if approve { "yes\r" } else { "\r" });
         assert_eq!(down.exit_status(), 0, "{}", down.output_text());
         assert!(down.output_text().contains(if approve {
@@ -886,8 +887,80 @@ fn test_tpu_post_launch_editor_then_edit_and_cursor_use_instance_picker() {
 }
 
 #[test]
-fn test_cloud_generation_and_size_back_restore_gpu_page_for_left_and_backtick() {
-    for back in [LEFT, BACK] {
+fn test_list_enter_and_backtick_do_nothing_in_real_terminal() {
+    let sandbox = Sandbox::new();
+    let mut term = Terminal::start(&sandbox, &["up", "--no-repo", "--dry-run"]);
+    term.wait(on("Mode"));
+    assert!(!term.last_line().contains("Enter") && !term.last_line().contains('`'));
+    term.press(ENTER);
+    term.press("`");
+    term.press_until(DOWN, |t| {
+        t.lines()
+            .iter()
+            .any(|l| l.starts_with('›') && l.contains("vm"))
+    });
+    assert_eq!(term.title(), "Mode");
+    assert!(!shows("Filter:")(&term));
+    term.press_until(RIGHT, on("GPU"));
+    term.press_until("t4", shows("Filter: t4"));
+    term.press(ENTER);
+    term.press("`");
+    term.press(UP);
+    term.wait(|t| t.title() == "GPU" && t.line(1) == "Filter: t4");
+    term.press_until(RIGHT, on("Offer: Tesla T4"));
+    term.wait(shows("id=100"));
+    assert_eq!(term.last_line(), "↑/↓ move  → select  ← back  1-9 select");
+    term.press_until(LEFT, on("GPU"));
+    term.press_until(LEFT, |t| !t.line(1).starts_with("Filter:"));
+    term.press_until(LEFT, on("Mode"));
+    term.press_until(LEFT, |t| t.last_line().contains("again to quit"));
+    term.press(LEFT);
+    assert_eq!(term.exit_status(), 1);
+}
+
+#[test]
+fn test_enter_submits_repository_url_and_tpu_duration_text_boxes() {
+    let sandbox = Sandbox::new();
+    let mut repo = Terminal::start(&sandbox, &["up", "--dry-run"]);
+    repo.wait(shows("Clone from URL..."));
+    repo.press_until("9", on("Clone from URL"));
+    assert!(repo.last_line().contains("Enter/→ continue"));
+    repo.press("https://github.com/owner/demo");
+    repo.press_until(ENTER, on("Mode"));
+    repo.press("\x03");
+    assert_eq!(repo.exit_status(), 130);
+    let sandbox = Sandbox::new();
+    sandbox.gcp_lifecycle();
+    let mut duration = Terminal::start(
+        &sandbox,
+        &[
+            "up",
+            "--provider",
+            "gcp",
+            "--tpu",
+            "v6e-1",
+            "--zone",
+            "us-east5-b",
+            "--no-repo",
+            "--spot",
+            "--dry-run",
+        ],
+    );
+    duration.wait(on("Destroy after (e.g. 2h)"));
+    assert!(duration.last_line().contains("Enter/→ continue"));
+    duration.press("2h");
+    duration.press(ENTER);
+    assert_eq!(duration.exit_status(), 0, "{}", duration.output_text());
+    assert!(duration
+        .output_text()
+        .contains("DRY RUN: no TPU or expiry task created"));
+    assert!(sandbox.calls().is_empty());
+}
+
+#[test]
+fn test_cloud_generation_and_size_left_restores_gpu_page() {
+    {
+        let back = LEFT;
         let sandbox = Sandbox::new();
         let config = sandbox.root.join("config/gpu");
         std::fs::create_dir_all(&config).unwrap();

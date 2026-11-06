@@ -220,7 +220,7 @@ pub fn label(zone: &Zone) -> String {
         .collect();
     generations.sort();
     generations.dedup();
-    format!("{} — {}", zone.name, generations.join(", "))
+    format!("{}  {}", zone.name, generations.join(", "))
 }
 pub fn verify(ctx: &Ctx, project: &str, zone: &str, tpu: &str) -> Result<()> {
     if types(ctx, project, zone)?.contains(&canonical(tpu)) {

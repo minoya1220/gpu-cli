@@ -30,13 +30,13 @@ gpu up --expire 2h               # destroy after 2 hours, including boot time
 
 In the terminal picker:
 
-- Type to filter, use ↑/↓ to move, and Enter or → to select.
-- Press backtick (`) or ← to clear the filter, then go back. On the first screen, press twice to quit. Ctrl-C or Ctrl-D quits from any screen; Esc does nothing.
-- The GPU screen shows at most **three Recent** rows, GPU categories, and **TPU (Google Cloud)**. Type `tpu` to find the TPU category, `v5e` for a generation, or `v6e-1` for a full TPU type. TPU discovery is visible even before Google Cloud is configured. Before Google Cloud setup, selecting it keeps a notice pointing to `gpu setup` on screen, including the exact config file path; no Google Cloud command runs and no TPU is created. Press ← or backtick to return to the GPU choices, or Ctrl-C to quit.
+- Type to filter, use ↑/↓ to move, and → to select. Enter and backtick do nothing on lists, including filtered lists.
+- Press ← to clear the filter, then go back. On the first screen, press twice to quit. Ctrl-C or Ctrl-D quits from any screen; Esc does nothing.
+- The GPU screen shows at most **three Recent** rows, GPU categories, and **TPU (Google Cloud)**. Type `tpu` to find the TPU category, `v5e` for a generation, or `v6e-1` for a full TPU type. TPU discovery is visible even before Google Cloud is configured. Before Google Cloud setup, selecting it keeps a notice pointing to `gpu setup` on screen, including the exact config file path; no Google Cloud command runs and no TPU is created. Press ← to return to the GPU choices, or Ctrl-C to quit.
 - GPU/TPU price and TPU catalog reads start when the launch picker opens, while you choose Repository/Mode, without blocking input. TPU rows need `gpu setup`; cached estimates show their age. Choose a TPU generation and size, then its area and priced zone. Digits filter names; on short, unfiltered lists, 1-9 select directly.
 - On the Repository screen, **1–7** select the first seven repos, **8** opens **All repositories...** (when there are more than seven), **9** opens **Clone from URL...**, and **0** selects **No repository** at the bottom. Type to filter across all repos, including those not initially shown.
 - Choose **No repository** or **Clone from URL...** without waiting for GitHub. Paste a URL or `owner/name`, then Enter. Backspace edits; arrows select or go back, not move the text cursor.
-- Press Enter to retry a failed offer load; Ctrl-R retries repositories. With piped input, the CLI uses numbered line prompts instead.
+- Press → to retry a failed offer load; Ctrl-R retries repositories. Enter still submits the **Clone from URL** repository text box and TPU destruction-duration text box; line-based prompts/confirmations also keep Enter. With piped input, the CLI uses numbered line prompts instead.
 
 Offers are sorted cheapest first and show hourly price, reliability, verification, ID, and location. Up to ten are shown. Recent successful choices appear first; cancellations and dry runs do not change history.
 
@@ -189,12 +189,11 @@ Spot/on-demand estimates load without blocking input. v5e/v6e suffixes count **c
 **TensorCores** (two per chip), not pods. Rows show both counts where applicable.
 Full `--tpu v6e-1` / `--type v6e-1` names still work and skip generation/size;
 capacity flags skip their screen. Areas include only zones offering that
-type; counts are matching zones, not stock. Enter/→ opens that area's zones,
+type; counts are matching zones, not stock. → opens that area's zones,
 each priced for the chosen type and Spot/on-demand mode. There are no per-zone
 type badges. Typing a full zone name on the area screen searches matching zones
-directly. Back/Left/backtick returns one
-screen at a time, including from the TPU screens to the GPU picker that opened
-them. A direct `--provider gcp` invocation has no earlier GPU page.
+directly. ← returns one screen at a time, including from the TPU screens to the
+GPU picker that opened them. A direct `--provider gcp` invocation has no earlier GPU page.
 
 The last chosen zone is remembered per project in local history. Its area and
 zone are highlighted when they still offer the selected type, without changing
@@ -203,7 +202,7 @@ Legacy configured zones remain a fallback. Zone history is separate from setup
 and cannot change the queue region.
 
 Zones sort approximately nearest-first from the local IANA timezone and region
-city coordinates—not measured latency. There are no network probes/geolocation
+city coordinates (not measured latency). There are no network probes/geolocation
 services. `TZ` overrides cross-platform timezone discovery; embedded public-domain
 `zone1970.tab` supplies timezone coordinates. Unknown regions sort last; unknown
 timezones keep default/saved ordering.
@@ -329,7 +328,7 @@ Missing, ambiguous, tiered, inaccessible or unsupported-unit rates are unavailab
 never guessed; an explicitly confirmed paid launch may proceed without a quote.
 
 Needs local curl **7.66+** (`--parallel`). OAuth tokens stay in memory and go to
-curl on stdin—not argv, logs or caches. User curl config, proxies and redirects
+curl on stdin, never argv, logs or caches. User curl config, proxies and redirects
 are disabled. Rerun old setup to explicitly enable Cloud Billing; ordinary
 commands never enable it or grant access silently.
 
@@ -367,7 +366,7 @@ crashes do not disarm it. Cloud TPU nodes have no native running-time deadline;
 queued-resource `valid-until` only limits provisioning.
 
 <details>
-<summary>Expiry safety limits—verify deletion independently</summary>
+<summary>Expiry safety limits: verify deletion independently</summary>
 
 - **Not an exact-time or billing SLA.** Pauses, IAM/API/billing failures, rate
   limits and regional outages can delay/prevent deletion. HTTP success only
@@ -384,7 +383,7 @@ queued-resource `valid-until` only limits provisioning.
   after disconnection/unverified create is deliberate, not proof a node exists.
 - `show` reports pending tasks/queue state, not guest or IAM health. No pending
   task may mean it dispatched. Replacements arm/verify first, then remove old
-  tasks; cleanup failure or concurrent expiry edits can leave several—earliest
+  tasks. Cleanup failure or concurrent expiry edits can leave several; the earliest
   wins. Inspect `show` after errors; avoid concurrent expiry edits.
 - Keep expiry config until cleanup, especially after failed creation/external
   deletion. Node metadata records its queue; manual nodes fall back to config.

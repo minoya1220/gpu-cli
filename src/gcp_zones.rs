@@ -30,20 +30,32 @@ fn groups(zones: &[Zone]) -> Vec<(String, usize)> {
     }
     result
 }
-fn options(zones: Vec<Zone>) -> Vec<Opt<String>> {
+#[derive(Clone)]
+pub(crate) struct Presentation {
+    pub preferred: Option<String>,
+    pub label: Rc<dyn Fn(&Zone) -> String>,
+    pub prices: Option<Job<()>>,
+}
+impl Default for Presentation {
+    fn default() -> Self {
+        Self {
+            preferred: None,
+            label: Rc::new(|z| z.name.clone()),
+            prices: None,
+        }
+    }
+}
+fn options(zones: Vec<Zone>, display: &Presentation) -> Vec<Opt<String>> {
     zones
         .into_iter()
         .map(|z| {
-            let label = if z.types.is_empty() {
-                z.name.clone()
-            } else {
-                crate::gcp_catalog::label(&z)
-            };
+            let label = (display.label)(&z);
             Opt::new(z.name, label)
         })
         .collect()
 }
 type Select<R> = Rc<dyn Fn(String) -> Next<String, R>>;
+#[cfg(test)]
 pub fn screen<R: 'static>(
     job: Job<Vec<Zone>>,
     initial: Vec<Zone>,
@@ -51,20 +63,33 @@ pub fn screen<R: 'static>(
     notice: &str,
     select: impl Fn(String) -> Next<String, R> + 'static,
 ) -> Screen<String, R> {
+    present(job, initial, title, notice, Presentation::default(), select)
+}
+pub(crate) fn present<R: 'static>(
+    job: Job<Vec<Zone>>,
+    initial: Vec<Zone>,
+    title: &str,
+    notice: &str,
+    display: Presentation,
+    select: impl Fn(String) -> Next<String, R> + 'static,
+) -> Screen<String, R> {
     build(
         job,
         initial,
         title.into(),
         notice.into(),
+        display,
         Rc::new(select),
         None,
     )
 }
+
 fn build<R: 'static>(
     job: Job<Vec<Zone>>,
     initial: Vec<Zone>,
     title: String,
     notice: String,
+    display: Presentation,
     select: Select<R>,
     group: Option<String>,
 ) -> Screen<String, R> {
@@ -79,7 +104,13 @@ fn build<R: 'static>(
         zones
     };
     let labels = data.clone();
+    let highlight = data.clone();
+    let highlighting = display.clone();
+    let highlight_group = group.clone();
     let search = data;
+    let search_display = display.clone();
+    let label_display = display.clone();
+    let child_display = display.clone();
     let child_notice = notice.clone();
     let picked = select.clone();
     let nested = job.clone();
@@ -89,7 +120,7 @@ fn build<R: 'static>(
         move || {
             let zones = labels();
             if group.is_some() {
-                options(zones)
+                options(zones, &label_display)
             } else {
                 groups(&zones)
                     .into_iter()
@@ -112,6 +143,7 @@ fn build<R: 'static>(
                     nested_initial.clone(),
                     format!("{a} zones"),
                     child_notice.clone(),
+                    child_display.clone(),
                     picked.clone(),
                     Some(a.into()),
                 ))
@@ -126,7 +158,30 @@ fn build<R: 'static>(
     .quick_select(false)
     .loading("Checking TPU zones…")
     .empty("No TPU zones returned. Ctrl-R retries.");
-    screen = screen.search(move || options(search()));
+    screen = screen
+        .search(move || options(search(), &search_display))
+        .highlight(move || {
+            let zones = highlight();
+            let Some(preferred) = highlighting
+                .preferred
+                .as_ref()
+                .filter(|p| zones.iter().any(|z| z.name == **p))
+            else {
+                return 0;
+            };
+            if highlight_group.is_some() {
+                zones.iter().position(|z| z.name == *preferred).unwrap_or(0)
+            } else {
+                let wanted = area(preferred);
+                groups(&zones)
+                    .iter()
+                    .position(|(g, _)| *g == wanted)
+                    .unwrap_or(0)
+            }
+        });
+    if let Some(job) = display.prices {
+        screen = screen.prices(job);
+    }
     screen
 }
 
@@ -171,6 +226,44 @@ mod tests {
             keys.press(RIGHT);
         });
         assert_eq!(result, Outcome::Done("us-east1-d".into()));
+    }
+    #[test]
+    fn preferred_zone_is_highlighted_without_changing_distance_order() {
+        let zones = ["us-west4-a", "us-west1-c", "us-east5-b"]
+            .into_iter()
+            .map(|s| Zone {
+                name: s.into(),
+                types: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        let job = Job::new({
+            let zones = zones.clone();
+            move || Ok(zones.clone())
+        });
+        let result = drive(
+            present(
+                job,
+                zones,
+                "TPU zone",
+                "",
+                Presentation {
+                    preferred: Some("us-west1-c".into()),
+                    ..Presentation::default()
+                },
+                Next::Done,
+            ),
+            |keys| {
+                keys.press_until(RIGHT, on("us-west zones"));
+                assert_eq!(keys.labels(), ["us-west4-a", "us-west1-c"]);
+                assert!(keys
+                    .snapshot()
+                    .body
+                    .iter()
+                    .any(|line| line.starts_with('›') && line.contains("us-west1-c")));
+                keys.press(ENTER);
+            },
+        );
+        assert_eq!(result, Outcome::Done("us-west1-c".into()));
     }
     #[test]
     fn area_names_come_from_region_names() {

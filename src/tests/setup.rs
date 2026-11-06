@@ -363,6 +363,8 @@ fn setup_creates_only_one_queue_preserves_config_and_is_idempotent() {
                 "up",
                 "--tpu",
                 "v6e-1",
+                "--zone",
+                "us-east5-b",
                 "--no-repo",
                 "--expire",
                 "2h",
@@ -397,7 +399,7 @@ fn dry_run_missing_confirmation_and_decline_have_zero_mutations() {
                 ctx,
             ),
             "decline" => (
-                [APPLY[..5].to_vec(), vec!["--zone", "us-east5-b"]].concat(),
+                APPLY[..5].to_vec(),
                 env.ctx()
                     .runner(&runner)
                     .interactive(true)
@@ -741,135 +743,29 @@ fn unset_up_cloud_is_blocked_at_the_single_process_boundary_for_all_commands() {
 }
 
 #[test]
-fn setup_zone_picker_loads_project_zones_highlights_default_and_filters_with_real_keys() {
-    use crate::picker::{testing::*, Outcome};
-    let (_env, ctx, runner, _state) = fixture();
-    let cloud = ctx.for_gcp_setup();
-    let result = drive(
-        crate::setup::zone_screen(&cloud, PROJECT, "us-east5-b", true),
-        |keys| {
-            keys.wait(|s| s.labels.len() == 2);
-            assert_eq!(keys.labels(), ["us-east (1 zone)", "us-central (1 zone)"]);
-            assert!(keys.snapshot().notice.contains("Quota and capacity"));
-            keys.type_text("central1");
-            assert_eq!(keys.labels(), ["us-central1-a — v6e"]);
-            keys.press(ENTER);
-        },
-    );
-    assert_eq!(result, Outcome::Done("us-central1-a".into()));
-    assert_eq!(runner.calls().len(), 3); // locations plus both type catalogs
-                                         // Pressing Enter without moving really selects the highlighted default.
-    let result = drive(
-        crate::setup::zone_screen(&cloud, PROJECT, "us-east5-b", true),
-        |keys| {
-            keys.wait(|s| s.labels.len() == 2);
-            keys.press_until(RIGHT, on("us-east zones"));
-            keys.press(ENTER);
-        },
-    );
-    assert_eq!(result, Outcome::Done("us-east5-b".into()));
-}
-
-#[test]
-fn setup_zone_picker_handles_disabled_api_and_absent_default_without_implicit_enable() {
-    use crate::picker::{testing::*, Outcome};
-    let env = TestEnv::new();
-    let ctx = env.ctx().build().for_gcp_setup(); // every process forbidden
-    let result = drive(
-        crate::setup::zone_screen(&ctx, PROJECT, "us-east5-b", false),
-        |keys| {
-            keys.wait(|s| !s.labels.is_empty());
-            assert!(keys.labels()[0].starts_with("us-east ("));
-            assert!(keys.snapshot().notice.contains("API disabled"));
-            keys.type_text("europe-west4-b");
-            keys.press(ENTER);
-        },
-    );
-    assert_eq!(result, Outcome::Done("europe-west4-b".into()));
-    let runner = super::gcp_transport::runner(|cmd| {
-        if cmd.argv[3] == "tpu-vm" {
-            return ok(r#"[{"type":"v6e-1"}]"#);
-        }
-        ok(r#"[{"locationId":"europe-west4-b"},{"locationId":"europe-west4-a"}]"#)
-    });
-    let ctx = env.ctx().runner(&runner).build().for_gcp_setup();
-    let result = drive(
-        crate::setup::zone_screen(&ctx, PROJECT, "us-east5-b", true),
-        |keys| {
-            keys.wait(|s| s.labels == ["europe-west (2 zones)"]);
-            assert_eq!(keys.labels(), ["europe-west (2 zones)"]);
-            keys.press_until(RIGHT, on("europe-west zones"));
-            assert_eq!(
-                keys.labels(),
-                ["europe-west4-a — v6e", "europe-west4-b — v6e"]
-            );
-            keys.press(ENTER);
-        },
-    );
-    assert_eq!(result, Outcome::Done("europe-west4-a".into()));
-}
-
-#[test]
-fn failed_zone_reconfiguration_keeps_the_previously_verified_default() {
-    use crate::process::Runner;
-    let (env, ctx, inner, _state) = fixture();
+fn setup_needs_no_zone_and_never_reads_accelerator_catalogs() {
+    let (env, ctx, runner, _state) = fixture();
     assert_eq!(main(&ctx, APPLY), 0, "{}", err(&ctx));
-    let runner = super::gcp_transport::runner(move |cmd| {
-        if cmd.argv.iter().any(|s| s == "--zone=us-west1-b") {
-            return ok("[]");
-        }
-        inner.run(cmd)
-    });
-    let ctx = env.ctx().runner(&runner).build();
-    let mut flags = APPLY.to_vec();
-    flags.extend(["--zone", "us-west1-b"]);
-    assert_eq!(main(&ctx, &flags), 1);
-    let config = cfg(&env);
-    assert!(crate::setup::gcp_ready(&config));
-    assert_eq!(
-        config.get("gcp").unwrap().as_dict().unwrap().get("zone"),
-        Some(&Value::str("us-east5-b"))
-    );
-    assert!(mutations(&runner).is_empty());
+    assert!(cfg(&env)
+        .get("gcp")
+        .unwrap()
+        .as_dict()
+        .unwrap()
+        .get("zone")
+        .is_none());
+    assert!(!runner
+        .calls()
+        .iter()
+        .any(|c| c.program() == "curl" || c.argv.iter().any(|a| a == "accelerator-types")));
 }
-
 #[test]
-fn unavailable_zone_stops_before_queue_creation_and_empty_catalog_never_skips_the_picker() {
-    use crate::picker::{testing::*, Outcome};
-    use crate::process::Runner;
-    let (env, _ctx, inner, _state) = fixture();
-    let runner = super::gcp_transport::runner(move |cmd| {
-        if strs(&cmd.argv).get(1..5) == Some(&["compute", "tpus", "locations", "list"])
-            || strs(&cmd.argv).get(1..5)
-                == Some(&["compute", "tpus", "tpu-vm", "accelerator-types"])
-        {
-            return ok("[]");
-        }
-        inner.run(cmd)
-    });
-    let ctx = env.ctx().runner(&runner).build();
-    assert_eq!(main(&ctx, APPLY), 1);
-    assert!(err(&ctx)
-        .contains("TPU zone us-east5-b offers no accelerator types in project test-project"));
-    assert!(mutations(&runner).is_empty());
-    assert!(!crate::setup::gcp_ready(&cfg(&env)));
-    let result = drive(
-        crate::setup::zone_screen(&ctx.for_gcp_setup(), PROJECT, "us-east5-b", true),
-        |keys| {
-            keys.wait(|s| {
-                s.body
-                    .iter()
-                    .any(|line| line.contains("No TPU zones returned"))
-            });
-            keys.press(ENTER);
-            assert!(
-                !keys.snapshot().done,
-                "empty catalog must not advance to confirmation"
-            );
-            keys.press(CTRL_C);
-        },
-    );
-    assert_eq!(result, Outcome::Cancelled(130));
+fn setup_zone_flag_is_rejected_without_cloud_calls() {
+    let (_env, ctx, runner, _state) = fixture();
+    let mut args = APPLY.to_vec();
+    args.extend(["--zone", "us-west1-b"]);
+    assert_eq!(main(&ctx, &args), 1);
+    assert!(err(&ctx).contains("choose it at launch"));
+    assert!(runner.calls().is_empty());
 }
 
 #[test]

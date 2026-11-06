@@ -14,6 +14,7 @@ pub mod gcp_expiry;
 mod gcp_facts;
 pub mod gcp_geo;
 mod gcp_http;
+mod gcp_preferences;
 pub mod gcp_prices;
 mod gcp_retry;
 pub mod gcp_ssh;

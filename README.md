@@ -33,7 +33,7 @@ In the terminal picker:
 - Type to filter, use ↑/↓ to move, and Enter or → to select.
 - Press backtick (`) or ← to clear the filter, then go back. On the first screen, press twice to quit. Ctrl-C or Ctrl-D quits from any screen; Esc does nothing.
 - The GPU screen shows at most **three Recent** rows, GPU categories, and **TPU (Google Cloud)**. Type `tpu` to find the TPU category, or `v5e` / `v6e-1` to pick a common TPU type directly. TPU discovery is visible even before Google Cloud is configured. Before Google Cloud setup, selecting it keeps a notice pointing to `gpu setup` on screen, including the exact config file path; no Google Cloud command runs and no TPU is created. Press ← or backtick to return to the GPU choices, or Ctrl-C to quit.
-- Press F2 on a GPU row/category to load Vast prices, or on a TPU row/category to load **on-demand and Spot USD/hour** estimates for the configured zone's region. TPU prices load in a background Job only after `gpu setup`; before setup, F2 explains that requirement. Digits filter GPU/TPU names; on short, unfiltered lists, 1-9 select directly.
+- GPU/TPU prices load automatically without blocking input. TPU rows need `gpu setup`; cached estimates show their age. Choose a TPU type first, then its area and priced zone. Digits filter names; on short, unfiltered lists, 1-9 select directly.
 - On the Repository screen, **1–7** select the first seven repos, **8** opens **All repositories...** (when there are more than seven), **9** opens **Clone from URL...**, and **0** selects **No repository** at the bottom. Type to filter across all repos, including those not initially shown.
 - Choose **No repository** or **Clone from URL...** without waiting for GitHub. Paste a URL or `owner/name`, then Enter. Backspace edits; arrows select or go back, not move the text cursor.
 - Press Enter to retry a failed offer load; Ctrl-R retries repositories. With piped input, the CLI uses numbered line prompts instead.
@@ -138,7 +138,7 @@ A failed `up --expire` leaves the new instance running and prints its ID. `retry
 ## Google Cloud TPUs
 
 ```sh
-gpu setup                                # select Google Cloud, project, zone
+gpu setup                                # select Google Cloud and project
 gpu up --tpu v6e-1 --no-repo --expire 2h --spot --dry-run
 gpu up --tpu v6e-1 --no-repo --expire 2h --spot --yes
 gpu ls --provider gcp
@@ -174,20 +174,27 @@ Use trusted workloads/users only. No local credentials or service-account keys
 are uploaded.
 
 ```sh
-gpu setup --provider gcp --project PROJECT --zone us-east5-b --location us-central1 --dry-run
-gpu setup --provider gcp --project PROJECT --zone us-east5-b --location us-central1 --confirm-project PROJECT
+gpu setup --provider gcp --project PROJECT --location us-central1 --dry-run
+gpu setup --provider gcp --project PROJECT --location us-central1 --confirm-project PROJECT
 ```
 
-`--location` is the queue region; `--zone` is the TPU default. Zone choices use
-bundled/cached facts immediately and refresh in the background when the API is
-enabled. Disabled APIs are not queried before approval. Setup verifies the
-selected zone live after enablement, before creating the queue. Lists do not
-guarantee stock or quota.
+`--location` is only the Cloud Tasks queue region. Setup does not ask for, save,
+or validate a TPU zone: that belongs to launch. Existing explicit `gcp.zone`
+settings remain compatible; setup's old `--zone` flag now points to launch.
 
-Zone pickers first show area groups such as `us-west (3 zones)` and `us-east`.
-Enter/→ opens only that area's zones; Back returns to the groups. Typing a full
-zone name on the first screen searches zones directly. Groups come from region
-prefixes (South America is one umbrella); counts are zones, not stock.
+At launch, choose **TPU type → capacity → area → zone**, then the deadline.
+Direct type/capacity flags skip their screens. Type rows show price estimates
+for the displayed reference region. Areas include only zones offering that
+type; counts are matching zones, not stock. Enter/→ opens that area's zones,
+each priced for the chosen type and Spot/on-demand mode. There are no per-zone
+type badges. Back restores the previous screen; typing a full zone name on the
+area screen searches matching zones directly.
+
+The last chosen zone is remembered per project in local history. Its area and
+zone are highlighted when they still offer the selected type, without changing
+nearest-first list order. Otherwise the nearest valid choice is highlighted.
+Legacy configured zones remain a fallback. Zone history is separate from setup
+and cannot change the queue region.
 
 Zones sort approximately nearest-first from the local IANA timezone and region
 city coordinates—not measured latency. There are no network probes/geolocation
@@ -238,7 +245,8 @@ Google can reserve a deleted queue name for **seven days**, delaying re-setup.
 Vast GPUs. `--provider gcp` skips to TPU choices; TPU flags imply that provider.
 The UI's container/VM choice is ignored for a TPU, but explicit Vast-only flags
 are rejected. `--provider vast` rejects TPU flags. Non-interactive TPU launches
-need `--tpu`, `--repo` or `--no-repo`, `--expire`, and a zone in config/flags.
+need `--tpu`, `--repo` or `--no-repo`, `--expire`, and `--zone` (or a previous
+project-zone pick / legacy configured zone).
 On-demand is the default; `--on-demand` skips the capacity picker.
 
 Real launches verify the exact type/zone **live before confirmation or arming**.

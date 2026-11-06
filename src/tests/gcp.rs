@@ -662,21 +662,29 @@ fn catalog_choices_share_a_stack_and_back_does_not_refetch() {
         panic!("missing first screen")
     };
     let result = drive(first, move |keys| {
-        keys.wait(|s| {
-            s.title == "TPU zone" && s.labels == ["us-east (1 zone)", "us-central (1 zone)"]
-        });
-        keys.press_until(RIGHT, on("us-east zones"));
-        keys.press_until(ENTER, on("TPU type"));
-        keys.wait(|s| s.labels.contains(&"v6e-1".to_string()));
+        keys.wait(on("TPU type"));
+        keys.type_text("v6e-1");
         keys.press_until(ENTER, on("TPU capacity"));
-        keys.press_until(BACK, on("TPU type"));
+        keys.press_until(ENTER, on("TPU zone"));
+        keys.wait(|s| s.labels == ["us-east (1 zone)", "us-central (1 zone)"]);
+        keys.press_until(RIGHT, on("us-east zones"));
+        assert!(!keys.labels().iter().any(|l| l.contains(" — ")));
+        keys.press_until(ENTER, on("Destroy after (e.g. 2h)"));
         keys.press_until(BACK, on("us-east zones"));
         keys.press_until(BACK, on("TPU zone"));
-        assert_eq!(keys.labels(), ["us-east (1 zone)", "us-central (1 zone)"]);
+        keys.press_until(BACK, on("TPU capacity"));
+        keys.press_until(BACK, on("TPU type"));
         keys.press(CTRL_C);
     });
     assert_eq!(result, Outcome::Cancelled(130));
-    assert_eq!(runner.calls().len(), 3);
+    assert_eq!(
+        runner
+            .calls()
+            .iter()
+            .filter(|c| c.program() == "gcloud" && c.argv.get(1).is_some_and(|a| a == "auth"))
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -1264,5 +1272,70 @@ fn changed_retry_estimate_requires_a_new_confirmation() {
             .filter(|c| c.argv.get(4).is_some_and(|s| s == "create"))
             .count(),
         1
+    );
+}
+
+#[test]
+fn remembered_zone_is_project_scoped_and_does_not_replace_config() {
+    let (env, ctx, _runner, _state) = fixture();
+    let mut args = UP.to_vec();
+    args.extend(["--zone", "us-east5-a"]);
+    assert_eq!(main(&ctx, &args), 0, "{}", err(&ctx));
+    assert_eq!(
+        crate::gcp_preferences::last(&ctx, "test-project"),
+        Some("us-east5-a".into())
+    );
+    assert_eq!(crate::gcp_preferences::last(&ctx, "other-project"), None);
+    let cfg = dict(&read(&env.config.join("gpu/config.json")));
+    assert_eq!(
+        crate::gcp::text(cfg.get("gcp").unwrap().as_dict().unwrap(), "zone"),
+        Some("us-east5-b")
+    );
+}
+#[test]
+fn type_filter_counts_and_prices_exclude_unsupported_remembered_zone() {
+    use crate::picker::{testing::*, Outcome};
+    let (env, ctx, _runner, _state) = fixture();
+    restrict_retry_zones(&ctx);
+    super::gcp_prices::cache(&env);
+    let mut cache =
+        crate::gcp_http::read_cache(&ctx, "tpu-catalog-test-project.json", 900).unwrap();
+    let Value::List(mut zones) = cache.get("zones").unwrap().clone() else {
+        panic!("zones")
+    };
+    for zone in &mut zones {
+        let Value::Dict(d) = zone else { panic!("zone") };
+        if crate::gcp::text(d, "name") == Some("us-central1-a") {
+            d.insert("types", json(r#"["v5litepod-1"]"#));
+        }
+    }
+    cache.insert("zones", Value::List(zones));
+    crate::gcp_http::write_cache(&ctx, "tpu-catalog-test-project.json", cache);
+    crate::gcp_preferences::remember(&ctx, "test-project", "us-central1-a");
+    let settings = crate::gcp::Settings::load(&dict(CONFIG)).unwrap();
+    let result = drive(
+        crate::gcp_wizard::priced_zone_screen(
+            &ctx,
+            &settings,
+            &dict(CONFIG),
+            "v6e-1",
+            true,
+            &Default::default(),
+            crate::picker::Next::Done,
+        ),
+        |keys| {
+            keys.wait(|s| s.labels == ["us-east (2 zones)"]);
+            keys.press_until(RIGHT, on("us-east zones"));
+            keys.wait(|s| s.labels.iter().all(|l| l.contains("$0.750/hr")));
+            assert_eq!(keys.labels().len(), 2);
+            assert!(!keys
+                .labels()
+                .iter()
+                .any(|s| s.contains("central") || s.contains(" — ")));
+            keys.press(ENTER);
+        },
+    );
+    assert!(
+        matches!(result,Outcome::Done(ref zone) if ["us-east5-a","us-east5-b"].contains(&zone.as_str()))
     );
 }

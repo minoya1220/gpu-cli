@@ -122,6 +122,8 @@ pub(crate) fn screen(
     let result = offer.clone();
     let tpu = picks.tpu.clone();
     let mode = if picks.spot { "Spot" } else { "on-demand" };
+    let picker_config = cfg.clone();
+    let picker_spot = picks.spot;
     let parent = ctx.clone();
     let settings = settings.clone();
     let tpu_filter = picks.tpu.clone();
@@ -156,26 +158,13 @@ pub(crate) fn screen(
             if value != "@choose" {
                 return Next::Done(None);
             }
-            let mut initial =
-                crate::gcp_catalog::known(&parent, &settings.project, Some(&tpu_filter));
-            initial.retain(|z| !excluded.contains(&z.name));
-            let worker = parent.clone();
-            let project = settings.project.clone();
-            let filter = tpu_filter.clone();
-            let skipped = excluded.clone();
-            let job = Job::new(move || {
-                crate::gcp_catalog::zones(&worker, &project, Some(&filter))
-                    .map(|mut zones| {
-                        zones.retain(|z| !skipped.contains(&z.name));
-                        zones
-                    })
-                    .map_err(|e| e.text().into())
-            });
-            Next::Screen(crate::gcp_zones::screen(
-                job,
-                initial,
-                "TPU zone",
-                "Previously tried zones omitted.",
+            Next::Screen(crate::gcp_wizard::priced_zone_screen(
+                &parent,
+                &settings,
+                &picker_config,
+                &tpu_filter,
+                picker_spot,
+                &excluded,
                 |zone| {
                     Next::Done(Some(Choice {
                         zone,

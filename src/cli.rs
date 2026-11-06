@@ -83,8 +83,8 @@ pub struct SetupFlags {
     /// Google Cloud project ID (otherwise choose from your projects)
     #[arg(long)]
     pub project: Option<String>,
-    /// Default TPU zone (interactive default: us-east5-b)
-    #[arg(long)]
+    /// Deprecated for setup: choose the TPU zone at launch
+    #[arg(long, hide = true)]
     pub zone: Option<String>,
     /// Cloud Tasks queue region (default: us-central1, or recorded setup region)
     #[arg(long)]

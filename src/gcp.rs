@@ -479,6 +479,7 @@ pub(crate) fn launch_with_retry(
         if !flags.dry_run {
             queue.reconcile(ctx)?;
             crate::gcp_catalog::verify(ctx, &settings.project, &picks.zone, &picks.tpu)?;
+            crate::gcp_preferences::remember(ctx, &settings.project, &picks.zone);
         }
         let id = TpuId {
             project: settings.project.clone(),
@@ -584,6 +585,7 @@ pub(crate) fn launch_with_retry(
                             ctx, &settings, cfg, &picks, &attempted,
                         ))? {
                             picks.zone = choice.zone;
+
                             confirm = !choice.approved;
                             approved_rate = choice.rate;
                             check_rate = choice.approved;

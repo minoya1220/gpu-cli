@@ -328,22 +328,17 @@ fn test_new_repository_choices_dry_run_in_terminal() {
 }
 
 #[test]
-fn test_setup_with_disabled_api_still_shows_zone_choices_without_enabling_anything() {
+fn test_setup_with_disabled_api_needs_no_tpu_zone_or_catalog() {
     let sandbox = Sandbox::new();
-    sandbox.stub(
-        "gcloud",
-        r#"#!/bin/sh
+    sandbox.stub("gcloud",r#"#!/bin/sh
 entry=gcloud; for arg in "$@"; do entry="$entry	$arg"; done
 printf '%s\n' "$entry" >> "$FAKE_CLI_LOG"
-case "$*" in
-  'auth print-access-token --project=test-project --quiet') printf 'private-test-token\n' ;;
-  'projects list --filter=lifecycleState:ACTIVE --quiet --format=json')
-    printf '[{"projectId":"test-project","projectNumber":"123456","name":"sandbox"}]\n' ;;
-  'services list --enabled --project=test-project --quiet --format=json') printf '[]\n' ;;
-  *) echo 'unexpected call: no API queries or mutations allowed before consent' >&2; exit 97 ;;
+case "$1 $2" in
+ 'projects list') printf '[{"projectId":"test-project","projectNumber":"123456","name":"sandbox"}]\n' ;;
+ 'services list') printf '[]\n' ;;
+ *) exit 97 ;;
 esac
-"#,
-    );
+"#);
     let mut term = Terminal::start(
         &sandbox,
         &[
@@ -355,22 +350,12 @@ esac
             "--dry-run",
         ],
     );
-    term.wait(on("TPU zone (test-project)"));
-    term.wait(shows("us-east ("));
-    assert!(shows("API disabled")(&term));
-    assert!(shows("asia-east")(&term));
-    assert!(shows("us-central")(&term));
-    term.press_until("southamerica", shows("Filter: southamerica"));
-    term.press(ENTER);
-    assert_eq!(term.exit_status(), 0, "{}", term.output_text());
-    assert!(term
-        .output_text()
-        .contains("Default TPU zone: southamerica-west1-a"));
+    assert_eq!(term.exit_status(), 0);
+    let text = term.output_text();
+    assert!(text.contains("Choose TPU type/zone at launch"));
+    assert!(!text.contains("TPU zone ("));
     assert!(!sandbox.root.join("config/gpu/config.json").exists());
-    let calls = sandbox.calls();
-    assert_eq!(calls.len(), 2);
-    assert_eq!(calls[0][1..3], ["projects", "list"]);
-    assert_eq!(calls[1][1..3], ["services", "list"]);
+    assert_eq!(sandbox.calls().len(), 2);
 }
 
 #[test]
@@ -417,21 +402,8 @@ esac
     assert_eq!(tools(&sandbox), ["vastai"]);
     term.press_until("2", on("Google Cloud project"));
     term.wait(shows("test-project"));
-    term.press_until("1", on("TPU zone (test-project)"));
-    term.wait(shows("us-central"));
-    assert!(
-        term.lines()
-            .iter()
-            .any(|l| l.starts_with("›") && l.contains("us-east (")),
-        "{}",
-        term.lines().join("\n")
-    );
-    assert!(!shows("Type HTTPS/git@ URL")(&term));
-    term.press_until("us-central1-a", shows("Filter: us-central1-a"));
-    term.press_until(ENTER, shows("Type project ID 'test-project' to confirm:"));
-    assert!(term
-        .output_text()
-        .contains("Default TPU zone: us-central1-a"));
+    term.press_until("1", shows("Type project ID 'test-project' to confirm:"));
+    assert!(!term.output_text().contains("TPU zone (test-project)"));
     assert!(!term.output_text().contains("TPU runtime (Enter ="));
     // Not a single mutation was even attempted; the existing queue is reused.
     term.press("test-project");
@@ -441,7 +413,7 @@ esac
     let config = std::fs::read_to_string(&path).unwrap();
     assert!(config.contains("123456-compute@developer.gserviceaccount.com"));
     assert!(config.contains("\"created_queue\": false"));
-    assert!(config.contains("\"zone\": \"us-central1-a\""));
+    assert!(!config.contains("\"zone\""));
     assert!(!config.contains("\"runtime\""));
     let before = sandbox.calls().len();
     let mut term = Terminal::start(&sandbox, &["setup"]);
@@ -586,25 +558,21 @@ esac
         term.press_until("1", on("GPU"));
         assert!(shows("TPU (Google Cloud)")(&term));
         term.press_until(query, |t| t.line(1) == format!("Filter: {query}"));
-        term.press_until(ENTER, on("TPU zone"));
-        term.wait(shows("us-central"));
-        term.press_until("us-central1-a", shows("Filter: us-central1-a"));
         if query == "tpu" {
             term.press_until(ENTER, on("TPU type"));
-            term.wait(shows("v5litepod-1"));
-            term.press_until("v5litepod-1", shows("Filter: v5litepod-1"));
+            term.press_until("v5e-1", shows("Filter: v5e-1"));
         }
         term.press_until(ENTER, on("TPU capacity"));
-        term.press("2"); // Spot
+        term.press_until("2", on("TPU zone"));
+        term.press_until("us-central1-a", shows("Filter: us-central1-a"));
+        term.press(ENTER);
         if query == "v5e" {
             term.wait(on("Destroy after (e.g. 2h)"));
             assert!(shows("30m, 2h or 1d")(&term));
-            assert!(!shows("HTTPS/git@")(&term));
-            assert!(!term.last_line().contains("quit (twice)"));
             term.press("30s");
             term.press_until(ENTER, shows("Choose 1 minute to 29 days"));
-            term.press_until(BACK, on("TPU capacity"));
-            term.press_until("2", on("Destroy after (e.g. 2h)"));
+            term.press_until(BACK, on("TPU zone"));
+            term.press_until(ENTER, on("Destroy after (e.g. 2h)"));
             term.press("2h");
             term.press(ENTER);
         }
@@ -734,4 +702,58 @@ fn terminal_is_restored_when_interrupted_in_the_picker() {
     let output = term.output_text();
     assert!(output.contains("\x1b[?2004l\x1b[?25h"), "{output:?}");
     assert!(output.ends_with("Cancelled.\r\n"), "{output:?}");
+}
+
+#[test]
+fn test_type_first_priced_zones_and_last_zone_highlight_in_terminal() {
+    let sandbox = Sandbox::new();
+    let config = sandbox.root.join("config/gpu");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(config.join("config.json"),r#"{"gcp":{"setup":{"version":1,"project":"test-project"},"project":"test-project","expiry":{"queue":"gpu-expiry","location":"us-central1","service_account":"reaper@test-project.iam.gserviceaccount.com"}}}"#).unwrap();
+    let history = sandbox.history_path();
+    std::fs::create_dir_all(history.parent().unwrap()).unwrap();
+    std::fs::write(&history, r#"{"gcp_zone:test-project":["us-central1-a"]}"#).unwrap();
+    sandbox.gcp_reads("[]", true);
+    sandbox.stub(
+        "gcloud",
+        r#"#!/bin/sh
+printf 'gcloud\n' >> "$FAKE_CLI_LOG"
+[ "$*" = 'auth print-access-token --project=test-project --quiet' ] || exit 97
+printf 'test-token\n'
+"#,
+    );
+    let mut term = Terminal::start(
+        &sandbox,
+        &[
+            "up",
+            "--provider",
+            "gcp",
+            "--no-repo",
+            "--spot",
+            "--expire",
+            "2h",
+            "--dry-run",
+        ],
+    );
+    term.wait(on("TPU type"));
+    term.press_until("v6e-1", shows("Filter: v6e-1"));
+    term.wait(shows("Spot $2.750/hr"));
+    term.press_until(ENTER, on("TPU zone"));
+    term.wait(shows("us-east (1 zone)"));
+    assert!(
+        term.lines()
+            .iter()
+            .any(|l| l.starts_with("›") && l.contains("us-central")),
+        "{}",
+        term.lines().join("\n")
+    );
+    term.press_until(RIGHT, on("us-central zones"));
+    term.wait(shows("us-central1-a · $2.750/hr"));
+    assert!(!shows(" — v6e")(&term));
+    term.press_until(BACK, on("TPU zone"));
+    term.press("\x1b[A");
+    term.press_until(RIGHT, on("us-east zones"));
+    term.wait(shows("us-east5-b · $0.750/hr"));
+    term.press("\x03");
+    assert_eq!(term.exit_status(), 130);
 }

@@ -438,7 +438,7 @@ pub fn load_for(ctx: &Ctx, cfg: &Dict, zone: &str, wanted: Option<(&str, bool)>)
     let project = gcp::Settings::load(cfg)?.project;
     let region = crate::gcp_geo::region(zone)
         .filter(|s| gcp::component(s))
-        .ok_or_else(|| unavailable("Choose a TPU zone with gpu setup."))?
+        .ok_or_else(|| unavailable("Choose a TPU zone with gpu up."))?
         .to_string();
     let gen = match wanted {
         Some((tpu, _)) => Some(
@@ -540,6 +540,10 @@ pub fn load_for(ctx: &Ctx, cfg: &Dict, zone: &str, wanted: Option<(&str, bool)>)
     Ok(prices)
 }
 pub fn job(ctx: &Ctx, cfg: &Dict) -> Job<std::sync::Arc<Prices>> {
+    job_at(ctx, cfg, None)
+}
+pub(crate) fn job_at(ctx: &Ctx, cfg: &Dict, zone: Option<&str>) -> Job<std::sync::Arc<Prices>> {
+    let explicit = zone.map(String::from);
     let worker = ctx.clone();
     let cfg = cfg.clone();
     Job::new(move || {
@@ -547,7 +551,10 @@ pub fn job(ctx: &Ctx, cfg: &Dict) -> Job<std::sync::Arc<Prices>> {
             return Err("needs gpu setup".into());
         }
         let settings = gcp::Settings::load(&cfg).map_err(|e| e.text().to_string())?;
-        let zone = settings.zone.ok_or("Choose a TPU zone with gpu setup.")?;
+        let zone = explicit
+            .clone()
+            .or_else(|| crate::gcp_preferences::preview(&worker, &settings))
+            .ok_or("No known TPU pricing region.")?;
         // Rare metadata refresh is nonfatal: known SKU IDs can still return
         // authoritative current rates. No API is enabled implicitly.
         let _ = crate::gcp_facts::refresh_skus(&worker, &settings.project);
@@ -555,4 +562,9 @@ pub fn job(ctx: &Ctx, cfg: &Dict) -> Job<std::sync::Arc<Prices>> {
             .map(std::sync::Arc::new)
             .map_err(|e| e.text().to_string())
     })
+}
+
+pub(crate) fn cached_default(ctx: &Ctx, cfg: &Dict) -> Option<std::sync::Arc<Prices>> {
+    let settings = gcp::Settings::load(cfg).ok()?;
+    cached(ctx, cfg, &crate::gcp_preferences::preview(ctx, &settings)?)
 }

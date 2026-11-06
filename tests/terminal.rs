@@ -227,6 +227,12 @@ fn tools(sandbox: &Sandbox) -> Vec<String> {
         .collect()
 }
 
+fn sorted_tools(sandbox: &Sandbox) -> Vec<String> {
+    let mut tools = tools(sandbox);
+    tools.sort();
+    tools
+}
+
 fn gpu_up(sandbox: &Sandbox) -> Terminal {
     Terminal::start(sandbox, &["up", "--dry-run"])
 }
@@ -275,7 +281,7 @@ fn test_backtick_from_the_deepest_screen_steps_back_to_the_first_then_quits() {
     assert_eq!(term.exit_status(), 1);
     assert!(term.output_text().contains("Cancelled."));
     assert_eq!(
-        tools(&sandbox),
+        sorted_tools(&sandbox),
         ["gh", "vastai", "vastai"],
         "navigation must not rerun gh or vastai"
     );
@@ -303,7 +309,7 @@ fn test_keyboard_dry_run_launch_after_going_back() {
     assert!(output.contains("DRY RUN: no instance created"));
     assert!(output.contains("\"100\"") && output.contains("/workspace/other-repo"));
     assert!(output.contains("\"docker.io/vastai/kvm\""));
-    assert_eq!(tools(&sandbox), ["gh", "vastai", "vastai", "vastai"]);
+    assert_eq!(sorted_tools(&sandbox), ["gh", "vastai", "vastai", "vastai"]);
 }
 
 #[test]

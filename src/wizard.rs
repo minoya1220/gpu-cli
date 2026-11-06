@@ -112,10 +112,13 @@ struct State {
     tpu_setup_error: Option<String>,
     tpu_transition: Option<CloudTransition>,
     tpu_prices: Job<Arc<crate::gcp_prices::Prices>>,
+    prefetch_tpu_prices: bool,
     tpu_cached_prices: Option<Arc<crate::gcp_prices::Prices>>,
     tpu_types: Vec<String>,
     tpu_catalog: Option<Job<Vec<String>>>,
     prices: RefCell<HashMap<String, Job<Stats>>>,
+    prefetch_attached: Cell<bool>,
+    preferred_mode: String,
 }
 
 /// Builds the screens for whatever `Picks` are still missing.
@@ -172,10 +175,16 @@ impl LaunchWizard {
                 tpu_cached_prices: options.tpu_cached_prices,
                 tpu_types: options.tpu_types,
                 tpu_catalog: options.tpu_catalog,
+                prefetch_tpu_prices: options.tpu_prices.is_some(),
                 tpu_prices: options
                     .tpu_prices
                     .unwrap_or_else(|| Job::new(|| Err("needs gpu setup".into()))),
                 prices: RefCell::new(HashMap::new()),
+                prefetch_attached: Cell::new(false),
+                preferred_mode: crate::history::recent_picks(env, "mode")
+                    .into_iter()
+                    .find(|m| MODES.contains(&m.as_str()))
+                    .unwrap_or_else(|| MODES[0].into()),
             }),
         }
     }
@@ -189,6 +198,32 @@ impl LaunchWizard {
     }
 
     pub fn next(&self, picks: Picks) -> Step {
+        let mode = picks
+            .mode
+            .clone()
+            .unwrap_or_else(|| self.state.preferred_mode.clone());
+        match self.next_step(picks) {
+            Next::Screen(mut screen) if !self.state.prefetch_attached.replace(true) => {
+                // Jobs need the picker's Runtime. Attach to its first screen,
+                // not just GPU: reads overlap repository/mode input, never draw.
+                if self.state.search.is_some() {
+                    screen = screen.prices(self.price_job(&mode));
+                }
+                if self.state.tpu_setup_error.is_none() {
+                    if self.state.prefetch_tpu_prices {
+                        screen = screen.prices(self.state.tpu_prices.clone());
+                    }
+                    if let Some(catalog) = &self.state.tpu_catalog {
+                        screen = screen.background(catalog.clone());
+                    }
+                }
+                Next::Screen(screen)
+            }
+            step => step,
+        }
+    }
+
+    fn next_step(&self, picks: Picks) -> Step {
         let s = &self.state;
         if picks.repo.is_none() {
             return Next::Screen(self.repo_screen(picks, String::new()));
@@ -423,6 +458,18 @@ impl LaunchWizard {
         types.sort();
         types.dedup();
         types
+    }
+    pub(crate) fn tpu_data(&self) -> crate::gcp_wizard::Types {
+        crate::gcp_wizard::Types {
+            initial: self.tpu_types(),
+            catalog: self
+                .state
+                .tpu_catalog
+                .clone()
+                .unwrap_or_else(|| Job::new(|| Ok(Vec::new()))),
+            rates: self.state.tpu_prices.clone(),
+            cached: self.state.tpu_cached_prices.clone(),
+        }
     }
     fn tpu_prices(&self) -> Option<Arc<crate::gcp_prices::Prices>> {
         if self.state.tpu_prices.state() == JobState::Failed {
@@ -699,7 +746,7 @@ impl LaunchWizard {
             .empty(NO_OFFERS)
     }
 
-    /// One shared price search per mode, so F2 on any GPU screen prices them all.
+    /// One shared price search per mode, including the launch-time prefetch.
     fn price_job(&self, mode: &str) -> Job<Stats> {
         let mut prices = self.state.prices.borrow_mut();
         prices

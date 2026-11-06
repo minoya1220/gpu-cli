@@ -14,7 +14,8 @@ use std::process::Command;
 pub const FAKE_CLI: &str = r#"#!/bin/sh
 set -f
 tool=$(basename "$0")
-{ printf '%s' "$tool"; for arg in "$@"; do printf '\t%s' "$arg"; done; printf '\n'; } >> "$FAKE_CLI_LOG"
+entry=$tool; for arg in "$@"; do entry="$entry	$arg"; done
+printf '%s\n' "$entry" >> "$FAKE_CLI_LOG"
 sleep "${FAKE_CLI_DELAY:-0.3}"
 case "$tool $1 $2" in
     "gh repo list")
@@ -44,7 +45,8 @@ esac
 /// Logs the call and fails: for tools a test must never reach.
 pub const FORBIDDEN: &str = r#"#!/bin/sh
 tool=$(basename "$0")
-{ printf '%s' "$tool"; for arg in "$@"; do printf '\t%s' "$arg"; done; printf '\n'; } >> "$FAKE_CLI_LOG"
+entry=$tool; for arg in "$@"; do entry="$entry	$arg"; done
+printf '%s\n' "$entry" >> "$FAKE_CLI_LOG"
 echo "unexpected call: $tool $*" >&2
 exit 97
 "#;

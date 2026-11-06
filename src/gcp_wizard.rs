@@ -194,11 +194,11 @@ fn next_with(ctx: Ctx, settings: Settings, cfg: Dict, picks: Selection) -> Next<
 }
 
 #[derive(Clone)]
-struct Types {
-    initial: Vec<String>,
-    catalog: Job<Vec<String>>,
-    rates: Job<std::sync::Arc<crate::gcp_prices::Prices>>,
-    cached: Option<std::sync::Arc<crate::gcp_prices::Prices>>,
+pub(crate) struct Types {
+    pub(crate) initial: Vec<String>,
+    pub(crate) catalog: Job<Vec<String>>,
+    pub(crate) rates: Job<std::sync::Arc<crate::gcp_prices::Prices>>,
+    pub(crate) cached: Option<std::sync::Arc<crate::gcp_prices::Prices>>,
 }
 impl Types {
     fn names(&self) -> Vec<String> {
@@ -516,6 +516,7 @@ pub(crate) fn transition(
             expiry_at: deadline,
             ..Selection::default()
         };
+        let data = wizard.tpu_data();
         let finish = std::rc::Rc::new(move |selection: Selection| {
             wizard.next(crate::wizard::Picks {
                 tpu: selection.tpu.clone().map(crate::wizard::TpuChoice::Type),
@@ -533,7 +534,18 @@ pub(crate) fn transition(
                 finish.clone(),
             )
         };
-        match next_with(ctx.clone(), settings, cfg.clone(), selection) {
+        let step = if selection.tpu.is_none() {
+            Next::Screen(type_screen(
+                ctx.clone(),
+                settings,
+                cfg.clone(),
+                selection,
+                Some(data),
+            ))
+        } else {
+            next_with(ctx.clone(), settings, cfg.clone(), selection)
+        };
+        match step {
             Next::Screen(s) => Next::Screen(map(s)),
             Next::Notice(m) => Next::Notice(m),
             Next::Done(s) => finish(s),

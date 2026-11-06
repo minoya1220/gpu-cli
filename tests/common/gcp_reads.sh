@@ -8,7 +8,8 @@ reply() {
       https://tpu.googleapis.com/v1/*/locations\?*) body='{"locations":[{"locationId":"us-east5-b"},{"locationId":"us-central1-a"}]}' ;;
       https://tpu.googleapis.com/v2/*/acceleratorTypes*) body='{"acceleratorTypes":[{"type":"v5litepod-1"},{"type":"v6e-1"}]}' ;;
       https://tpu.googleapis.com/v2/*/nodes\?*) body=$(cat "$root/gcp-nodes.json") ;;
-      https://cloudtasks.googleapis.com/v2/*/tasks\?*) body='{"tasks":[]}' ;;
+      https://cloudtasks.googleapis.com/v2/*/tasks\?*)
+        if [ -f "$root/gcp-task.json" ]; then body='{"tasks":['$(cat "$root/gcp-task.json")']}'; else body='{"tasks":[]}'; fi ;;
       https://cloudbilling.googleapis.com/v1beta/skus/*/price\?*)
         if [ -f "$root/gcp-prices" ]; then
           units=2

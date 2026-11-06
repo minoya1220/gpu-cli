@@ -36,6 +36,9 @@ struct State {
     paused: bool,
     finite_retries: bool,
     vast_fail: bool,
+    creating_reads: usize,
+    ssh_failures: usize,
+    deny_ssh: bool,
 }
 fn value(d: Dict) -> String {
     pyjson::dumps(&Value::Dict(d), None)
@@ -87,7 +90,7 @@ fn fixture() -> (TestEnv, Ctx, Arc<FakeRunner>, Arc<Mutex<State>>) {
                 "test deliberately has no Billing credentials",
             ));
         }
-        if a[0] == "code" {
+        if ["code", "cursor", "zed", "ssh"].contains(&a[0]) {
             return ok("");
         }
         assert_eq!(a[0], "gcloud", "unexpected command: {a:?}");
@@ -157,7 +160,7 @@ fn fixture() -> (TestEnv, Ctx, Arc<FakeRunner>, Arc<Mutex<State>>) {
             "list" => ok(&list(if ["us-east5-b","-"].contains(&arg(cmd,"zone").as_str()) {state.nodes.clone()} else {Vec::new()})),
             "describe" if state.fail_presence => Ok(Output::failed(1,"PERMISSION_DENIED: secret")),
             "describe" => match state.nodes.iter().find(|n| crate::gcp::text(n,"name").is_some_and(|name| name.ends_with(&format!("/{}", a[5])))) {
-                Some(n) => ok(&value(n.clone())), None => Ok(Output::failed(1,"NOT_FOUND: node does not exist")),
+                Some(n) => {let mut n=n.clone();if state.creating_reads>0 {state.creating_reads-=1;n.insert("state",Value::str("CREATING"));}ok(&value(n))}, None => Ok(Output::failed(1,"NOT_FOUND: node does not exist")),
             },
             "create" => {
                 assert!(!state.tasks.is_empty(), "create without a deletion task");
@@ -175,7 +178,12 @@ fn fixture() -> (TestEnv, Ctx, Arc<FakeRunner>, Arc<Mutex<State>>) {
             },
             "delete" => { state.nodes.clear(); ok("{}") },
             "ssh" if a.contains(&"--dry-run") => ok("/usr/bin/ssh -t -i /tmp/test-key -o CheckHostIP=no -o HostKeyAlias=compute.123 -o UserKnownHostsFile=/tmp/known_hosts developer@192.0.2.10"),
-            "ssh" => { assert!(a.contains(&"--command=true")); ok("") },
+            "ssh" => {
+                assert!(a.contains(&"--command=true"));
+                if state.deny_ssh {return Ok(Output::failed(1,"PERMISSION_DENIED token=do-not-print"));}
+                if state.ssh_failures>0 {state.ssh_failures-=1;return Ok(Output::failed(1,"ssh exited with return code [255]: Permission denied (publickey) token=do-not-print"));}
+                ok("")
+            },
             _ => panic!("unexpected cloud request: {a:?}"),
         }
     };
@@ -477,6 +485,84 @@ fn edit_reuses_gcloud_user_keys_and_workspace_in_temp_home() {
             "/workspace/demo".into()
         ]
     );
+}
+
+#[test]
+fn every_tpu_editor_waits_for_creating_and_ssh_key_propagation_without_mutating_lifecycle() {
+    for editor in ["cursor", "code", "zed", "nvim"] {
+        let (env, ctx, runner, state) = fixture();
+        env.executable(editor, "#!/bin/sh\nexit 0\n");
+        {
+            let mut s = state.lock().unwrap();
+            s.nodes.push(node(false));
+            s.creating_reads = 2;
+            s.ssh_failures = 2;
+        }
+        assert_eq!(
+            main(&ctx, &["edit", ID, "--editor", editor]),
+            0,
+            "{}",
+            err(&ctx)
+        );
+        let progress = err(&ctx);
+        assert!(progress.contains("CREATING"));
+        assert!(progress.contains("READY"));
+        assert!(progress.contains("waiting for SSH"));
+        assert!(!progress.contains("do-not-print"));
+        assert!(out(&ctx).contains("/workspace/demo"));
+        for call in runner.calls() {
+            if call.argv[0] == "gcloud" {
+                assert!(call.timeout.is_some_and(|t| t <= 15.0));
+                assert!(!call.argv.iter().any(|s| [
+                    "create",
+                    "create-http-task",
+                    "delete",
+                    "stop",
+                    "start"
+                ]
+                .contains(&s.as_str())));
+            }
+        }
+        assert_eq!(
+            crate::commands::last_editor(&ctx.env).as_deref(),
+            Some(editor)
+        );
+    }
+}
+#[test]
+fn tpu_editor_readiness_timeout_terminal_state_and_iam_failure_do_not_open_or_change_expiry() {
+    for mode in ["timeout", "stopped", "denied", "malformed"] {
+        let (env, ctx, runner, state) = fixture();
+        env.executable("code", "#!/bin/sh\nexit 0\n");
+        let mut n = node(false);
+        if mode == "timeout" {
+            n.insert("state", Value::str("CREATING"));
+        }
+        if mode == "stopped" {
+            n.insert("state", Value::str("STOPPED"));
+        }
+        if mode == "malformed" {
+            n.insert("state", Value::str("token=do-not-print"));
+        }
+        {
+            let mut s = state.lock().unwrap();
+            s.nodes.push(n);
+            s.deny_ssh = mode == "denied";
+        }
+        assert_eq!(main(&ctx, &["edit", ID, "--editor", "code"]), 1);
+        let error = err(&ctx);
+        assert!(!error.contains("do-not-print"));
+        if mode == "timeout" {
+            assert!(error.contains("Timed out waiting for TPU"));
+            assert!(error.contains("expiry is unchanged"));
+        }
+        assert!(!runner.argvs().iter().any(|a| a[0] == "code"
+            || a.iter().any(
+                |s| ["create", "create-http-task", "delete", "stop", "start"].contains(&s.as_str())
+            )));
+        assert!(!env.history_path().exists());
+        assert!(!env.home.join(".ssh/gpu_gcp_config").exists());
+    }
 }
 
 #[test]

@@ -294,8 +294,12 @@ creates or timer cleanup never offer another paid launch.
 
 Worker **0** handles SSH/editing, including multi-worker types. Successful
 interactive launches offer the same editor picker as Vast. `gpu ssh` prints the
-command; `--exec` runs it. Editing needs READY and successful SSH, then maintains
-`~/.ssh/gpu_gcp_config`. IAP-only/private SSH is unsupported. Public repos clone
+command; `--exec` runs it. Editing waits up to 120 seconds for CREATING → READY
+and SSH, with progress on stderr. It retries boot/key-propagation failures;
+stopped, deleted, or preempted nodes and IAM errors fail without starting a VM
+or changing its expiry. gcloud provisions SSH keys and resolves the user; the
+editor then reuses that connection through `~/.ssh/gpu_gcp_config`.
+IAP-only/private SSH is unsupported. Public repos clone
 into `/workspace/NAME`; no GitHub/cloud credentials transfer. VM users share a
 writable workspace. Install your own TPU framework; no CUDA/Nsight setup runs.
 Repo bootstrap failure does not disable expiry. Distributed orchestration,

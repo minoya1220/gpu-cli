@@ -120,7 +120,16 @@ impl Settings {
 
 /// Never relay gcloud stderr: it may contain credentials, URLs or tracebacks.
 pub fn run(ctx: &Ctx, args: &[String], next: &str) -> Result<String> {
-    match ctx.run(&Cmd::new(args).timeout(Some(600.0))) {
+    run_timeout(ctx, args, next, 600.0)
+}
+pub(crate) fn run_timeout(ctx: &Ctx, args: &[String], next: &str, timeout: f64) -> Result<String> {
+    checked(ctx.run(&Cmd::new(args).timeout(Some(timeout))), next)
+}
+pub(crate) fn checked(
+    result: std::result::Result<crate::process::Output, RunError>,
+    next: &str,
+) -> Result<String> {
+    match result {
         Err(RunError::Denied(message)) => Err(Error::msg(message)),
         Ok(out) if out.code == 0 => Ok(out.stdout.trim().into()),
         result => {
@@ -157,9 +166,17 @@ pub fn run(ctx: &Ctx, args: &[String], next: &str) -> Result<String> {
         }
     }
 }
-pub fn json(ctx: &Ctx, mut args: Vec<String>, next: &str) -> Result<Value> {
+pub fn json(ctx: &Ctx, args: Vec<String>, next: &str) -> Result<Value> {
+    json_timeout(ctx, args, next, 600.0)
+}
+pub(crate) fn json_timeout(
+    ctx: &Ctx,
+    mut args: Vec<String>,
+    next: &str,
+    timeout: f64,
+) -> Result<Value> {
     args.push("--format=json".into());
-    pyjson::loads(&run(ctx, &args, next)?).map_err(|_| {
+    pyjson::loads(&run_timeout(ctx, &args, next, timeout)?).map_err(|_| {
         Error::msg(format!(
             "Google Cloud returned an unreadable reply. Next: {next}"
         ))

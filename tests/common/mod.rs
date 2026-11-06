@@ -108,6 +108,26 @@ impl Sandbox {
         );
     }
 
+    pub fn gcp_lifecycle(&self) {
+        let config = self.root.join("config/gpu");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(config.join("config.json"),r#"{"gcp":{"setup":{"version":1,"project":"test-project"},"project":"test-project","expiry":{"queue":"gpu-expiry","location":"us-central1","service_account":"reaper@test-project.iam.gserviceaccount.com"}}}"#).unwrap();
+        self.gcp_reads("[]", true);
+        self.stub("gcloud", include_str!("gcp_native.py"));
+        self.stub(
+            "vastai",
+            &FAKE_CLI.replace(
+                "case \"$tool $1 $2\" in",
+                "case \"$tool $1 $2\" in\n    \"vastai show instances\") echo '[]' ;;",
+            ),
+        );
+        for editor in ["cursor", "code", "zed"] {
+            self.stub(editor,r#"#!/bin/sh
+{ printf '%s' "$(basename "$0")"; for arg in "$@"; do printf '\t%s' "$arg"; done; printf '\n'; } >> "$FAKE_CLI_LOG"
+"#);
+        }
+    }
+
     pub fn env(&self) -> Vec<(String, String)> {
         let path = |p: &Path| p.to_string_lossy().into_owned();
         vec![

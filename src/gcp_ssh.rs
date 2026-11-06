@@ -157,6 +157,135 @@ pub fn remove(ctx: &Ctx, id: &TpuId) -> Result<()> {
     Ok(())
 }
 
+fn probe(ctx: &Ctx, args: &[String], next: &str, timeout: f64) -> Result<bool> {
+    let result = ctx.run(&crate::process::Cmd::new(args).timeout(Some(timeout)));
+    match &result {
+        Ok(out) if out.code == 0 => Ok(true),
+        Err(crate::process::RunError::TimedOut) => Ok(false),
+        Ok(out)
+            if {
+                // gcloud wraps OpenSSH's 255 in its own exit status. A newly
+                // published key can also briefly fail public-key authentication.
+                let detail = format!("{} {}", out.stdout, out.stderr).to_ascii_lowercase();
+                out.code == 255
+                    || [
+                        "[255]",
+                        "permission denied (publickey",
+                        "connection refused",
+                        "connection timed out",
+                        "connection reset",
+                        "no route to host",
+                    ]
+                    .iter()
+                    .any(|s| detail.contains(s))
+            } =>
+        {
+            Ok(false)
+        }
+        _ => gcp::checked(result, next).map(|_| true),
+    }
+}
+
+/// Use the same bounded readiness/SSH wait as Vast, without changing node
+/// lifecycle or its already armed expiry. All work runs after the picker exits.
+fn wait_for_ssh(ctx: &Ctx, id: &TpuId, editor: &str, timeout: f64) -> Result<Dict> {
+    let end = ctx.clock.monotonic() + timeout;
+    let next = format!("gpu edit {} --editor {editor}", id.cli());
+    let timed_out = || {
+        Error::msg(format!(
+            "Timed out waiting for TPU {} and SSH after {}s; expiry is unchanged. Next: {next}",
+            id.cli(),
+            crate::pyfmt::general(timeout)
+        ))
+    };
+    ctx.eprintln(&format!(
+        "Waiting for TPU {} and SSH (up to {}s)...",
+        id.cli(),
+        crate::pyfmt::general(timeout)
+    ))?;
+    let mut previous = String::new();
+    loop {
+        let remaining = end - ctx.clock.monotonic();
+        if remaining <= 0.0 {
+            return Err(timed_out());
+        }
+        let node = gcp::json_timeout(ctx, id.args("describe"), &next, remaining.min(15.0))?
+            .as_dict()
+            .cloned()
+            .ok_or_else(gcp::bad_reply)?;
+        let state = gcp::text(&node, "state").ok_or_else(gcp::bad_reply)?;
+        if ![
+            "READY",
+            "CREATING",
+            "STARTING",
+            "RESTARTING",
+            "REIMAGING",
+            "REPAIRING",
+            "STOPPED",
+            "STOPPING",
+            "DELETING",
+            "PREEMPTED",
+            "TERMINATED",
+        ]
+        .contains(&state)
+        {
+            return Err(gcp::bad_reply());
+        }
+        if state != previous {
+            ctx.eprintln(&format!("TPU {}: {state}", id.cli()))?;
+            previous = state.into();
+        }
+        match state {
+            "READY" => {
+                workspace(&node)?;
+                let mut ssh = ssh_args(id);
+                ssh.push("--command=true".into());
+                let remaining = end - ctx.clock.monotonic();
+                if remaining <= 0.0 {
+                    return Err(timed_out());
+                }
+                if probe(ctx, &ssh, &next, remaining.min(15.0))? {
+                    return Ok(node);
+                }
+                if ctx.clock.monotonic() >= end {
+                    return Err(timed_out());
+                }
+                ctx.eprintln("TPU is READY; waiting for SSH...")?;
+            }
+            "CREATING" | "STARTING" | "RESTARTING" | "REIMAGING" | "REPAIRING" => {}
+            _ => {
+                return Err(Error::msg(format!(
+                    "TPU {} is {state}; cannot open an editor. Next: gpu ls --provider gcp",
+                    id.cli()
+                )))
+            }
+        }
+        let remaining = end - ctx.clock.monotonic();
+        if remaining > 0.0 {
+            ctx.clock.sleep(remaining.min(2.0));
+        }
+    }
+}
+fn workspace(node: &Dict) -> Result<&str> {
+    let directory = node
+        .get("metadata")
+        .and_then(Value::as_dict)
+        .and_then(|m| gcp::text(m, "gpu-workspace"))
+        .unwrap_or("/workspace");
+    if directory != "/workspace"
+        && !directory.strip_prefix("/workspace/").is_some_and(|s| {
+            !s.is_empty()
+                && s != "."
+                && s != ".."
+                && s.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        })
+    {
+        return Err(gcp::bad_reply());
+    }
+    Ok(directory)
+}
+
 pub fn edit(
     ctx: &Ctx,
     cfg: &Dict,
@@ -179,34 +308,11 @@ pub fn edit(
         }
     };
     crate::editors::check_editor(&ctx.env, &editor)?;
-    let node = gcp::describe(ctx, id)?;
-    if gcp::text(&node, "state") != Some("READY") {
-        return Err(Error::msg(
-            "Wait for the TPU to become READY. Next: gpu ls --provider gcp",
-        ));
-    }
-    let directory = node
-        .get("metadata")
-        .and_then(Value::as_dict)
-        .and_then(|m| gcp::text(m, "gpu-workspace"))
-        .unwrap_or("/workspace");
-    if directory != "/workspace"
-        && !directory.strip_prefix("/workspace/").is_some_and(|s| {
-            !s.is_empty()
-                && s != "."
-                && s != ".."
-                && s.bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
-        })
-    {
-        return Err(gcp::bad_reply());
-    }
-    let mut probe = ssh_args(id);
-    probe.push("--command=true".into());
-    gcp::run(ctx, &probe, &format!("gpu ssh {} --exec", id.cli()))?;
+    let node = wait_for_ssh(ctx, id, &editor, 120.0)?;
+    let directory = workspace(&node)?;
     let mut dry = ssh_args(id);
     dry.push("--dry-run".into());
-    let command = gcp::run(ctx, &dry, &format!("gpu ssh {} --exec", id.cli()))?;
+    let command = gcp::run_timeout(ctx, &dry, &format!("gpu ssh {} --exec", id.cli()), 15.0)?;
     save(ctx, id, &stanza(id, &command)?)?;
     let configured = crate::config::nvim_config(cfg)?;
     let nvim = if editor == "nvim" {

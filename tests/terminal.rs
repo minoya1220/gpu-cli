@@ -797,6 +797,89 @@ printf 'test-token\n'
 }
 
 #[test]
+fn test_tpu_post_launch_editor_then_edit_and_cursor_use_instance_picker() {
+    let sandbox = Sandbox::new();
+    sandbox.gcp_lifecycle();
+    let history = sandbox.history_path();
+    std::fs::create_dir_all(history.parent().unwrap()).unwrap();
+    std::fs::write(&history, r#"{"editor":["cursor"]}"#).unwrap();
+    let mut term = Terminal::start(&sandbox, &["up", "--no-repo", "--expire", "2h"]);
+    term.wait(on("Mode"));
+    term.press_until("1", on("GPU"));
+    term.press_until("tpu", shows("Filter: tpu"));
+    term.press_until(RIGHT, on("TPU generation"));
+    term.press_until("v6e", shows("Filter: v6e"));
+    term.press_until(RIGHT, on("v6e size"));
+    term.press_until(RIGHT, on("TPU capacity"));
+    term.press_until("2", on("TPU zone"));
+    term.press_until("us-east5-b", shows("Filter: us-east5-b"));
+    term.press_until(RIGHT, shows("Type yes:"));
+    term.press_until("yes\r", shows("Open workspace"));
+    assert!(shows("Open in Cursor")(&term));
+    assert!(shows("Select editor...")(&term));
+    assert!(shows("Don't open")(&term));
+    term.press(DOWN);
+    term.press_until(RIGHT, shows("Editor"));
+    term.press(DOWN);
+    term.press(RIGHT);
+    assert_eq!(term.exit_status(), 0, "{}", term.output_text());
+    assert!(term.output_text().contains("CREATING"));
+    assert!(term.output_text().contains("Opened VS Code"));
+    for (command, tool) in [("edit", "code"), ("cursor", "cursor")] {
+        if command == "edit" {
+            let nodes = sandbox.root.join("gcp-nodes.json");
+            let data = std::fs::read_to_string(&nodes).unwrap();
+            std::fs::write(nodes, data.replace("\"READY\"", "\"CREATING\"")).unwrap();
+            std::fs::write(sandbox.root.join("gcp-creating-reads.json"), "1").unwrap();
+        }
+        let mut edit = Terminal::start(&sandbox, &[command]);
+        edit.wait(shows("Google Cloud"));
+        assert!(shows("v6e-1")(&edit));
+        edit.press(RIGHT);
+        assert_eq!(edit.exit_status(), 0, "{}", edit.output_text());
+        if command == "edit" {
+            assert!(edit.output_text().contains("CREATING"));
+        }
+        assert!(sandbox.calls().iter().any(|a| a[0] == tool
+            && a.iter()
+                .any(|s| s.starts_with("ssh-remote+gcp_test-project_us-east5-b_gpu-"))
+            && a.iter().any(|s| s == "/workspace")));
+    }
+    let config = std::fs::read_to_string(sandbox.home.join(".ssh/gpu_gcp_config")).unwrap();
+    assert!(config.contains("Host gcp_test-project_us-east5-b_gpu-"));
+    assert!(config.contains("User \"developer\""));
+    assert!(config.contains("google_compute_engine"));
+    assert!(!config.contains("test-token"));
+    // A blank destruction confirmation intentionally cancels. Enter on the
+    // instance picker must not leak a newline into the following confirmation.
+    for approve in [false, true] {
+        let mut down = Terminal::start(&sandbox, &["down"]);
+        down.wait(shows("Google Cloud"));
+        down.press_until(ENTER, shows("Destroy TPU"));
+        down.press(if approve { "yes\r" } else { "\r" });
+        assert_eq!(down.exit_status(), 0, "{}", down.output_text());
+        assert!(down.output_text().contains(if approve {
+            "Destroyed TPU"
+        } else {
+            "Cancelled."
+        }));
+        assert_eq!(sandbox.root.join("gcp-task.json").exists(), !approve);
+    }
+    let calls = sandbox.calls();
+    let delete_node = calls
+        .iter()
+        .position(|a| a.get(4).is_some_and(|s| s == "delete"))
+        .unwrap();
+    let delete_task = calls
+        .iter()
+        .position(|a| {
+            a.get(1).is_some_and(|s| s == "tasks") && a.get(2).is_some_and(|s| s == "delete")
+        })
+        .unwrap();
+    assert!(delete_node < delete_task);
+}
+
+#[test]
 fn test_cloud_generation_and_size_back_restore_gpu_page_for_left_and_backtick() {
     for back in [LEFT, BACK] {
         let sandbox = Sandbox::new();

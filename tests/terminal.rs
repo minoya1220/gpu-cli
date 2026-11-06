@@ -195,6 +195,30 @@ fn shows(text: &'static str) -> impl Fn(&Terminal) -> bool {
     move |t| t.lines().iter().any(|line| line.contains(text))
 }
 
+fn assert_aligned(term: &Terminal, token: &str) {
+    let rows = term
+        .lines()
+        .into_iter()
+        .filter(|l| l.contains(token))
+        .collect::<Vec<_>>();
+    assert!(rows.len() >= 2, "need multiple rows for {token}: {rows:?}");
+    let columns = rows
+        .iter()
+        .map(|l| l.split_once(token).unwrap().0.chars().count())
+        .collect::<Vec<_>>();
+    assert!(
+        columns.iter().all(|c| *c == columns[0]),
+        "unaligned {token}: {rows:?}"
+    );
+    assert!(
+        term.lines()
+            .iter()
+            .all(|l| !l.contains('·') && !l.contains('*')),
+        "{}",
+        term.lines().join("\n")
+    );
+}
+
 fn tools(sandbox: &Sandbox) -> Vec<String> {
     sandbox
         .calls()
@@ -397,7 +421,7 @@ case "$*" in
 esac
 "#);
     let mut term = Terminal::start(&sandbox, &["setup"]);
-    term.wait(shows("Vast.ai  ✓ set up"));
+    term.wait(shows("Vast.ai       ✓ set up"));
     assert!(shows("Google Cloud  not set up")(&term));
     assert_eq!(tools(&sandbox), ["vastai"]);
     term.press_until("2", on("Google Cloud project"));
@@ -740,11 +764,16 @@ printf 'test-token\n'
         ],
     );
     term.wait(on("TPU generation"));
+    term.wait(shows("Spot $2.750/hr"));
+    assert_aligned(&term, "Spot ");
+    assert!(!shows("from unavailable")(&term));
     term.press_until("v6e", shows("Filter: v6e"));
     term.press_until(RIGHT, on("v6e size"));
-    term.wait(shows("1 chip · $2.750/hr · Spot $2.750/hr"));
+    term.wait(shows("Spot $2.750/hr"));
+    assert_aligned(&term, "Spot ");
     term.press_until(ENTER, on("TPU zone"));
-    term.wait(shows("us-east (1 zone)"));
+    term.wait(shows("us-east     1  zone"));
+    assert_aligned(&term, "  zone");
     assert!(
         term.lines()
             .iter()
@@ -753,12 +782,16 @@ printf 'test-token\n'
         term.lines().join("\n")
     );
     term.press_until(RIGHT, on("us-central zones"));
-    term.wait(shows("us-central1-a · $2.750/hr"));
+    term.wait(shows("us-central1-a  $2.750/hr"));
     assert!(!shows(" — v6e")(&term));
     term.press_until(BACK, on("TPU zone"));
     term.press("\x1b[A");
     term.press_until(RIGHT, on("us-east zones"));
-    term.wait(shows("us-east5-b · $0.750/hr"));
+    term.wait(shows("us-east5-b  $0.750/hr"));
+    term.press_until(BACK, on("TPU zone"));
+    term.press_until("us-", shows("Filter: us-"));
+    term.wait(|t| t.lines().iter().filter(|l| l.contains("/hr")).count() == 2);
+    assert_aligned(&term, "$");
     term.press("\x03");
     assert_eq!(term.exit_status(), 130);
 }

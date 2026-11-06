@@ -57,7 +57,7 @@ pub(crate) fn label(tpu: &str) -> String {
         Some("v2" | "v3" | "v4" | "v5p") if n % 2 == 0 => {
             let chips = n / 2;
             format!(
-                "{n} TensorCores · {chips} {}",
+                "{n} TensorCores ({chips} {})",
                 if chips == 1 { "chip" } else { "chips" }
             )
         }
@@ -74,7 +74,7 @@ mod tests {
         assert_eq!(label("v5litepod-4"), "4 chips");
         assert_eq!(label("v6e-8"), "8 chips");
         for t in ["v2-8", "v3-8", "v4-8", "v5p-8"] {
-            assert_eq!(label(t), "8 TensorCores · 4 chips");
+            assert_eq!(label(t), "8 TensorCores (4 chips)");
         }
         assert_eq!(label("v99-8"), "Size 8");
         for bad in ["v5e-0", "v5e-no", "-1"] {

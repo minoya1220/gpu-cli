@@ -183,9 +183,9 @@ or validate a TPU zone: that belongs to launch. Existing explicit `gcp.zone`
 settings remain compatible; setup's old `--zone` flag now points to launch.
 
 At launch, choose **generation → size → capacity → area → zone**, then the
-deadline. Generation and size are remembered per project. Size rows show prices
-for the displayed reference region; Spot/on-demand estimates load without
-blocking input. v5e/v6e suffixes count **chips**; v2/v3/v4/v5p suffixes count
+deadline. Generation and size are remembered per project. Aligned size rows show
+prices for the displayed reference region; `-` means no price is available.
+Spot/on-demand estimates load without blocking input. v5e/v6e suffixes count **chips**; v2/v3/v4/v5p suffixes count
 **TensorCores** (two per chip), not pods. Rows show both counts where applicable.
 Full `--tpu v6e-1` / `--type v6e-1` names still work and skip generation/size;
 capacity flags skip their screen. Areas include only zones offering that

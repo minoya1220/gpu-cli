@@ -255,33 +255,53 @@ impl Prices {
                 )
             })
     }
-    pub fn category_label(&self, types: &[&str]) -> String {
+    /// Display fields, not a prejoined label: measure the complete list before
+    /// rendering. Never prefix a missing price with "from".
+    pub(crate) fn rate_columns(&self, types: &[&str], minimum: bool) -> [String; 2] {
         let rate = |spot| {
             types
                 .iter()
                 .filter_map(|t| self.hourly(t, spot))
                 .min_by(f64::total_cmp)
-                .map(|p| format!("${}/hr", crate::pyfmt::fixed(p, 3)))
-                .unwrap_or_else(|| "unavailable".into())
         };
-        format!(
-            "TPU (Google Cloud) · from {} · Spot {}",
-            rate(false),
-            rate(true)
+        let demand = rate(false);
+        [
+            if minimum && demand.is_some() {
+                format!("from {}", money(demand))
+            } else {
+                money(demand)
+            },
+            format!("Spot {}", money(rate(true))),
+        ]
+    }
+    pub fn category_label(&self, types: &[&str]) -> String {
+        let [demand, spot] = self.rate_columns(types, true);
+        crate::offers::aligned_rows(
+            &[["TPU (Google Cloud)".into(), demand, spot]],
+            [
+                crate::offers::Column::Left,
+                crate::offers::Column::Left,
+                crate::offers::Column::Plain,
+            ],
         )
+        .remove(0)
     }
     pub fn label(&self, tpu: &str) -> String {
-        let rate = |spot| {
-            self.hourly(tpu, spot)
-                .map(|p| format!("${}/hr", crate::pyfmt::fixed(p, 3)))
-                .unwrap_or_else(|| "unavailable".into())
-        };
-        if self.hourly(tpu, false).is_none() && self.hourly(tpu, true).is_none() {
-            format!("TPU {tpu} · price unavailable")
-        } else {
-            format!("TPU {tpu} · {} · Spot {}", rate(false), rate(true))
-        }
+        let [demand, spot] = self.rate_columns(&[tpu], false);
+        crate::offers::aligned_rows(
+            &[[format!("TPU {tpu}"), demand, spot]],
+            [
+                crate::offers::Column::Left,
+                crate::offers::Column::Left,
+                crate::offers::Column::Plain,
+            ],
+        )
+        .remove(0)
     }
+}
+pub(crate) fn money(rate: Option<f64>) -> String {
+    rate.map(|p| format!("${}/hr", crate::pyfmt::fixed(p, 3)))
+        .unwrap_or_else(|| "-".into())
 }
 fn unavailable(reason: &str) -> Error {
     Error::msg(reason.to_string())

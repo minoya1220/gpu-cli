@@ -779,7 +779,7 @@ fn provider_status_picker_real_keys_never_probes_gcloud() {
     let ctx = env.ctx().runner(&runner).build();
     let screen = crate::setup::provider_screen(&ctx, &cfg(&env));
     let result = drive(screen, |keys| {
-        keys.wait(|s| s.labels.iter().any(|l| l == "Vast.ai  ✓ set up"));
+        keys.wait(|s| s.labels.iter().any(|l| l == "Vast.ai       ✓ set up"));
         assert!(keys
             .labels()
             .contains(&"Google Cloud  not set up".to_string()));

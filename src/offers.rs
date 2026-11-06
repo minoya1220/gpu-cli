@@ -234,31 +234,58 @@ pub fn offer_label(offer: &Dict) -> Result<String> {
 
 /// Aligned one-line offer rows for a single GPU model (the picker title names it).
 pub fn offer_rows(offers: &[Dict]) -> Result<Vec<String>> {
-    let mut prices = Vec::new();
-    let mut checks = Vec::new();
-    let mut ids = Vec::new();
-    for offer in offers {
-        prices.push(format!("${}/hr", fixed(offer_price(offer)?, 3)));
-        checks.push(text_or(offer, "verification", "unknown"));
-        ids.push(format!("id={}", py_str(field(offer, "id")?)));
-    }
-    let width = |items: &[String]| items.iter().map(|s| s.chars().count()).max().unwrap_or(0);
-    let (price_width, check_width, id_width) = (width(&prices), width(&checks), width(&ids));
-    let mut rows = Vec::new();
-    for (i, offer) in offers.iter().enumerate() {
-        rows.push(format!(
-            "{:>pw$}  {:>6} reliable  {:<cw$}  {:<iw$}  {}",
-            prices[i],
-            percent(reliability(offer)?, 1),
-            checks[i],
-            ids[i],
-            text_or(offer, "geolocation", "?"),
-            pw = price_width,
-            cw = check_width,
-            iw = id_width,
-        ));
-    }
-    Ok(rows)
+    let rows = offers
+        .iter()
+        .map(|offer| {
+            Ok([
+                format!("${}/hr", fixed(offer_price(offer)?, 3)),
+                format!("{:>6} reliable", percent(reliability(offer)?, 1)),
+                text_or(offer, "verification", "unknown"),
+                format!("id={}", py_str(field(offer, "id")?)),
+                text_or(offer, "geolocation", "?"),
+            ])
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(aligned_rows(
+        &rows,
+        [
+            Column::Right,
+            Column::Plain,
+            Column::Left,
+            Column::Left,
+            Column::Plain,
+        ],
+    ))
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum Column {
+    Left,
+    Right,
+    Plain,
+}
+
+/// The Vast picker's measured widths and double-space gutters, shared by TPU
+/// rows. Plain cells retain their own formatting (e.g. reliability and location).
+pub(crate) fn aligned_rows<const N: usize>(
+    rows: &[[String; N]],
+    columns: [Column; N],
+) -> Vec<String> {
+    let widths: [usize; N] =
+        std::array::from_fn(|i| rows.iter().map(|r| r[i].chars().count()).max().unwrap_or(0));
+    rows.iter()
+        .map(|row| {
+            row.iter()
+                .enumerate()
+                .map(|(i, cell)| match columns[i] {
+                    Column::Left => format!("{cell:<w$}", w = widths[i]),
+                    Column::Right => format!("{cell:>w$}", w = widths[i]),
+                    Column::Plain => cell.clone(),
+                })
+                .collect::<Vec<_>>()
+                .join("  ")
+        })
+        .collect()
 }
 
 pub fn model_label(model: &str, stats: &Stats) -> String {

@@ -385,7 +385,7 @@ fn test_auto_prices_are_shared_by_gpu_screens_and_loaded_once_per_mode() {
     assert_eq!(result, Outcome::Done(expected));
     assert_eq!(
         *gpu_labels.lock().unwrap(),
-        ["B200  $1.735/hr (1 offer)", "H100 SXM · price unavailable"]
+        ["B200  $1.735/hr (1 offer)", "H100 SXM  -"]
     );
 }
 
@@ -417,14 +417,7 @@ fn test_gpu_screen_caps_valid_recents_at_three_and_always_lists_tpus() {
                 labels
                     .iter()
                     .filter(|s| s.starts_with("Recent:"))
-                    .map(|s| s
-                        .split("  ")
-                        .next()
-                        .unwrap()
-                        .split(" · ")
-                        .next()
-                        .unwrap()
-                        .to_string())
+                    .map(|s| s.split("  ").next().unwrap().to_string())
                     .collect::<Vec<_>>(),
                 ["Recent: RTX 4090", "Recent: B200", "Recent: Tesla T4"]
             );

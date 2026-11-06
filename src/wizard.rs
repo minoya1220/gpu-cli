@@ -436,45 +436,65 @@ impl LaunchWizard {
     }
     fn price_suffix(state: JobState) -> &'static str {
         if matches!(state, JobState::Idle | JobState::Running) {
-            " · …"
+            "  …"
         } else {
-            " · price unavailable"
+            "  -"
         }
     }
-    fn tpu_label(&self, tpu: Option<&str>) -> String {
-        if let Some(prices) = self.tpu_prices() {
-            return tpu
-                .map(|t| {
-                    if t.contains('-') {
-                        prices.label(t)
-                    } else {
-                        let types = crate::gcp_types::members(&self.tpu_types(), t);
-                        prices
-                            .category_label(&types.iter().map(String::as_str).collect::<Vec<_>>())
-                            .replacen(TPU_CATEGORY, &format!("TPU {t}"), 1)
-                    }
-                })
-                .unwrap_or_else(|| {
-                    prices.category_label(
-                        &self
-                            .tpu_types()
-                            .iter()
-                            .map(String::as_str)
-                            .collect::<Vec<_>>(),
+    fn tpu_options(&self, shortcuts: Vec<String>) -> Vec<Opt<Choice>> {
+        let values = std::iter::once(None)
+            .chain(shortcuts.into_iter().map(Some))
+            .collect::<Vec<_>>();
+        let prices = self.tpu_prices();
+        let types = self.tpu_types();
+        let cells = values
+            .iter()
+            .map(|value| {
+                let name = value
+                    .as_ref()
+                    .map(|t| format!("TPU {t}"))
+                    .unwrap_or_else(|| TPU_CATEGORY.into());
+                let [demand, spot] = if let Some(p) = &prices {
+                    let (members, minimum) = match value {
+                        Some(t) if t.contains('-') => (vec![t.clone()], false),
+                        Some(g) => (crate::gcp_types::members(&types, g), true),
+                        None => (types.clone(), true),
+                    };
+                    p.rate_columns(
+                        &members.iter().map(String::as_str).collect::<Vec<_>>(),
+                        minimum,
                     )
-                });
-        }
-        let base = tpu
-            .map(|t| format!("TPU {t}"))
-            .unwrap_or_else(|| TPU_CATEGORY.into());
-        if self.state.tpu_setup_error.is_some() {
-            format!("{base} · needs gpu setup")
-        } else {
-            format!(
-                "{base}{}",
-                Self::price_suffix(self.state.tpu_prices.state())
-            )
-        }
+                } else if self.state.tpu_setup_error.is_some() {
+                    ["needs gpu setup".into(), String::new()]
+                } else {
+                    let pending = matches!(
+                        self.state.tpu_prices.state(),
+                        JobState::Idle | JobState::Running
+                    );
+                    let value = if pending { "…" } else { "-" };
+                    [value.into(), format!("Spot {value}")]
+                };
+                [name, demand, spot]
+            })
+            .collect::<Vec<_>>();
+        let labels = crate::offers::aligned_rows(
+            &cells,
+            [
+                crate::offers::Column::Left,
+                crate::offers::Column::Left,
+                crate::offers::Column::Plain,
+            ],
+        );
+        values
+            .into_iter()
+            .zip(labels)
+            .map(|(value, label)| {
+                Opt::new(
+                    Choice::Tpu(value.map(TpuChoice::Type).unwrap_or(TpuChoice::ChooseType)),
+                    label.trim_end().to_string(),
+                )
+            })
+            .collect()
     }
     fn gpu_screen(&self, picks: Picks) -> WizardScreen {
         let prices = self.price_job(picks.mode.as_deref().unwrap_or(""));
@@ -503,10 +523,7 @@ impl LaunchWizard {
                     }
                     options.push(Opt::new(Choice::Category(category.clone()), label));
                 }
-                options.push(Opt::new(
-                    Choice::Tpu(TpuChoice::ChooseType),
-                    opts.tpu_label(None),
-                ));
+                options.extend(opts.tpu_options(Vec::new()));
                 options
             }
         };
@@ -527,22 +544,14 @@ impl LaunchWizard {
                         Opt::new(Choice::Gpu(m.clone()), label)
                     })
                     .collect::<Vec<_>>();
-                options.push(Opt::new(
-                    Choice::Tpu(TpuChoice::ChooseType),
-                    search.tpu_label(None),
-                ));
+
                 let types = search.tpu_types();
                 let values = if query.contains('-') {
                     types
                 } else {
                     crate::gcp_types::generations(&types)
                 };
-                options.extend(values.into_iter().map(|t| {
-                    Opt::new(
-                        Choice::Tpu(TpuChoice::Type(t.clone())),
-                        search.tpu_label(Some(&t)),
-                    )
-                }));
+                options.extend(search.tpu_options(values));
                 options
             }
         };
@@ -580,12 +589,12 @@ impl LaunchWizard {
                 if let Some(prices) = cloud.tpu_prices() {
                     let cache = prices.cache_note();
                     format!(
-                        "TPU prices: {} · USD list{}",
+                        "TPU prices: {}  USD list{}",
                         prices.region,
                         if cache.is_empty() {
                             String::new()
                         } else {
-                            format!(" · {cache}")
+                            format!("  {cache}")
                         }
                     )
                 } else if cloud.state.tpu_setup_error.is_some() {

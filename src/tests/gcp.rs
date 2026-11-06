@@ -669,7 +669,7 @@ fn catalog_choices_share_a_stack_and_back_does_not_refetch() {
         assert!(keys.labels().iter().all(|l| l.contains("chip")));
         keys.press_until(ENTER, on("TPU capacity"));
         keys.press_until(ENTER, on("TPU zone"));
-        keys.wait(|s| s.labels == ["us-east (1 zone)", "us-central (1 zone)"]);
+        keys.wait(|s| s.labels == ["us-east     1  zone", "us-central  1  zone"]);
         keys.press_until(RIGHT, on("us-east zones"));
         assert!(!keys.labels().iter().any(|l| l.contains(" — ")));
         keys.press_until(ENTER, on("Destroy after (e.g. 2h)"));
@@ -1070,11 +1070,7 @@ fn interactive_capacity_retry_is_one_key_and_keeps_original_deadline() {
             );
             let clock = clock.clone();
             match drive(screen, move |keys| {
-                keys.wait(|s| {
-                    s.labels
-                        .iter()
-                        .any(|l| l.contains("us-east5-a · $0.750/hr"))
-                });
+                keys.wait(|s| s.labels.iter().any(|l| l.contains("us-east5-a  $0.750/hr")));
                 assert!(keys
                     .snapshot()
                     .notice
@@ -1155,7 +1151,7 @@ fn retry_can_return_to_grouped_zone_picker_without_authorizing_payment() {
         |keys| {
             keys.wait(|s| s.labels.iter().any(|l| l.starts_with("Retry")));
             keys.press_until("2", on("TPU zone"));
-            assert!(keys.labels().iter().any(|s| s.starts_with("us-east (")));
+            assert!(keys.labels().iter().any(|s| s.starts_with("us-east ")));
             keys.type_text("us-east5-a");
             keys.press(ENTER);
         },
@@ -1336,7 +1332,7 @@ fn type_filter_counts_and_prices_exclude_unsupported_remembered_zone() {
             crate::picker::Next::Done,
         ),
         |keys| {
-            keys.wait(|s| s.labels == ["us-east (2 zones)"]);
+            keys.wait(|s| s.labels == ["us-east  2  zones"]);
             keys.press_until(RIGHT, on("us-east zones"));
             keys.wait(|s| s.labels.iter().all(|l| l.contains("$0.750/hr")));
             assert_eq!(keys.labels().len(), 2);
@@ -1400,12 +1396,12 @@ fn generation_and_size_preferences_are_scoped_and_highlight_without_reordering()
             .iter()
             .any(|s| s.starts_with('›') && s.contains("v5p")));
         keys.press_until(RIGHT, on("v5p size"));
-        assert!(keys.labels()[0].starts_with("8 TensorCores · 4 chips"));
+        assert!(keys.labels()[0].starts_with("8 TensorCores (4 chips)"));
         assert!(keys
             .snapshot()
             .body
             .iter()
-            .any(|s| s.starts_with('›') && s.contains("16 TensorCores · 8 chips")));
+            .any(|s| s.starts_with('›') && s.contains("16 TensorCores (8 chips)")));
         assert!(!keys.labels().iter().any(|s| s.contains("pod")));
         keys.press_until(BACK, on("TPU generation"));
         keys.press(CTRL_C);

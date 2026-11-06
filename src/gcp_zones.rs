@@ -30,28 +30,42 @@ fn groups(zones: &[Zone]) -> Vec<(String, usize)> {
     }
     result
 }
+type PriceFields = Rc<dyn Fn(&Zone) -> [String; 2]>;
 #[derive(Clone)]
 pub(crate) struct Presentation {
     pub preferred: Option<String>,
-    pub label: Rc<dyn Fn(&Zone) -> String>,
+    pub fields: PriceFields,
     pub prices: Option<Job<()>>,
 }
 impl Default for Presentation {
     fn default() -> Self {
         Self {
             preferred: None,
-            label: Rc::new(|z| z.name.clone()),
+            fields: Rc::new(|_| [String::new(), String::new()]),
             prices: None,
         }
     }
 }
 fn options(zones: Vec<Zone>, display: &Presentation) -> Vec<Opt<String>> {
+    let rows = zones
+        .iter()
+        .map(|z| {
+            let [price, cache] = (display.fields)(z);
+            [z.name.clone(), price, cache]
+        })
+        .collect::<Vec<_>>();
+    let labels = crate::offers::aligned_rows(
+        &rows,
+        [
+            crate::offers::Column::Left,
+            crate::offers::Column::Right,
+            crate::offers::Column::Plain,
+        ],
+    );
     zones
         .into_iter()
-        .map(|z| {
-            let label = (display.label)(&z);
-            Opt::new(z.name, label)
-        })
+        .zip(labels)
+        .map(|(z, label)| Opt::new(z.name, label.trim_end().to_string()))
         .collect()
 }
 type Select<R> = Rc<dyn Fn(String) -> Next<String, R>>;
@@ -122,17 +136,29 @@ fn build<R: 'static>(
             if group.is_some() {
                 options(zones, &label_display)
             } else {
-                groups(&zones)
-                    .into_iter()
+                let areas = groups(&zones);
+                let rows = areas
+                    .iter()
                     .map(|(name, count)| {
-                        Opt::new(
-                            format!("@area:{name}"),
-                            format!(
-                                "{name} ({count} {})",
-                                if count == 1 { "zone" } else { "zones" }
-                            ),
-                        )
+                        [
+                            name.clone(),
+                            count.to_string(),
+                            if *count == 1 { "zone" } else { "zones" }.into(),
+                        ]
                     })
+                    .collect::<Vec<_>>();
+                let labels = crate::offers::aligned_rows(
+                    &rows,
+                    [
+                        crate::offers::Column::Left,
+                        crate::offers::Column::Right,
+                        crate::offers::Column::Plain,
+                    ],
+                );
+                areas
+                    .into_iter()
+                    .zip(labels)
+                    .map(|((name, _), label)| Opt::new(format!("@area:{name}"), label))
                     .collect()
             }
         },
@@ -213,9 +239,9 @@ mod tests {
             assert_eq!(
                 keys.labels(),
                 [
-                    "us-west (2 zones)",
-                    "us-east (2 zones)",
-                    "asia-south (1 zone)"
+                    "us-west     2  zones",
+                    "us-east     2  zones",
+                    "asia-south  1  zone"
                 ]
             );
             keys.press_until(RIGHT, on("us-west zones"));

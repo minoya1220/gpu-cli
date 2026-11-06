@@ -64,7 +64,15 @@ fn normalizes_units_slice_sizes_and_capacity_without_guessing_missing_rates() {
     assert_eq!(p.hourly("v4-32", false), Some(40.0));
     assert_eq!(p.hourly("v5e-1", true), None);
     assert_eq!(p.hourly("v99-1", false), None);
-    assert!(p.label("v6e-1").contains("$2.750/hr · Spot $0.750/hr"));
+    assert!(p.label("v6e-1").contains("$2.750/hr  Spot $0.750/hr"));
+    assert_eq!(
+        p.category_label(&["v99-1"]),
+        "TPU (Google Cloud)  -  Spot -"
+    );
+    assert_eq!(
+        p.rate_columns(&["v5e-1"], true),
+        ["from $1.000/hr", "Spot -"]
+    );
     let mut ambiguous = p.clone();
     let mut duplicate = p.skus[0].clone();
     duplicate.insert("pricingInfo", json(r#"[{"effectiveTime":"2026-01-01T00:00:00Z","pricingExpression":{"usageUnit":"chip.h","tieredRates":[{"unitPrice":{"currencyCode":"USD","units":"999"}}]}}]"#));

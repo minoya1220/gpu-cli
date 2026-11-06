@@ -45,16 +45,21 @@ pub(crate) fn provider_screen(ctx: &Ctx, cfg: &Dict) -> Screen<String, String> {
                 Some(false) => "not set up",
                 None => "checking…",
             };
-            vec![
-                Opt::new("vast".into(), format!("Vast.ai  {state}")),
-                Opt::new(
-                    "gcp".into(),
-                    format!(
-                        "Google Cloud  {}",
-                        if ready { "✓ set up" } else { "not set up" }
-                    ),
-                ),
-            ]
+            let rows = [
+                ["Vast.ai".into(), state.into()],
+                [
+                    "Google Cloud".into(),
+                    if ready { "✓ set up" } else { "not set up" }.into(),
+                ],
+            ];
+            ["vast", "gcp"]
+                .into_iter()
+                .zip(crate::offers::aligned_rows(
+                    &rows,
+                    [crate::offers::Column::Left, crate::offers::Column::Plain],
+                ))
+                .map(|(value, label)| Opt::new(value.into(), label))
+                .collect()
         },
         Next::Done,
     )
@@ -88,18 +93,27 @@ pub fn run(ctx: &Ctx, cfg: &Dict, flags: &SetupFlags) -> Result<()> {
         None if ctx.interactive() => pick(ctx, provider_screen(ctx, cfg))?,
         None => {
             let vast = crate::vast::list_instances(ctx, None).is_ok();
-            ctx.println(&format!(
-                "Vast.ai  {}",
-                if vast { "✓ set up" } else { "not set up" }
-            ))?;
-            ctx.println(&format!(
-                "Google Cloud  {}",
-                if gcp_ready(cfg) {
-                    "✓ set up"
-                } else {
-                    "not set up"
-                }
-            ))?;
+            let rows = [
+                [
+                    "Vast.ai".into(),
+                    if vast { "✓ set up" } else { "not set up" }.into(),
+                ],
+                [
+                    "Google Cloud".into(),
+                    if gcp_ready(cfg) {
+                        "✓ set up"
+                    } else {
+                        "not set up"
+                    }
+                    .into(),
+                ],
+            ];
+            for row in crate::offers::aligned_rows(
+                &rows,
+                [crate::offers::Column::Left, crate::offers::Column::Plain],
+            ) {
+                ctx.println(&row)?;
+            }
             return ctx.println("Next: gpu setup --provider gcp --help");
         }
     };
@@ -192,17 +206,21 @@ fn choose_project(ctx: &Ctx, explicit: Option<&str>) -> Result<Dict> {
         Screen::new(
             "Google Cloud project",
             move || {
-                options
-                    .result()
-                    .unwrap_or_default()
+                let projects = options.result().unwrap_or_default();
+                let rows = projects
                     .iter()
                     .filter_map(|p| {
                         let id = text(p, "projectId")?;
-                        Some(Opt::new(
-                            id.to_string(),
-                            format!("{id} — {}", text(p, "name").unwrap_or(id)),
-                        ))
+                        Some([id.to_string(), text(p, "name").unwrap_or(id).to_string()])
                     })
+                    .collect::<Vec<_>>();
+                let labels = crate::offers::aligned_rows(
+                    &rows,
+                    [crate::offers::Column::Left, crate::offers::Column::Plain],
+                );
+                rows.into_iter()
+                    .zip(labels)
+                    .map(|(row, label)| Opt::new(row[0].clone(), label))
                     .collect()
             },
             Next::Done,

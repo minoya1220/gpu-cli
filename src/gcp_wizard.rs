@@ -186,7 +186,7 @@ fn next_with(ctx: Ctx, settings: Settings, cfg: Dict, picks: Selection) -> Next<
                 Ok(())
             })))
             .input_label("Duration")
-            .input_hint("30m, 2h or 1d · Enter/→ continue")
+            .input_hint("30m, 2h or 1d  Enter/→ continue")
             .back_clears_input(false),
         );
     }
@@ -219,7 +219,7 @@ impl Types {
     }
     fn suffix(&self) -> &'static str {
         if self.rates.state() == JobState::Failed {
-            "price unavailable"
+            "-"
         } else {
             "…"
         }
@@ -268,47 +268,53 @@ fn type_screen(
         move || {
             let names = rows.names();
             let price = rows.price();
-            if let Some(g) = &group {
-                crate::gcp_types::members(&names, g)
-                    .into_iter()
-                    .map(|t| {
-                        let quote = price
-                            .as_ref()
-                            .map(|p| {
-                                p.label(&t)
-                                    .split_once(" · ")
-                                    .map(|(_, rate)| rate.to_string())
-                                    .unwrap_or_else(|| "price unavailable".into())
-                            })
-                            .unwrap_or_else(|| rows.suffix().into());
-                        Opt::new(
-                            t.clone(),
-                            format!("{} · {quote}", crate::gcp_types::label(&t)),
-                        )
-                    })
-                    .collect()
-            } else {
-                crate::gcp_types::generations(&names)
-                    .into_iter()
-                    .map(|g| {
-                        let types = crate::gcp_types::members(&names, &g);
-                        let label = price
-                            .as_ref()
-                            .map(|p| {
-                                p.category_label(
-                                    &types.iter().map(String::as_str).collect::<Vec<_>>(),
-                                )
-                                .replacen(
-                                    "TPU (Google Cloud)",
-                                    &g,
-                                    1,
-                                )
-                            })
-                            .unwrap_or_else(|| format!("{g} · {}", rows.suffix()));
-                        Opt::new(g, label)
-                    })
-                    .collect()
-            }
+            let values = group
+                .as_deref()
+                .map(|g| crate::gcp_types::members(&names, g))
+                .unwrap_or_else(|| crate::gcp_types::generations(&names));
+            let cells = values
+                .iter()
+                .map(|value| {
+                    let types = if size_step {
+                        vec![value.clone()]
+                    } else {
+                        crate::gcp_types::members(&names, value)
+                    };
+                    let [demand, spot] = price
+                        .as_ref()
+                        .map(|p| {
+                            p.rate_columns(
+                                &types.iter().map(String::as_str).collect::<Vec<_>>(),
+                                !size_step,
+                            )
+                        })
+                        .unwrap_or_else(|| {
+                            [rows.suffix().into(), format!("Spot {}", rows.suffix())]
+                        });
+                    [
+                        if size_step {
+                            crate::gcp_types::label(value)
+                        } else {
+                            value.clone()
+                        },
+                        demand,
+                        spot,
+                    ]
+                })
+                .collect::<Vec<_>>();
+            let labels = crate::offers::aligned_rows(
+                &cells,
+                [
+                    crate::offers::Column::Left,
+                    crate::offers::Column::Left,
+                    crate::offers::Column::Plain,
+                ],
+            );
+            values
+                .into_iter()
+                .zip(labels)
+                .map(|(value, label)| Opt::new(value, label))
+                .collect()
         },
         move |value| {
             if size_step {
@@ -352,12 +358,12 @@ fn type_screen(
     .selection_note(move |value| {
         let rate = context
             .price()
-            .map(|p| format!("Estimates: {} · USD list {}", p.region, p.cache_note()))
+            .map(|p| format!("Estimates: {}  USD list {}", p.region, p.cache_note()))
             .unwrap_or_default();
         if size_step && rate.is_empty() {
             value.clone()
         } else if size_step {
-            format!("{value} · {rate}")
+            format!("{value}  {rate}")
         } else {
             rate
         }
@@ -444,27 +450,38 @@ pub(crate) fn priced_zone_screen<R: 'static>(
         initial,
         "TPU zone",
         &format!(
-            "{tpu} {} · USD list",
+            "{tpu} {}  USD list",
             if spot { "Spot" } else { "on-demand" }
         ),
         crate::gcp_zones::Presentation {
             preferred: crate::gcp_preferences::last(ctx, &settings.project)
                 .or_else(|| settings.zone.clone()),
-            label: std::rc::Rc::new(move |z| {
+            fields: std::rc::Rc::new(move |z| {
                 let rate = crate::gcp_geo::region(&z.name)
                     .and_then(|r| rates.lock().ok()?.get(r).cloned());
-                let quote = match rate {
-                    Some(Ok(p)) => p.quote(&kind, spot),
-                    Some(Err(_)) => "price unavailable".into(),
-                    None => {
-                        if matches!(watch.state(), JobState::Idle | JobState::Running) {
-                            "…".into()
-                        } else {
-                            "price unavailable".into()
-                        }
+                match rate {
+                    Some(Ok(p)) => {
+                        let amount = p.hourly(&kind, spot);
+                        [
+                            crate::gcp_prices::money(amount),
+                            if amount.is_some() {
+                                p.cache_note()
+                            } else {
+                                String::new()
+                            },
+                        ]
                     }
-                };
-                format!("{} · {quote}", z.name)
+                    Some(Err(_)) => ["-".into(), String::new()],
+                    None => [
+                        if matches!(watch.state(), JobState::Idle | JobState::Running) {
+                            "…"
+                        } else {
+                            "-"
+                        }
+                        .into(),
+                        String::new(),
+                    ],
+                }
             }),
             prices: Some(prices),
         },

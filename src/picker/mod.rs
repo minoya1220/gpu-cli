@@ -103,6 +103,7 @@ pub struct Screen<V, R> {
     pub on_settled: Option<Settled<V, R>>,
     pub notice: String,
     pub wait_initial: bool,
+    pub initial_cursor: Option<Box<dyn Fn() -> usize>>,
 }
 
 impl<V: PickValue, R: 'static> Screen<V, R> {
@@ -131,6 +132,7 @@ impl<V: PickValue, R: 'static> Screen<V, R> {
             on_settled: None,
             notice: String::new(),
             wait_initial: false,
+            initial_cursor: None,
         }
     }
 
@@ -207,6 +209,11 @@ impl<V: PickValue, R: 'static> Screen<V, R> {
         self
     }
 
+    pub fn highlight(mut self, cursor: impl Fn() -> usize + 'static) -> Self {
+        self.initial_cursor = Some(Box::new(cursor));
+        self
+    }
+
     pub fn wait_initial(mut self, on: bool) -> Self {
         self.wait_initial = on;
         self
@@ -218,6 +225,7 @@ struct View<V, R> {
     screen: Rc<Screen<V, R>>,
     filter: String,
     cursor: usize,
+    moved: bool,
     error: String,
     selection_notice: Option<String>,
 }
@@ -228,6 +236,7 @@ impl<V: PickValue, R: 'static> View<V, R> {
             screen: Rc::new(screen),
             filter: String::new(),
             cursor: 0,
+            moved: false,
             error: String::new(),
             selection_notice: None,
         }
@@ -259,7 +268,16 @@ impl<V: PickValue, R: 'static> View<V, R> {
     }
 
     fn current(&self, count: usize) -> usize {
-        self.cursor.min(count.saturating_sub(1))
+        let cursor = if !self.moved && self.filter.is_empty() {
+            self.screen
+                .initial_cursor
+                .as_ref()
+                .map(|f| f())
+                .unwrap_or(self.cursor)
+        } else {
+            self.cursor
+        };
+        cursor.min(count.saturating_sub(1))
     }
 
     fn quick_select(&self, entries: &[Opt<V>]) -> bool {
@@ -280,6 +298,7 @@ impl<V: PickValue, R: 'static> View<V, R> {
     fn set_filter(&mut self, filter: String) {
         self.filter = filter;
         self.cursor = 0;
+        self.moved = true;
         self.error.clear();
     }
 }
@@ -429,6 +448,7 @@ impl<V: PickValue, R: 'static> Core<V, R> {
             let view = self.view_mut();
             let current = view.current(count) as isize;
             view.cursor = (current + delta).rem_euclid(count as isize) as usize;
+            view.moved = true;
         }
     }
 

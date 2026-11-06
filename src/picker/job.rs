@@ -106,7 +106,7 @@ impl Drop for RuntimeGuard {
     }
 }
 
-type Work<T> = Arc<dyn Fn() -> Result<T, String> + Send + Sync>;
+type Work<T> = Arc<dyn Fn(Arc<Waker>) -> Result<T, String> + Send + Sync>;
 
 struct Inner<T> {
     work: Work<T>,
@@ -152,6 +152,12 @@ impl JobObserver {
 
 impl<T: Clone + Send + 'static> Job<T> {
     pub fn new(work: impl Fn() -> Result<T, String> + Send + Sync + 'static) -> Job<T> {
+        Self::progress(move |_| work())
+    }
+    /// Publish partial results through shared data, then wake the renderer.
+    pub fn progress(
+        work: impl Fn(Arc<Waker>) -> Result<T, String> + Send + Sync + 'static,
+    ) -> Job<T> {
         Job {
             inner: Rc::new(Inner {
                 work: Arc::new(work),
@@ -249,7 +255,7 @@ impl<T: Clone + Send + 'static> AnyJob for Job<T> {
             .name(THREAD_NAME.into())
             .spawn(move || {
                 // Thread boundary: an escaping panic would leave the screen loading forever.
-                let outcome = match catch_unwind(AssertUnwindSafe(|| work())) {
+                let outcome = match catch_unwind(AssertUnwindSafe(|| work(waker.clone()))) {
                     Ok(Ok(value)) => Ok(value),
                     Ok(Err(error)) => {
                         let error = error.trim().to_string();

@@ -537,3 +537,47 @@ fn test_quitting_does_not_wait_for_a_running_loader() {
     assert!(matches!(result, Outcome::Cancelled(_)));
     assert!(start.elapsed() < Duration::from_secs(2));
 }
+
+#[test]
+fn progress_jobs_redraw_partial_results_without_keys_or_completion() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let start = Gate::default();
+    let finish = Gate::default();
+    let began = start.clone();
+    let held = finish.clone();
+    let flag = std::sync::Arc::new(AtomicBool::new(false));
+    let changed = flag.clone();
+    let labels = flag.clone();
+    let job = crate::picker::Job::progress(move |wake| {
+        assert!(began.wait());
+        changed.store(true, Ordering::SeqCst);
+        wake.wake();
+        assert!(held.wait());
+        Ok(())
+    });
+    let observer = job.observer();
+    let screen = crate::picker::Screen::new(
+        "Progress",
+        move || {
+            vec![crate::picker::Opt::new(
+                "value".to_string(),
+                if labels.load(Ordering::SeqCst) {
+                    "partial"
+                } else {
+                    "loading"
+                },
+            )]
+        },
+        crate::picker::Next::Done,
+    )
+    .background(job);
+    let result = crate::picker::testing::drive(screen, move |keys| {
+        keys.wait(|s| s.labels == ["loading"]);
+        start.set();
+        keys.wait(|s| s.labels == ["partial"]);
+        assert_eq!(observer.state(), crate::picker::JobState::Running);
+        keys.press(crate::picker::testing::CTRL_C);
+    });
+    finish.set();
+    assert_eq!(result, crate::picker::Outcome::Cancelled(130));
+}

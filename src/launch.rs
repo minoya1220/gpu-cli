@@ -261,15 +261,12 @@ fn created_id(response: &Dict) -> Option<String> {
     })
 }
 
-/// Summarize `vastai create instance --raw` without echoing its secrets
-/// (`instance_api_key`).
-pub fn created_summary(output: &str) -> Result<String> {
-    let response = match pyjson::loads(output) {
-        Ok(Value::Dict(dict)) => dict,
-        _ => {
-            return Ok("Vast accepted the create request but its response was unreadable; run `gpu ls` to find the instance."
-                .into())
-        }
+/// Summarize a `vastai create instance --raw` reply (`None`: unreadable)
+/// without echoing its secrets (`instance_api_key`).
+pub fn created_summary(reply: Option<&Dict>) -> Result<String> {
+    let Some(response) = reply else {
+        return Ok("Vast accepted the create request but its response was unreadable; run `gpu ls` to find the instance."
+            .into());
     };
     if !response.get("success").is_some_and(truthy) {
         let reason = ["msg", "error"]
@@ -286,11 +283,29 @@ pub fn created_summary(output: &str) -> Result<String> {
             redact_text(&reason)
         )));
     }
-    match created_id(&response) {
+    match created_id(response) {
         None => Ok("Created instance. Next: `gpu ls` to find it.".into()),
         Some(instance) => Ok(format!(
             "Created instance {instance}.\nConnect: gpu ssh {instance} --exec"
         )),
+    }
+}
+
+/// What Ctrl-C must say once a create request may have gone out: the
+/// instance, when known, and when its boot-time guard destroys it.
+fn interrupt_notice(ctx: &Ctx, id: Option<&str>, deadline: Option<Timestamp>) -> String {
+    let when = deadline.map(|at| crate::expiry::local_time(ctx, at));
+    match (id, when) {
+        (Some(id), Some(when)) => format!(
+            "Instance {id} keeps running; it self-destroys at {when}. Check: gpu expire {id} show. Stop billing now: gpu down {id}"
+        ),
+        (Some(id), None) => format!(
+            "Instance {id} keeps running and billing, with no auto-destroy. Stop billing: gpu down {id}"
+        ),
+        (None, Some(when)) => format!(
+            "Vast may have created an instance; if so, it self-destroys at {when}. Check: gpu ls"
+        ),
+        (None, None) => "Vast may have created an instance; if so, it keeps billing with no auto-destroy. Check: gpu ls, then gpu down ID".into(),
     }
 }
 
@@ -305,6 +320,7 @@ fn confirmation(
     args: &UpArgs,
     cfg: &Dict,
     picks: Picks,
+    deadline: Option<Timestamp>,
 ) -> crate::picker::Next<crate::wizard::Choice, ApprovedLaunch> {
     use crate::picker::Next;
     if picks.tpu.is_some() {
@@ -356,6 +372,7 @@ fn confirmation(
                     mode,
                     interruptible: args.interruptible,
                     disk: args.disk,
+                    deadline,
                 },
                 &cfg,
             )?;
@@ -386,6 +403,9 @@ fn confirmation(
 
 pub fn launch(ctx: &Ctx, args: &UpArgs, cfg: &Dict, deadline: Option<Timestamp>) -> Result<()> {
     validate_launch_args(args)?;
+    // Whole seconds, as the boot guard and the SSH timer hold it.
+    let deadline = deadline
+        .map(|at| Timestamp::from_second(crate::expiry::deadline_seconds(at)).unwrap_or(at));
     let owner = py_str(config::get(cfg, "owner")?);
     if let Some(repo) = &args.repo {
         resolve_repo(repo.as_arg(), &owner)?;
@@ -440,7 +460,7 @@ pub fn launch(ctx: &Ctx, args: &UpArgs, cfg: &Dict, deadline: Option<Timestamp>)
             let config = cfg.clone();
             let flags = args.clone();
             let step = crate::picker::then(wizard.next(picks), move |picks| {
-                confirmation(&worker, &flags, &config, picks)
+                confirmation(&worker, &flags, &config, picks, deadline)
             });
             match crate::picker::resolve(ctx, step)? {
                 ApprovedLaunch::Vast(plan) => {
@@ -479,6 +499,7 @@ pub fn launch(ctx: &Ctx, args: &UpArgs, cfg: &Dict, deadline: Option<Timestamp>)
         mode: &mode,
         interruptible: args.interruptible,
         disk: args.disk,
+        deadline,
     };
     let request = vast.request(&offer, &request_args, cfg)?;
     let rate = if args.interruptible {
@@ -531,26 +552,31 @@ pub fn launch(ctx: &Ctx, args: &UpArgs, cfg: &Dict, deadline: Option<Timestamp>)
         ));
     }
     ctx.result("created", Value::Null);
-    let response = run(ctx, &argv(&request)?, None)?;
-    let parsed = pyjson::loads(&response).ok();
+    // From here on an instance may exist, so Ctrl-C must say what remains.
+    ctx.set_interrupt_notice(Some(interrupt_notice(ctx, None, deadline)));
+    let reply = vast.create(&request)?;
     ctx.result(
         "created",
-        parsed
+        reply
             .as_ref()
-            .and_then(Value::as_dict)
             .and_then(|d| d.get("success"))
             .filter(|v| matches!(v, Value::Bool(_)))
             .cloned()
             .unwrap_or(Value::Null),
     );
-    let summary = created_summary(&response)?;
-    let instance_id = parsed
-        .as_ref()
-        .and_then(Value::as_dict)
-        .and_then(created_id);
+    let summary =
+        created_summary(reply.as_ref()).inspect_err(|_| ctx.set_interrupt_notice(None))?;
+    let instance_id = reply.as_ref().and_then(created_id);
     if let Some(id) = &instance_id {
         ctx.result("id", Value::str(id));
+        ctx.set_interrupt_notice(Some(interrupt_notice(ctx, Some(id), deadline)));
     }
+    let guard = deadline.map(|at| {
+        format!(
+            " Its boot guard should still destroy it at {}.",
+            crate::expiry::local_time(ctx, at)
+        )
+    });
     // Preserve the created ID and attempt expiry before propagating a failed announcement.
     let announced = ctx.println(&summary);
     if ctx.json() && instance_id.is_none() {
@@ -560,9 +586,10 @@ pub fn launch(ctx: &Ctx, args: &UpArgs, cfg: &Dict, deadline: Option<Timestamp>)
     }
     if args.expire().is_some() {
         let Some(instance_id) = &instance_id else {
-            return Err(Error::msg(
-                "Instance created but no ID returned; expiry NOT armed. Run gpu ls, then gpu expire ID WHEN.",
-            ));
+            return Err(Error::msg(format!(
+                "Instance created but no ID returned; expiry NOT verified.{}\nRun gpu ls, then gpu expire ID show.",
+                guard.unwrap_or_default()
+            )));
         };
         match expire_instance(ctx, instance_id, "arm", deadline) {
             Err(error) => {
@@ -573,7 +600,8 @@ pub fn launch(ctx: &Ctx, args: &UpArgs, cfg: &Dict, deadline: Option<Timestamp>)
                     format!("Run gpu expire {instance_id} show or gpu down {instance_id}.")
                 };
                 let message = format!(
-                    "Instance {instance_id} created but expiry NOT verified; billing continues. {text}\n{next}"
+                    "Instance {instance_id} created but expiry NOT verified; billing continues.{}\n{text}\n{next}",
+                    guard.unwrap_or_default()
                 );
                 return Err(match error {
                     Error::Status(code, _) => Error::status(code, message),

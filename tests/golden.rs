@@ -215,8 +215,13 @@ fn python_resolve_repo() {
 fn python_startup_scripts() {
     for row in rows("startup_scripts") {
         let cfg = dict(row.get("cfg").unwrap());
-        let script =
-            startup_script(&Repo::from_arg(s(&row, "repo")), s(&row, "mode"), &cfg).unwrap();
+        let script = startup_script(
+            &Repo::from_arg(s(&row, "repo")),
+            s(&row, "mode"),
+            &cfg,
+            None,
+        )
+        .unwrap();
         assert_eq!(script, s(&row, "script"), "{row:?}");
     }
 }
@@ -236,6 +241,7 @@ fn python_create_requests() {
                 Some(Value::Int(disk)) => Some(*disk),
                 _ => None,
             },
+            deadline: None,
         };
         match (request(&offer, &args, &cfg), row.get("request")) {
             (Ok(mut actual), Some(expected)) => {
@@ -246,7 +252,7 @@ fn python_create_requests() {
                     + 1;
                 assert_eq!(
                     actual[at],
-                    Value::Str(startup_script(&repo, mode, &cfg).unwrap())
+                    Value::Str(startup_script(&repo, mode, &cfg, None).unwrap())
                 );
                 actual[at] = Value::str("<startup_script>");
                 assert_eq!(Value::List(actual), *expected, "{row:?}");

@@ -279,6 +279,7 @@ pub struct Ctx {
     pub console: Arc<Console>,
     pub ui: Arc<Ui>,
     output: Arc<Mutex<crate::output::CommandOutput>>,
+    interrupt_notice: Arc<Mutex<Option<String>>>,
 }
 
 impl Ctx {
@@ -297,6 +298,7 @@ impl Ctx {
             console: Arc::new(Console::real()),
             ui: Arc::new(Ui::Terminal),
             output: Arc::default(),
+            interrupt_notice: Arc::default(),
         }
     }
 
@@ -319,6 +321,7 @@ impl Ctx {
             gcp_catalog_lock: Arc::default(),
             gcp_sku_refreshed: Arc::default(),
             output: Arc::default(),
+            interrupt_notice: Arc::default(),
         }
     }
 
@@ -343,6 +346,23 @@ impl Ctx {
             .unwrap_or_else(|p| p.into_inner())
             .result
             .insert(key, value);
+    }
+
+    /// What an interrupted command must still tell the user, such as a
+    /// created instance that keeps running. Shared by every copy of this
+    /// `Ctx`, including the one the SIGINT handler holds.
+    pub(crate) fn set_interrupt_notice(&self, notice: Option<String>) {
+        *self
+            .interrupt_notice
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = notice;
+    }
+
+    pub fn interrupt_notice(&self) -> Option<String> {
+        self.interrupt_notice
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 
     pub(crate) fn set_ssh_timeout(&self, seconds: f64) {

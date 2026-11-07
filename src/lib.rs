@@ -95,6 +95,9 @@ pub fn main_with(argv: &[String], ctx: &Ctx) -> i32 {
         match error {
             Error::Cancelled(_) => {
                 let _ = ctx.println("Cancelled.");
+                if let Some(notice) = ctx.interrupt_notice() {
+                    let _ = ctx.eprintln(&notice);
+                }
             }
             Error::Remote(_) => {}
             Error::Usage(text) => {

@@ -1,10 +1,65 @@
 //! The generated onstart script for container and VM instances.
 
+use std::io::Write;
+
+use jiff::Timestamp;
+
 use crate::config;
 use crate::error::{Error, Result};
+use crate::expiry::{deadline_seconds, GUARD_SOURCE};
 use crate::pyfmt::{py_str, shell_quote, shell_quote_value};
 use crate::pyjson::Dict;
 use crate::repos::{resolve_repo, Repo};
+
+/// Vast's limit on the onstart field. The API reference gives 4048
+/// characters ("Key Quirks": "`onstart` field is limited to 4048 characters
+/// -- gzip+base64 for longer scripts"); the CLI guide says 16KB. vastai 1.8.2
+/// checks nothing locally, so the smaller documented limit is enforced here.
+pub const ONSTART_LIMIT: usize = 4048;
+
+/// Onstart lines that install `remote/expiry_guard.sh` and start it with the
+/// absolute `deadline`, so the instance destroys itself then even if the CLI
+/// never reaches SSH. Onstart runs again when Vast starts the instance, and
+/// the guard then resumes the latest deadline. The guard travels gzip+base64
+/// without its comment lines, as Vast documents for long onstart scripts.
+pub fn expiry_guard(deadline: Timestamp) -> Vec<String> {
+    let code: String = GUARD_SOURCE
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+    gzip.write_all(code.as_bytes())
+        .expect("writing to memory cannot fail");
+    let packed = base64(&gzip.finish().expect("writing to memory cannot fail"));
+    vec![
+        "GPU_EXPIRE=${HOME:-/root}/.local/state/gpu-expire".into(),
+        format!(
+            "mkdir -p \"$GPU_EXPIRE\" && chmod 700 \"$GPU_EXPIRE\" && echo {packed} | base64 -d | gunzip >\"$GPU_EXPIRE/guard.sh\" && (setsid bash \"$GPU_EXPIRE/guard.sh\" boot {} </dev/null >/dev/null 2>&1 &)",
+            deadline_seconds(deadline)
+        ),
+    ]
+}
+
+/// Standard base64 with padding, on one line.
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut text = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |n, (i, b)| n | (u32::from(*b) << (16 - 8 * i)));
+        for i in 0..4 {
+            text.push(if i <= chunk.len() {
+                char::from(ALPHABET[((n >> (18 - 6 * i)) & 63) as usize])
+            } else {
+                '='
+            });
+        }
+    }
+    text
+}
 
 fn git_identity(cfg: &Dict, key: &str) -> Result<String> {
     let value = config::get(cfg, key)?;
@@ -16,17 +71,24 @@ fn git_identity(cfg: &Dict, key: &str) -> Result<String> {
     })
 }
 
-pub fn startup_script(repo: &Repo, mode: &str, cfg: &Dict) -> Result<String> {
+/// The onstart script; with a `deadline`, the expiry guard starts first.
+pub fn startup_script(
+    repo: &Repo,
+    mode: &str,
+    cfg: &Dict,
+    deadline: Option<Timestamp>,
+) -> Result<String> {
     if mode != "container" && mode != "vm" {
         return Err(Error::msg(format!("Unsupported mode: {mode}")));
     }
     let (clone_url, name) = resolve_repo(repo.as_arg(), &py_str(config::get(cfg, "owner")?))?;
     let target = format!("/workspace/{name}");
-    let mut lines: Vec<String> = vec![
-        "#!/bin/bash".into(),
+    let mut lines: Vec<String> = vec!["#!/bin/bash".into()];
+    lines.extend(deadline.map(expiry_guard).unwrap_or_default());
+    lines.extend([
         "source /etc/environment 2>/dev/null || true".into(),
         "export GH_TOKEN".into(),
-    ];
+    ]);
     if mode == "container" {
         lines.extend(
             [
@@ -74,5 +136,12 @@ pub fn startup_script(repo: &Repo, mode: &str, cfg: &Dict) -> Result<String> {
     } else {
         lines.push("touch /root/.works".into());
     }
-    Ok(lines.join("\n") + "\n")
+    let script = lines.join("\n") + "\n";
+    if script.len() > ONSTART_LIMIT {
+        return Err(Error::msg(format!(
+            "Startup script is {} characters; Vast accepts at most {ONSTART_LIMIT}. Use a shorter repository URL or git identity.",
+            script.len()
+        )));
+    }
+    Ok(script)
 }

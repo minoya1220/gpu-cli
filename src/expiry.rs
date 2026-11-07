@@ -16,6 +16,9 @@ use crate::pyjson::{self, Dict, Value};
 /// The remote controller, sent over SSH stdin and run with the instance's bash.
 pub const REMOTE_SOURCE: &str = include_str!("../remote/expiry_remote.sh");
 
+/// The boot-time guard the onstart script starts (`crate::startup::expiry_guard`).
+pub const GUARD_SOURCE: &str = include_str!("../remote/expiry_guard.sh");
+
 static DURATION: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^(?:([0-9]+)d)?(?:([0-9]+)h)?(?:([0-9]+)m)?(?:([0-9]+)s)?$").unwrap()
 });
@@ -495,8 +498,7 @@ pub fn remote_command(
     ];
     if action == "arm" {
         let deadline = deadline.ok_or_else(|| Error::msg("Arming requires a deadline."))?;
-        let seconds = deadline.as_second() + i64::from(deadline.subsec_nanosecond() > 0);
-        args.push(seconds.to_string());
+        args.push(deadline_seconds(deadline).to_string());
     }
     Ok([
         "ssh",
@@ -510,6 +512,11 @@ pub fn remote_command(
     .map(|s| s.to_string())
     .chain([shell_join(&args)])
     .collect())
+}
+
+/// A deadline as whole epoch seconds, rounded up so it is never early.
+pub fn deadline_seconds(deadline: Timestamp) -> i64 {
+    deadline.as_second() + i64::from(deadline.subsec_nanosecond() > 0)
 }
 
 /// The script sent on stdin: the source as a variable, then the source.
@@ -583,6 +590,17 @@ fn iso_offset(seconds: i32) -> String {
     }
 }
 
+/// A deadline in the local zone, as `2026-01-02T18:30:00-05:00 EST`.
+pub fn local_time(ctx: &Ctx, at: Timestamp) -> String {
+    let local = at.to_zoned(local_zone(&ctx.env));
+    format!(
+        "{}{} {}",
+        local.datetime().strftime("%Y-%m-%dT%H:%M:%S"),
+        iso_offset(local.offset().seconds()),
+        local.strftime("%Z")
+    )
+}
+
 pub fn expiry_summary(ctx: &Ctx, instance_id: &str, reply: &Dict) -> Result<String> {
     let status = crate::pyfmt::py_str(reply.get("status").ok_or_else(|| Error::key("status"))?);
     if status == "none" || status == "cancelled" {
@@ -607,14 +625,7 @@ pub fn expiry_summary(ctx: &Ctx, instance_id: &str, reply: &Dict) -> Result<Stri
     let micros = (seconds * 1e6).round_ties_even();
     let deadline = Timestamp::from_microsecond(micros as i64)
         .map_err(|_| Error::msg("year is out of range"))?;
-    let local = deadline.to_zoned(local_zone(&ctx.env));
-    let civil = local.datetime();
-    let text = format!(
-        "{}{} {}",
-        civil.strftime("%Y-%m-%dT%H:%M:%S"),
-        iso_offset(local.offset().seconds()),
-        local.strftime("%Z")
-    );
+    let text = local_time(ctx, deadline);
     let remaining = deadline.as_microsecond() - ctx.clock.now().as_microsecond();
     let total = if remaining <= 0 {
         0

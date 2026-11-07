@@ -252,6 +252,11 @@ impl Runner for RealRunner {
 /// Run a CLI and return its stripped stdout. It never reads the terminal,
 /// which the picker owns. Failures keep Python's messages, redacted.
 pub fn run<S: AsRef<str>>(ctx: &Ctx, argv: &[S], timeout: Option<f64>) -> Result<String> {
+    run_output(ctx, argv, timeout).map(|output| output.stdout.trim().to_string())
+}
+
+/// `run`, keeping a successful command's full output, stderr included.
+pub fn run_output<S: AsRef<str>>(ctx: &Ctx, argv: &[S], timeout: Option<f64>) -> Result<Output> {
     let cmd = Cmd::new(argv).timeout(timeout);
     let program = cmd.program().to_string();
     match ctx.run(&cmd) {
@@ -282,6 +287,6 @@ pub fn run<S: AsRef<str>>(ctx: &Ctx, argv: &[S], timeout: Option<f64>) -> Result
                 detail
             }))
         }
-        Ok(output) => Ok(output.stdout.trim().to_string()),
+        Ok(output) => Ok(output),
     }
 }

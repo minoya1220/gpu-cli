@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tests for expiry_remote.sh. Linux only (flock, setsid, /proc); run by
+# Tests for expiry_remote.sh and expiry_guard.sh. Linux only (flock, setsid, /proc); run by
 # `cargo test` through tests/remote_worker.rs, or directly with bash. No test
 # reaches the network: `curl` is always a local stub.
 
@@ -360,6 +360,251 @@ test_arm_and_destroy_end_to_end() {
     refute "no key logged" grep -rq scoped-key "$state/state"
     equals "$(run cancel 123)" '{"status": "cancelled"}'
     equals "$(run cancel 123)" '{"status": "none"}'
+}
+
+# --- Boot-time guard (expiry_guard.sh) ---------------------------------------
+
+GUARD=$HERE/expiry_guard.sh
+
+# The guard's functions in a subshell, as `bash guard.sh` would define them.
+guard_lib() {
+    (
+        GPU_EXPIRE_LIBRARY=1
+        # shellcheck source=expiry_guard.sh
+        . "$GUARD"
+        PROC1_ENVIRON=$TEST_DIR/proc1-environ
+        ETC_ENVIRONMENT=$TEST_DIR/etc-environment
+        "$@"
+    )
+}
+
+# The guard with its endpoint at a closed local port and its environment
+# sources at test files, so no guard can reach the real API. Detached guards
+# and timers are stopped when the test exits.
+guard_setup() {
+    sed -e "s|^DESTROY_URL=.*|DESTROY_URL=http://127.0.0.1:9/instances|" \
+        -e "s|^PROC1_ENVIRON=.*|PROC1_ENVIRON=$TEST_DIR/proc1-environ|" \
+        -e "s|^ETC_ENVIRONMENT=.*|ETC_ENVIRONMENT=$TEST_DIR/etc-environment|" \
+        "$GUARD" >"$TEST_DIR/guard.sh"
+    GSTATE=$HOME/.local/state/gpu-expire
+    local source
+    source=$(patched_script)
+    printf 'GPU_EXPIRE_SOURCE=%q\n%s\n' "$source" "$source" >"$TEST_DIR/payload"
+    trap 'pkill -f "$TEST_DIR/guard.sh" 2>/dev/null; pkill -f "$GSTATE/runner.sh" 2>/dev/null' EXIT
+}
+
+# Starts the guard as the generated onstart line does.
+boot_guard() {
+    (env -u GPU_EXPIRE_LIBRARY setsid bash "$TEST_DIR/guard.sh" boot "$1" </dev/null >/dev/null 2>&1 &)
+}
+
+# `gpu expire` over the real SSH transport payload.
+remote() {
+    env -u GPU_EXPIRE_LIBRARY bash -s -- "$@" <"$TEST_DIR/payload"
+}
+
+# wait_for COMMAND...: retry for up to 10 s.
+wait_for() {
+    local _
+    for _ in $(seq 200); do
+        "$@" && return 0
+        sleep 0.05
+    done
+    return 1
+}
+
+shows() {
+    [ "$(remote show 123)" = "$1" ]
+}
+
+gstate_field() {
+    sed -n "s/^$1=//p" "$GSTATE/state"
+}
+
+gone() {
+    [ ! -e "/proc/$1" ]
+}
+
+no_guard() {
+    ! pgrep -f "$TEST_DIR/guard.sh" >/dev/null
+}
+
+scoped_environment() {
+    export CONTAINER_ID=123 CONTAINER_API_KEY=scoped-key
+    export VAST_API_KEY=personal-key-must-never-be-used GH_TOKEN=github-token-must-never-be-used
+}
+
+test_guard_boot_arms_and_show_reflects_it() {
+    guard_setup
+    fake_curl
+    scoped_environment
+    local deadline=$(($(date +%s) + 3600)) pid token
+    boot_guard "$deadline"
+    check "show reports the guard" wait_for shows "{\"status\": \"armed\", \"deadline\": $deadline}"
+    pid=$(gstate_field pid)
+    token=$(gstate_field token)
+    tr '\0' ' ' <"/proc/$pid/cmdline" >"$TEST_DIR/cmdline"
+    equals "$(cat "$TEST_DIR/cmdline")" "bash $TEST_DIR/guard.sh worker $token "
+    equals "$(awk '{print $6}' "/proc/$pid/stat")" "$pid"
+    for fd in 0 1 2; do
+        equals "$(readlink "/proc/$pid/fd/$fd")" /dev/null
+    done
+    check "lock released" [ ! -e "/proc/$pid/fd/9" ]
+    tr '\0' '\n' <"/proc/$pid/environ" >"$TEST_DIR/environ"
+    check "scoped key passed" grep -qx CONTAINER_API_KEY=scoped-key "$TEST_DIR/environ"
+    check "instance passed" grep -qx CONTAINER_ID=123 "$TEST_DIR/environ"
+    refute "no account key" grep -q VAST_API_KEY "$TEST_DIR/environ"
+    refute "no GitHub token" grep -q GH_TOKEN "$TEST_DIR/environ"
+    equals "$(stat -c %a "$GSTATE")" 700
+    equals "$(stat -c %a "$GSTATE/state")" 600
+    refute "no key in state" grep -rq scoped-key "$GSTATE"
+    sleep 1.2
+    check "no destroy before the deadline" [ ! -e "$TEST_DIR/curl-args" ]
+    equals "$(remote cancel 123)" '{"status": "cancelled"}'
+    check "cancel stops the guard" wait_for gone "$pid"
+}
+
+test_guard_destroys_at_deadline_even_when_booted_late() {
+    guard_setup
+    fake_curl
+    scoped_environment
+    local deadline=$(($(date +%s) - 60))
+    boot_guard "$deadline"
+    check "destroyed" wait_for shows "{\"status\": \"destroy-request-accepted\", \"deadline\": $deadline}"
+    check "one destroy request" [ "$(grep -c '^DELETE$' "$TEST_DIR/curl-args")" = 1 ]
+    check "stub endpoint" grep -qx 'http://127.0.0.1:9/instances/123/' "$TEST_DIR/curl-args"
+    equals "$(head -n 1 "$TEST_DIR/curl-args")" -q
+    check "no proxy" grep -qx -- --noproxy "$TEST_DIR/curl-args"
+    refute "key not on the command line" grep -q scoped-key "$TEST_DIR/curl-args"
+    equals "$(cat "$TEST_DIR/curl-config")" 'header = "Authorization: Bearer scoped-key"'
+    check "guard exits" wait_for no_guard
+}
+
+test_guard_retries_a_refused_destroy() {
+    guard_setup
+    fake_curl '{"success": false}'
+    scoped_environment
+    local deadline=$(($(date +%s) - 1))
+    boot_guard "$deadline"
+    check "retrying" wait_for shows "{\"status\": \"retrying\", \"deadline\": $deadline}"
+    equals "$(remote cancel 123)" '{"status": "cancelled"}'
+}
+
+test_ssh_arm_replaces_guard() {
+    guard_setup
+    fake_curl
+    scoped_environment
+    local first=$(($(date +%s) + 3600)) second=$(($(date +%s) + 7200)) pid
+    boot_guard "$first"
+    check "guard armed" wait_for shows "{\"status\": \"armed\", \"deadline\": $first}"
+    pid=$(gstate_field pid)
+    equals "$(remote arm 123 "$second")" "{\"status\": \"armed\", \"deadline\": $second}"
+    check "the replaced guard exits" wait_for gone "$pid"
+    equals "$(remote show 123)" "{\"status\": \"armed\", \"deadline\": $second}"
+    equals "$(remote cancel 123)" '{"status": "cancelled"}'
+}
+
+test_first_boot_defers_to_an_existing_timer() {
+    guard_setup
+    fake_curl
+    scoped_environment
+    local armed=$(($(date +%s) + 7200)) state
+    equals "$(remote arm 123 "$armed")" "{\"status\": \"armed\", \"deadline\": $armed}"
+    state=$(cat "$GSTATE/state")
+    boot_guard $(($(date +%s) + 60))
+    check "boot recorded" wait_for [ -e "$GSTATE/booted" ]
+    sleep 0.3
+    equals "$(cat "$GSTATE/state")" "$state"
+    check "guard not running" no_guard
+    equals "$(remote cancel 123)" '{"status": "cancelled"}'
+}
+
+test_restart_resumes_latest_deadline_unless_cancelled() {
+    guard_setup
+    fake_curl
+    scoped_environment
+    local first=$(($(date +%s) + 3600)) second=$(($(date +%s) + 7200)) pid
+    boot_guard "$first"
+    check "guard armed" wait_for shows "{\"status\": \"armed\", \"deadline\": $first}"
+    equals "$(remote arm 123 "$second")" "{\"status\": \"armed\", \"deadline\": $second}"
+    # A restart kills every process but keeps the disk.
+    pid=$(gstate_field pid)
+    kill "$pid"
+    check "worker stopped" wait_for gone "$pid"
+    equals "$(remote show 123)" "{\"status\": \"inactive\", \"deadline\": $second}"
+    # Onstart runs again with its original deadline; the latest one wins.
+    boot_guard "$first"
+    check "resumed" wait_for shows "{\"status\": \"armed\", \"deadline\": $second}"
+    check "the guard holds it" pgrep -f "$TEST_DIR/guard.sh worker" >/dev/null
+    equals "$(remote cancel 123)" '{"status": "cancelled"}'
+    check "cancel stops the guard" wait_for no_guard
+    # After a cancel, a restart arms nothing.
+    boot_guard "$first"
+    sleep 0.5
+    equals "$(remote show 123)" '{"status": "none"}'
+    check "guard not running" no_guard
+}
+
+test_guard_credential_sources() {
+    guard_setup
+    fake_curl
+    export VAST_API_KEY=personal-key-must-never-be-used
+    local deadline=$(($(date +%s) + 3600)) source pid
+    for source in etc etc-export proc1; do
+        rm -f "$TEST_DIR/etc-environment" "$TEST_DIR/proc1-environ"
+        case $source in
+            etc) printf 'CONTAINER_ID="123"\nCONTAINER_API_KEY="scoped" # vast\n' >"$TEST_DIR/etc-environment" ;;
+            etc-export) printf "export CONTAINER_ID=123\nexport CONTAINER_API_KEY='scoped'\n" >"$TEST_DIR/etc-environment" ;;
+            proc1) printf 'CONTAINER_ID=123\0CONTAINER_API_KEY=scoped\0' >"$TEST_DIR/proc1-environ" ;;
+        esac
+        rm -rf "$GSTATE"
+        boot_guard "$deadline"
+        check "$source: armed" wait_for shows "{\"status\": \"armed\", \"deadline\": $deadline}"
+        pid=$(gstate_field pid)
+        tr '\0' '\n' <"/proc/$pid/environ" >"$TEST_DIR/environ"
+        check "$source: scoped key" grep -qx CONTAINER_API_KEY=scoped "$TEST_DIR/environ"
+        check "$source: instance" grep -qx CONTAINER_ID=123 "$TEST_DIR/environ"
+        equals "$(remote cancel 123)" '{"status": "cancelled"}'
+        check "$source: stopped" wait_for gone "$pid"
+    done
+}
+
+test_guard_without_scoped_credentials_arms_nothing() {
+    guard_setup
+    export VAST_API_KEY=personal-key
+    : >"$TEST_DIR/etc-environment"
+    : >"$TEST_DIR/proc1-environ"
+    refute "boot fails" env -u GPU_EXPIRE_LIBRARY bash "$TEST_DIR/guard.sh" boot $(($(date +%s) + 60))
+    check "no state" [ ! -e "$GSTATE/state" ]
+    export CONTAINER_ID=not-a-number CONTAINER_API_KEY=scoped-key
+    refute "boot fails on a bad ID" env -u GPU_EXPIRE_LIBRARY bash "$TEST_DIR/guard.sh" boot $(($(date +%s) + 60))
+    export CONTAINER_ID=123
+    refute "boot fails on a bad deadline" env -u GPU_EXPIRE_LIBRARY bash "$TEST_DIR/guard.sh" boot soon
+    refute "unknown action" env -u GPU_EXPIRE_LIBRARY bash "$TEST_DIR/guard.sh" show
+    check "no state" [ ! -e "$GSTATE/state" ]
+}
+
+# A missed acceptance only retries; a false one would stop the guard, so
+# only a flat object with "success": true counts.
+test_guard_destroy_reply_acceptance() {
+    local body
+    for body in '{"success": true}' ' { "success" :true } ' '{"msg": "ok", "success": true}' \
+        $'{\n "success": true,\n "id": 5\n}\n'; do
+        check "accepted: $body" guard_lib accepted "$body"
+    done
+    for body in '' '{}' '{"success": false}' '{"success": 1}' '{"success": "true"}' '{"success": trueish}' \
+        '{"success": true, "success": false}' '{"detail": {"success": true}}' '[{"success": true}]' \
+        '{"note": "\"success\": true"}' '{"success": true' '{"success": true}x' 'x{"success": true}' \
+        '{"success": true}{"success": true}' '"success": true' '{"a": [1], "success": true}'; do
+        refute "not accepted: $body" guard_lib accepted "$body"
+    done
+}
+
+test_guard_etc_environment_values() {
+    printf '# Vast\nCONTAINER_ID=1\nCONTAINER_ID="123" # vast\n  export CONTAINER_API_KEY=\x27k\x27\nOTHER_CONTAINER_ID=9\n' >"$TEST_DIR/etc-environment"
+    equals "$(guard_lib etc_value CONTAINER_ID)" 123
+    equals "$(guard_lib etc_value CONTAINER_API_KEY)" k
+    equals "$(guard_lib etc_value MISSING)" ''
 }
 
 for test in $(compgen -A function test_); do

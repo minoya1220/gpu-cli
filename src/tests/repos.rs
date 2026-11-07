@@ -110,7 +110,7 @@ fn test_generated_script_new_choices() {
     ];
     for mode in ["container", "vm"] {
         for repo in repos {
-            let script = startup_script(&Repo::from_arg(repo), mode, &defaults()).unwrap();
+            let script = startup_script(&Repo::from_arg(repo), mode, &defaults(), None).unwrap();
             assert!(script.contains("git config --global user.name"));
             assert!(script.contains(r#"if [ -n "${GH_TOKEN:-}" ]; then gh auth setup-git"#));
             assert!(script.contains("mkdir -p /workspace"));
@@ -186,9 +186,21 @@ fn test_cli_dry_run_skips_github_and_prompts() {
         let label = &request[request.iter().position(|a| a == "--label").unwrap() + 1];
         assert_eq!(*label, resolve_repo(repo, "minoya1220").unwrap().1);
         let script = &request[request.iter().position(|a| a == "--onstart-cmd").unwrap() + 1];
+        // `--expire 2h` starts the boot-time guard with the absolute deadline.
+        let deadline: i64 = script
+            .split_once(" boot ")
+            .and_then(|(_, rest)| rest.split_once(' '))
+            .map(|(seconds, _)| seconds.parse().unwrap())
+            .unwrap();
         assert_eq!(
             *script,
-            startup_script(&Repo::from_arg(repo), "container", &defaults()).unwrap()
+            startup_script(
+                &Repo::from_arg(repo),
+                "container",
+                &defaults(),
+                Some(jiff::Timestamp::from_second(deadline).unwrap())
+            )
+            .unwrap()
         );
         assert_eq!(runner.calls().len(), 1);
         assert!(!t.history_path().exists());

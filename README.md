@@ -49,7 +49,7 @@ gpu up --repo gpu-kernels --mode container --gpu 'RTX 4090' \
   --num-gpus 1 --max-price 0.50 --offer 12345678 --disk 30 --expire 2h --yes
 ```
 
-Use `--dry-run` instead of `--yes` to print the exact JSON argument-array request without creating anything. With `--yes` and no `--offer`, the cheapest matching offer is selected.
+Use `--dry-run` instead of `--yes` to print the exact JSON argument-array request without creating anything. With `--yes` and no `--offer`, the cheapest matching offer is selected. Creation passes `--cancel-unavail`: if the host cannot start the instance now, Vast creates nothing (no stopped instance that bills storage) and `gpu up` fails with the no-capacity error.
 
 - `--repo NAME` uses the configured owner. `--repo owner/name` accepts another GitHub owner.
 - `--repo https://host/owner/repo.git` accepts other git hosts. URLs cannot contain credentials, query strings, or fragments.
@@ -114,7 +114,9 @@ gpu expire 12345678 cancel      # remove deadline; safe to repeat
 
 **Scheduling authorizes destruction, including disk deletion. There is no extra confirmation.** Re-running `expire` replaces the deadline. Your computer can sleep or disconnect after arming succeeds.
 
-The instance must stay running and reach Vast over HTTPS. Stop, reboot, host failure, or a killed worker prevents expiry. This is not an external billing guarantee. After a reboot, run `gpu expire ID show`; an inactive timer needs re-arming.
+The instance must stay running and reach Vast over HTTPS. Stop, host failure, or a killed worker prevents expiry. This is not an external billing guarantee. After a reboot, run `gpu expire ID show`; an inactive timer needs re-arming.
+
+`gpu up --expire` also arms the deadline at boot: the onstart script starts a small guard before anything else, so the instance holds its deadline even if your computer dies or you press Ctrl-C before SSH works. `gpu expire ID show` and `cancel` see the guard like any timer, and arming over SSH replaces it with the full worker at the same deadline. Vast reruns the onstart script at [container startup](https://docs.vast.ai/guides/reference/faq/instances), so after a restart the guard resumes the latest deadline, unless it was cancelled. Instances launched without `--expire` have no guard.
 
 ### Deadline formats
 
@@ -126,7 +128,7 @@ The local timezone is `TZ` when set, otherwise the system default. Confirmation 
 
 A bare number is an instance ID, not a time: use `18:00` or `18h`, not `18`. The ID always goes first, including `gpu expire ID show` and `gpu expire ID cancel`. There are no `--in`, `--at`, `--show`, or `--cancel` flags.
 
-`gpu up --expire 2h` counts from CLI invocation, including selection and boot. If SSH misses the deadline, arming fails rather than extending it.
+`gpu up --expire 2h` counts from CLI invocation, including selection and boot. If SSH misses the deadline, arming fails rather than extending it; the boot guard still destroys the instance at the deadline. Ctrl-C after Vast accepts the create prints the instance ID and its self-destroy time (or, without `--expire`, that it keeps billing).
 
 ### If expiry fails
 
@@ -433,7 +435,7 @@ Failures set `ok:false` and add `error:{code,message,exit_code}`; `result` retai
 - `setup`: `provider`, `project`, `action`, `dry_run`, plus `ready` for a selected provider or `vast_ready`/`gcp_ready` for status. GCP plans also report `queue` and `enable_apis` when applicable.
 - `ssh`: `id`, `ssh_command`; `edit`/`cursor`: `id`, `ssh_alias`, `directory`, `editor`.
 
-Exit codes: **0** success, **1** other failure, **2** usage/missing flags, **10** no capacity (change model/zone), **11** over max price (raise limit/change hardware), **12** not set up (`gpu setup`), **13** authentication expired (sign in again), **14** readiness timeout (inspect state/retry with a longer timeout), **15** spending guardrail (shorten expiry/choose cheaper hardware/change cap), **16** `not_found` (refresh IDs with `gpu ls`). `exec`/`cp` preserve the subprocess status, which may overlap these codes; JSON distinguishes `remote_exit`. No automatic destroy is attempted after a launch failure.
+Exit codes: **0** success, **1** other failure, **2** usage/missing flags, **10** no capacity, including a Vast offer that cannot start now (change model/zone), **11** over max price (raise limit/change hardware), **12** not set up (`gpu setup`), **13** authentication expired (sign in again), **14** readiness timeout (inspect state/retry with a longer timeout), **15** spending guardrail (shorten expiry/choose cheaper hardware/change cap), **16** `not_found` (refresh IDs with `gpu ls`). `exec`/`cp` preserve the subprocess status, which may overlap these codes; JSON distinguishes `remote_exit`. No automatic destroy is attempted after a launch failure.
 
 Optional config `max_session_spend` is off by default. A positive USD amount caps **one launch's estimated compute spend** through its expiry; an unknown price/deadline refuses. It is not a daily/account budget or billing guarantee: storage, network, price changes and failed expiry can cost extra. All existing expiry safety limits still apply.
 
@@ -473,13 +475,15 @@ Tests use `Runner` mocks and PATH stubs, never real Vast or Google Cloud account
 
 ### Workspace and local files
 
-`src/startup.rs` generates startup scripts. Repositories clone into `/workspace/<basename>` with `.git` removed; bare names use the configured owner. `uv sync` runs only if that directory has `pyproject.toml`. No-repo launches still create `/workspace` and configure git identity and conditional `GH_TOKEN` authentication. Containers set up the entrypoint and workspace shell directory; VMs install CUDA 12.8 and Nsight Compute 2025.4.0.
+`src/startup.rs` generates startup scripts. Repositories clone into `/workspace/<basename>` with `.git` removed; bare names use the configured owner. `uv sync` runs only if that directory has `pyproject.toml`. No-repo launches still create `/workspace` and configure git identity and conditional `GH_TOKEN` authentication. Containers set up the entrypoint and workspace shell directory; VMs install CUDA 12.8 and Nsight Compute 2025.4.0. With `--expire`, the script first writes `remote/expiry_guard.sh` (comments stripped, gzip+base64) and starts it with the absolute deadline.
+
+Vast's documented onstart limits disagree: the [API reference](https://docs.vast.ai/api-reference/templates/create-template) says 4048 characters, the [CLI guide](https://docs.vast.ai/cli/get-started) says 16KB, and vastai 1.8.2 checks nothing client-side. `gpu` enforces the smaller one (`ONSTART_LIMIT` in `src/startup.rs`) and refuses a longer script before any request. That is why the boot guard is a small deadline-only script rather than the full worker (about 5.5K gzip+base64).
 
 `src/ssh_config.rs` manages `vast-<id>` aliases in `~/.ssh/vst_config`, included before existing Host rules in `~/.ssh/config`. `gpu down` removes the alias; remote expiry cannot clean it while the computer is offline. Successful mode, GPU, and editor picks live in `$XDG_STATE_HOME/gpu/history.json` (default `~/.local/state/gpu/history.json`). Repository names are cached under `$XDG_CACHE_HOME/gpu/repos-<owner>.json`; cached picks are checked against a fresh GitHub listing. GPU models combine the bundled list and the offer-query cache. Slow work runs in picker `Job`s, never on its input thread.
 
 ### Expiry worker and credentials
 
-`src/expiry.rs` sends `remote/expiry_remote.sh` over SSH stdin. The Linux host needs bash, curl, flock, setsid, writable `~/.local/state/gpu-expire`, and outbound HTTPS. No init manager or package installation is needed. The detached worker's readiness handshake and `/proc` identity are verified before success. State stores the deadline and worker identity, never the key. A shared lock serializes replacement, cancellation, and destruction.
+`src/expiry.rs` sends `remote/expiry_remote.sh` over SSH stdin; `remote/expiry_guard.sh` is the boot guard and shares its state file, lock and `/proc` worker identity. The Linux host needs bash, curl, flock, setsid, writable `~/.local/state/gpu-expire`, and outbound HTTPS. No init manager or package installation is needed. The detached worker's readiness handshake and `/proc` identity are verified before success. State stores the deadline and worker identity, never the key. A shared lock serializes replacement, cancellation, and destruction.
 
 Local network calls use authenticated `gh`, `vastai`, and (for TPUs) `gcloud`, plus authenticated, read-only curl calls to Google's TPU, Cloud Tasks and public pricing APIs. TPU expiry runs in Cloud Tasks using the project's default Compute identity, not in a guest worker. The Vast remote expiry worker is the exception: it uses only Vast-injected `CONTAINER_ID` and `CONTAINER_API_KEY`, from its environment, `/etc/environment`, or PID 1. ID mismatch or a missing scoped key fails closed. No account key, local Vast config, or create-response key is uploaded. The key reaches curl on stdin, not argv; requests use no proxy or redirects. Never print raw Vast output or remote diagnostics that could contain credentials. Neovim release archives use pinned SHA-256 digests in `src/editors.rs`.
 
@@ -491,6 +495,7 @@ Paid, destructive acceptance checks are manual only. Use disposable container an
 2. Replace it with 10 minutes, cancel twice, and verify the instance survives the original deadline.
 3. Arm again, disconnect, and verify disappearance in `gpu ls` and Vast.
 4. Test a local clock deadline, then cancel it.
-5. Reboot with an armed deadline and verify the timer is inactive. Never expose credentials while investigating.
+5. Reboot an instance launched without `--expire` and armed with `gpu expire`, and verify the timer is inactive.
+6. Launch with `gpu up --expire 10m`, press Ctrl-C while it waits for SSH, and verify `gpu expire ID show` reports the deadline and the instance disappears at it. Reboot another `--expire` launch and verify the deadline resumes. Never expose credentials while investigating.
 
 Exit codes: 0 for success or declining a confirmation; 1 for other errors, picker quit, or confirmation EOF; 130 for Ctrl-C; see [Non-terminal commands and JSON](#non-terminal-commands-and-json) for usage and provider-specific codes. Errors use credential-redacted `gpu: <message>` on stderr. Dry runs print JSON argument arrays, not shell commands. Preserve table and JSON formats used by scripts.

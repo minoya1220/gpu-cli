@@ -234,6 +234,91 @@ fn bounded_wait_reports_a_reason_and_post_create_timeout_keeps_id() {
     }
 }
 
+fn transient_then(states: &'static [&'static str]) -> Arc<FakeRunner> {
+    let polls = Arc::new(Mutex::new(0usize));
+    FakeRunner::new(move |cmd| match strs(&cmd.argv)[..] {
+        ["vastai", "search", ..] => ok(OFFER),
+        ["vastai", "create", ..] => ok(r#"{"success":true,"new_contract":123}"#),
+        ["vastai", "show", "instances", "--raw"] => {
+            let mut polls = polls.lock().unwrap();
+            let state = states[(*polls).min(states.len() - 1)];
+            *polls += 1;
+            if state == "running" {
+                ok(LIVE)
+            } else {
+                ok(&format!(
+                    r#"[{{"id":123,"actual_status":"{state}","intended_status":"running"}}]"#
+                ))
+            }
+        }
+        ["vastai", "ssh-url", ..] => ok("ssh://root@ssh1.vast.ai:22"),
+        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", ..] => {
+            ok(r#"{"status":"armed","deadline":4102444800}"#)
+        }
+        ["ssh", ..] => ok(""),
+        _ => panic!("unexpected command: {:?}", cmd.argv),
+    })
+}
+
+#[test]
+fn post_create_expiry_arms_after_transient_vast_states_recover() {
+    let t = TestEnv::new();
+    let runner = transient_then(&["offline", "exited", "error", "running"]);
+    let clock = FakeClock::now_real();
+    let ctx = t.ctx().runner(&runner).clock(&clock).build();
+    let result = object(&ctx, "up", 0, UP);
+    assert_eq!(result.get("id"), Some(&Value::str("123")));
+    assert_eq!(clock.elapsed(), 9.0);
+    assert!(runner.argvs().iter().any(|argv| strs(argv)[..4]
+        == ["ssh", "-o", "BatchMode=yes", "-o"]
+        && argv.iter().any(|a| a == "ConnectTimeout=10")));
+}
+
+#[test]
+fn persistent_transient_vast_state_times_out_with_reason() {
+    let t = TestEnv::new();
+    let runner = transient_then(&["offline"]);
+    let clock = FakeClock::now_real();
+    let ctx = t.ctx().runner(&runner).clock(&clock).build();
+    assert_eq!(
+        main(&ctx, &["wait", "123", "--timeout", "10", "--json"]),
+        14,
+        "{}",
+        err(&ctx)
+    );
+    assert_eq!(clock.elapsed(), 10.0);
+    let object = dict(&out(&ctx));
+    let error = object.get("error").unwrap().as_dict().unwrap();
+    assert_eq!(error.get("code"), Some(&Value::str("wait_timeout")));
+    assert!(
+        crate::pyfmt::py_str(error.get("message").unwrap()).contains("provider status: offline")
+    );
+}
+
+#[test]
+fn terminal_vast_states_fail_wait_immediately() {
+    for listing in [
+        r#"[{"id":123,"actual_status":"destroyed","intended_status":"running"}]"#,
+        r#"[{"id":123,"actual_status":"stopped","intended_status":"stopped"}]"#,
+        r#"[{"id":123,"actual_status":"exited","intended_status":"stopped"}]"#,
+    ] {
+        let t = TestEnv::new();
+        let runner = FakeRunner::new(move |cmd| match strs(&cmd.argv)[..] {
+            ["vastai", "show", "instances", "--raw"] => ok(listing),
+            _ => panic!("unexpected command: {:?}", cmd.argv),
+        });
+        let clock = FakeClock::now_real();
+        let ctx = t.ctx().runner(&runner).clock(&clock).build();
+        assert_eq!(main(&ctx, &["wait", "123", "--timeout", "60", "--json"]), 1);
+        assert_eq!(clock.elapsed(), 0.0, "{listing}");
+        let object = dict(&out(&ctx));
+        let error = object.get("error").unwrap().as_dict().unwrap();
+        assert!(
+            crate::pyfmt::py_str(error.get("message").unwrap()).contains("SSH cannot become ready")
+        );
+    }
+}
+
 #[test]
 fn stable_failure_codes_and_json_errors_do_not_expose_provider_secrets() {
     for (reply, max_price, expected, name) in [

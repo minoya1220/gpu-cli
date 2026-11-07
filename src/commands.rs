@@ -138,7 +138,12 @@ pub fn wait_for_ssh(ctx: &Ctx, instance_id: &str, timeout: f64) -> Result<(Strin
             .ok_or_else(|| Error::msg(format!("Instance {instance_id} not found")))?;
         if let Some(Value::Str(state)) = instance.get("actual_status") {
             reason = format!("provider status: {}", redact_text(state));
-            if ["stopped", "exited", "error", "offline", "destroyed"].contains(&state.as_str()) {
+            let stopping = matches!(
+                instance.get("intended_status"),
+                Some(Value::Str(intended)) if intended != "running"
+            );
+            if state == "destroyed" || (stopping && ["stopped", "exited"].contains(&state.as_str()))
+            {
                 return Err(Error::msg(format!(
                     "Instance {instance_id} is {state}; SSH cannot become ready. Next: gpu ls"
                 )));

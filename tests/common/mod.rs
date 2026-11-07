@@ -78,7 +78,9 @@ impl Sandbox {
         for tool in ["gh", "vastai"] {
             sandbox.stub(tool, FAKE_CLI);
         }
-        for tool in ["ssh", "rsync", "cursor", "code", "zed", "curl", "gcloud"] {
+        for tool in [
+            "ssh", "scp", "rsync", "cursor", "code", "zed", "curl", "gcloud",
+        ] {
             sandbox.stub(tool, FORBIDDEN);
         }
         sandbox

@@ -1,4 +1,6 @@
 //! Setup/undo and opt-in safety tests: all cloud requests terminate here.
+#[path = "setup_automation.rs"]
+mod automation;
 use std::sync::{Arc, Mutex};
 
 use crate::ctx::Ctx;
@@ -428,7 +430,7 @@ fn dry_run_missing_confirmation_and_decline_have_zero_mutations() {
         };
         assert_eq!(
             main(&ctx, &args),
-            if mode == "missing" { 1 } else { 0 },
+            if mode == "missing" { 2 } else { 0 },
             "{}",
             err(&ctx)
         );
@@ -514,7 +516,7 @@ fn undo_removes_only_recorded_additions_and_restores_the_gate() {
     assert_eq!(state.lock().unwrap().apis, ["compute.googleapis.com"]);
     assert!(cfg(&env).get("gcp").is_none());
     let before = runner.calls().len();
-    assert_eq!(main(&ctx, &["ls", "--provider", "gcp"]), 1);
+    assert_eq!(main(&ctx, &["ls", "--provider", "gcp"]), 12);
     assert_eq!(main(&ctx, REMOVE), 0);
     assert_eq!(runner.calls().len(), before);
 }
@@ -725,6 +727,8 @@ fn unset_up_cloud_is_blocked_at_the_single_process_boundary_for_all_commands() {
                 "gcp",
                 "--tpu",
                 "v6e-1",
+                "--zone",
+                "us-east5-b",
                 "--no-repo",
                 "--expire",
                 "2h",
@@ -741,7 +745,7 @@ fn unset_up_cloud_is_blocked_at_the_single_process_boundary_for_all_commands() {
             vec!["expire", ID, "cancel"],
             vec!["expire", ID, "2h"],
         ] {
-            assert_eq!(main(&ctx, &args), 1, "{args:?}");
+            assert_eq!(main(&ctx, &args), 12, "{args:?}");
             assert!(err(&ctx).contains("Next: gpu setup"), "{args:?}");
         }
         // Direct wrappers cannot bypass it, including exec and absolute paths.

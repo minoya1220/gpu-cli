@@ -98,7 +98,12 @@ fn test_picker_zero_one_many() {
         } else {
             vec![keys.as_str()]
         };
-        let ctx = t.ctx().runner(&runner).pickers(&pickers).build();
+        let ctx = t
+            .ctx()
+            .runner(&runner)
+            .interactive(true)
+            .pickers(&pickers)
+            .build();
         assert_eq!(main(&ctx, &["stop"]), 0, "{}", err(&ctx));
         let calls = runner.argvs();
         if count == 0 {
@@ -179,8 +184,8 @@ fn test_down_selection_still_confirms_and_cancel_is_safe() {
     let ctx = t
         .ctx()
         .runner(&runner)
-        .pickers(&[RIGHT])
-        .input(&["no"])
+        .interactive(true)
+        .pickers(&[RIGHT, "no\r"])
         .build();
     assert_eq!(main(&ctx, &["down"]), 0);
     assert_eq!(runner.calls().len(), 1);
@@ -191,8 +196,8 @@ fn test_down_selection_still_confirms_and_cancel_is_safe() {
     let ctx = t
         .ctx()
         .runner(&runner)
-        .pickers(&[RIGHT])
-        .input(&["yes"])
+        .interactive(true)
+        .pickers(&[RIGHT, "yes\r"])
         .build();
     assert_eq!(main(&ctx, &["down"]), 0, "{}", err(&ctx));
     let calls = runner.argvs();
@@ -205,6 +210,7 @@ fn test_down_selection_still_confirms_and_cancel_is_safe() {
     let ctx = t
         .ctx()
         .runner(&runner)
+        .interactive(true)
         .pickers(&[&format!("{BACK}{BACK}")])
         .build();
     assert_eq!(main(&ctx, &["down"]), 1);
@@ -223,7 +229,7 @@ fn test_cursor_repo_and_fallback() {
     for (instance_id, path) in [("12", "/workspace/ThunderKittens"), ("34", "/workspace")] {
         let ctx = t.ctx().runner(&runner).build();
         assert_eq!(main(&ctx, &["cursor", instance_id]), 0, "{}", err(&ctx));
-        stdout += &out(&ctx);
+        stdout += &(out(&ctx) + &err(&ctx));
         let alias = format!("ssh-remote+vast-{instance_id}");
         assert_eq!(
             runner.argvs().last().unwrap(),

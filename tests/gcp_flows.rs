@@ -158,6 +158,8 @@ fn config_lookup_and_setup_errors_use_xdg_or_dot_config_on_every_platform() {
                 "up",
                 "--tpu",
                 "v6e-1",
+                "--zone",
+                "us-east5-b",
                 "--no-repo",
                 "--expire",
                 "2h",
@@ -175,7 +177,7 @@ fn config_lookup_and_setup_errors_use_xdg_or_dot_config_on_every_platform() {
             cmd.stdin(Stdio::null()).output().unwrap()
         };
         let missing = launch();
-        assert_eq!(missing.status.code(), Some(1));
+        assert_eq!(missing.status.code(), Some(12));
         let error = String::from_utf8_lossy(&missing.stderr);
         assert!(error.contains("Google Cloud is not set up"));
         assert!(

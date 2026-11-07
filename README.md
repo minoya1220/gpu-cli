@@ -36,7 +36,7 @@ In the terminal picker:
 - GPU/TPU price and TPU catalog reads start when the launch picker opens, while you choose Repository/Mode, without blocking input. Before `gpu setup`, only the TPU category appears and selecting it explains setup; no TPU types or prices are offered. After setup, cached choices appear immediately and refresh in the background; cached estimates show their age. Choose a TPU generation, size and priced capacity, then its area and priced zone. Digits filter names; on short, unfiltered lists, 1-9 select directly.
 - On the Repository screen, **1–7** select the first seven repos, **8** opens **All repositories...** (when there are more than seven), **9** opens **Clone from URL...**, and **0** selects **No repository** at the bottom. Type to filter across all repos, including those not initially shown.
 - Choose **No repository** or **Clone from URL...** without waiting for GitHub. Paste a URL or `owner/name`, then Enter. Backspace edits; arrows select or go back, not move the text cursor.
-- Press → to retry a failed offer load; Ctrl-R retries repositories. Enter submits repository URLs and TPU durations. Paid launch approval needs **yes + Enter**; → never authorizes it. Press ← to restore the previous page, even after typing. Terminal text prompts decode arrow keys without echoing escape codes. Piped input keeps numbered line prompts.
+- Press → to retry a failed offer load; Ctrl-R retries repositories. Enter submits repository URLs and TPU durations. Paid launch approval needs **yes + Enter**; → never authorizes it. Press ← to restore the previous page, even after typing. Terminal text prompts decode arrow keys without echoing escape codes. Without a terminal, missing choices fail immediately and name the required flags.
 
 GPU and TPU rows share aligned name, price, Spot and offer-count columns. `-` means unquoted, not unsupported; Vast's Spot column is not quoted yet. Offers are sorted cheapest first and show hourly price, reliability, verification, ID, and location. Up to ten are shown. Launch confirmation stays on the same screen stack, so ← restores the previous picker page with its filter and cursor. Launch checks run in background Jobs before approval. Recent successful choices appear first; cancellations and dry runs do not change history.
 
@@ -46,7 +46,7 @@ This command rents a paid instance without prompts. Replace the offer ID with a 
 
 ```sh
 gpu up --repo gpu-kernels --mode container --gpu 'RTX 4090' \
-  --num-gpus 1 --max-price 0.50 --offer 12345678 --disk 30 --yes
+  --num-gpus 1 --max-price 0.50 --offer 12345678 --disk 30 --expire 2h --yes
 ```
 
 Use `--dry-run` instead of `--yes` to print the exact JSON argument-array request without creating anything. With `--yes` and no `--offer`, the cheapest matching offer is selected.
@@ -71,7 +71,7 @@ gpu edit 12345678               # reuse the last editor, or choose one
 gpu edit 12345678 --editor code # cursor, code, zed, or nvim
 ```
 
-Omit the ID to pick an instance, even if only one exists. `gpu ls` shows one aligned table with provider, type, lowercase status, hourly price and uptime. TPU IDs are shortened when unambiguous. `gpu ls --long` keeps full IDs; `gpu ls --json` prints credential-redacted JSON with full IDs and original numeric precision. `gpu cursor ID` is an alias for `gpu edit ID --editor cursor`.
+In a terminal, omit the ID to pick an instance, even if only one exists. `gpu ls` shows one aligned table with provider, type, lowercase status, hourly price and uptime. TPU IDs are shortened when unambiguous. `gpu ls --long` keeps full IDs; `gpu ls --json` prints credential-redacted JSON with full IDs and original numeric precision. `gpu cursor ID` is an alias for `gpu edit ID --editor cursor`.
 
 After an interactive launch, choose an editor or **Don't open**. `gpu edit` waits up to 120 seconds for the instance and SSH. It opens `/workspace/<repo>` from the instance label, or `/workspace` without a repository. Non-interactive first use needs `--editor`.
 
@@ -408,6 +408,35 @@ and task cleanup. Inspect dispatch/delete-operation status on failures; never
 expose tokens.
 
 </details>
+
+## Non-terminal commands and JSON
+
+Non-terminal `up` requires explicit hardware, repository/no-repository, Vast mode or TPU zone, `--yes` (unless `--dry-run`), and `--expire DURATION` or a configured `default_expire` (e.g. `"2h"`). Non-terminal `down` requires an ID and `--yes`; commands never read unanswered prompts.
+
+```sh
+gpu up --no-repo --mode container --gpu 'RTX 4090' --yes --expire 2h --wait --json
+gpu wait 12345678 --timeout 180 --json
+gpu exec 12345678 -- python -c 'print("hello")'
+gpu cp 12345678 ./data :/workspace/data
+gpu cp 12345678 :/workspace/results ./results
+```
+
+`wait`, `exec` and `cp` support both providers and their existing IDs/SSH aliases. `up --wait` waits for working SSH; `--timeout SECONDS` bounds readiness (default 120, maximum 86400). `exec` and `cp` wait first too; their timeout bounds readiness, not command runtime/transfer time. `exec` closes stdin, allocates no terminal, quotes arguments literally (use `sh -c SCRIPT` for shell syntax), and passes stdout, stderr and the remote exit code through. `cp` requires exactly one `:/absolute/path`, uses batch SFTP (`scp -s` required), and accepts `--recursive`. Neither bypasses SSH host-key checks; configure host trust/keys beforehand.
+
+Every command accepts `--json`: stdout is exactly one object, with progress on stderr:
+`{"command":"wait","ok":true,"result":{"id":"12345678","ready":true,"ssh_alias":"vast-12345678"}}`.
+Failures set `ok:false` and add `error:{code,message,exit_code}`; `result` retains known partial results, including the created ID if expiry/readiness fails. Parse failures use command `"parse"`. Help/version remain text; interactive SSH/Neovim sessions reject JSON (use `exec` instead). Result fields:
+
+- `up`: `provider`, `id`, `ssh_alias`, `price_per_hour` (USD), `expires_at` (UTC), `created`, `expiry_armed`, `ready`, `dry_run`; dry runs also include `request`. Unknown values are null; check `created` and `expiry_armed` before assuming success.
+- `ls`: `instances` (credential-redacted provider records, full IDs and original numeric precision). **This wraps the previous bare JSON array.**
+- `wait`: `id`, `ssh_alias`, `ready`; `exec`/`cp` add `exit_code`, `stdout`, `stderr`; `cp` also returns `source`, `destination`. Captured streams are UTF-8 text (invalid bytes replaced); plain execution preserves bytes.
+- `stop`/`down`: `id`, `state` (`stopped`/`destroyed`). `expire`: `id`, `action`, `expiry:{status,deadlines}` (UTC list).
+- `setup`: `provider`, `project`, `action`, `dry_run`, plus `ready` for a selected provider or `vast_ready`/`gcp_ready` for status. GCP plans also report `queue` and `enable_apis` when applicable.
+- `ssh`: `id`, `ssh_command`; `edit`/`cursor`: `id`, `ssh_alias`, `directory`, `editor`.
+
+Exit codes: **0** success, **1** other failure, **2** usage/missing flags, **10** no capacity (change model/zone), **11** over max price (raise limit/change hardware), **12** not set up (`gpu setup`), **13** authentication expired (sign in again), **14** readiness timeout (inspect state/retry with a longer timeout), **15** spending guardrail (shorten expiry/choose cheaper hardware/change cap). `exec`/`cp` preserve the subprocess status, which may overlap these codes; JSON distinguishes `remote_exit`. No automatic destroy is attempted after a launch failure.
+
+Optional config `max_session_spend` is off by default. A positive USD amount caps **one launch's estimated compute spend** through its expiry; an unknown price/deadline refuses. It is not a daily/account budget or billing guarantee: storage, network, price changes and failed expiry can cost extra. All existing expiry safety limits still apply.
 
 ## Configuration
 

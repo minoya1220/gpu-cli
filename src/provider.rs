@@ -24,7 +24,9 @@ impl InstanceId {
     }
 }
 
-fn inventory(ctx: &Ctx, cfg: &Dict, only: Option<&str>) -> Result<(Vec<Dict>, Vec<String>)> {
+type Inventory = (Vec<Dict>, Vec<(String, Error)>);
+
+fn inventory(ctx: &Ctx, cfg: &Dict, only: Option<&str>) -> Result<Inventory> {
     let mut items = Vec::new();
     let mut failed = Vec::new();
     if only != Some("gcp") {
@@ -36,7 +38,7 @@ fn inventory(ctx: &Ctx, cfg: &Dict, only: Option<&str>) -> Result<(Vec<Dict>, Ve
                 items.extend(vast);
             }
             Err(err) if only.is_some() => return Err(err),
-            Err(_) => failed.push("Vast.ai".to_string()),
+            Err(error) => failed.push(("Vast.ai".to_string(), error)),
         }
     }
     if only == Some("gcp") || (only.is_none() && crate::setup::gcp_ready(cfg)) {
@@ -45,7 +47,7 @@ fn inventory(ctx: &Ctx, cfg: &Dict, only: Option<&str>) -> Result<(Vec<Dict>, Ve
         {
             Ok(gcp) => items.extend(gcp),
             Err(err) if only.is_some() => return Err(err),
-            Err(_) => failed.push("Google Cloud".to_string()),
+            Err(error) => failed.push(("Google Cloud".to_string(), error)),
         }
     }
     Ok((items, failed))
@@ -59,6 +61,7 @@ pub fn selected_id(
 ) -> Result<Option<String>> {
     if let Some(id) = id {
         if !short_candidate(id) {
+            ctx.result("id", Value::str(id));
             return Ok(Some(id.into()));
         }
         ctx.require_gcloud()?;
@@ -73,7 +76,10 @@ pub fn selected_id(
             .filter(|tpu| tpu.matches_short(id))
             .collect::<Vec<_>>();
         return match matched.as_slice() {
-            [tpu] => Ok(Some(tpu.cli())),
+            [tpu] => {
+                ctx.result("id", Value::str(tpu.cli()));
+                Ok(Some(tpu.cli()))
+            }
             [] => Err(Error::msg(format!(
                 "TPU {id} was not found in {}. Next: gpu ls --provider gcp",
                 settings.project
@@ -83,6 +89,11 @@ pub fn selected_id(
             ))),
         };
     }
+    if !ctx.interactive() {
+        return Err(crate::output::usage(format!(
+            "Missing instance ID. Next: gpu {action} ID"
+        )));
+    }
     if !crate::setup::gcp_ready(cfg) {
         return crate::commands::selected_id(ctx, None, action);
     }
@@ -90,7 +101,11 @@ pub fn selected_id(
     if !failed.is_empty() {
         ctx.eprintln(&format!(
             "Could not list {}; showing only reachable providers. Next: gpu ls",
-            failed.join(" and ")
+            failed
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>()
+                .join(" and ")
         ))?;
         if items.is_empty() {
             return Err(Error::msg("Instance listing is incomplete. Next: gpu ls"));
@@ -110,24 +125,34 @@ pub fn ls(ctx: &Ctx, cfg: &Dict, json: bool, long: bool, only: Option<&str>) -> 
     let (items, failed) = inventory(ctx, cfg, only)?;
     if json {
         let value = Value::List(items.iter().cloned().map(Value::Dict).collect());
-        ctx.println(&crate::pyjson::dumps(
-            &crate::redact::redact(&value),
-            Some(1),
-        ))?;
+        if ctx.json() {
+            ctx.result("instances", crate::redact::redact(&value));
+        } else {
+            ctx.println(&crate::pyjson::dumps(
+                &crate::redact::redact(&value),
+                Some(1),
+            ))?;
+        }
     }
     if !json && (!items.is_empty() || failed.is_empty()) {
         crate::instances::render_table(ctx, &items, long)?;
     }
     if !failed.is_empty() {
-        let provider = if failed[0] == "Vast.ai" {
+        let provider = if failed[0].0 == "Vast.ai" {
             "vast"
         } else {
             "gcp"
         };
-        return Err(Error::msg(format!(
-            "Instance listing is incomplete: {} unavailable. Next: gpu ls --provider {provider}",
-            failed.join(" and ")
-        )));
+        let message =
+            format!(
+            "Instance listing is incomplete: {} unavailable. {} Next: gpu ls --provider {provider}",
+            failed.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>().join(" and "),
+            failed[0].1.text(),
+        );
+        return Err(match &failed[0].1 {
+            Error::Status(code, _) => Error::status(*code, message),
+            _ => Error::msg(message),
+        });
     }
     Ok(())
 }

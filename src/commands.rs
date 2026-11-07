@@ -22,7 +22,10 @@ use crate::vast::{find_instance, list_instances};
 pub fn ls(ctx: &Ctx, json: bool) -> Result<()> {
     let raw = run(ctx, &["vastai", "show", "instances", "--raw"], None)?;
     let value = crate::vast::parse_reply(&raw)?;
-    if json {
+    if json && ctx.json() {
+        ctx.result("instances", redact(&value));
+        Ok(())
+    } else if json {
         ctx.println(&pyjson::dumps(&redact(&value), Some(1)))
     } else {
         render_instances(ctx, &value)
@@ -41,6 +44,9 @@ pub fn render_instances(ctx: &Ctx, instances: &Value) -> Result<()> {
 pub fn selected_id(ctx: &Ctx, id: Option<&str>, command: &str) -> Result<Option<String>> {
     match id {
         Some(id) => Ok(Some(id.to_string())),
+        None if !ctx.interactive() => Err(crate::output::usage(format!(
+            "Missing instance ID. Next: gpu {command} ID"
+        ))),
         None => select_instance(ctx, &list_instances(ctx, None)?, command),
     }
 }
@@ -109,9 +115,10 @@ pub fn wait_for_lifecycle(ctx: &Ctx, instance_id: &str, action: &str, timeout: f
 /// Poll Vast and SSH until ready; shared by all editor launchers and expiry.
 pub fn wait_for_ssh(ctx: &Ctx, instance_id: &str, timeout: f64) -> Result<(String, String)> {
     let deadline = ctx.clock.monotonic() + timeout;
-    let timed_out = || {
-        Error::msg(format!(
-            "Timed out waiting for instance {instance_id} to run and answer SSH"
+    let mut reason = "instance not running".to_string();
+    let timed_out = |reason: &str| {
+        Error::status(crate::error::ExitCode::WaitTimeout, format!(
+            "Timed out waiting for instance {instance_id} to run and answer SSH after {}s ({reason}). Next: gpu wait {instance_id} --timeout 120", general(timeout)
         ))
     };
     ctx.eprintln(&format!(
@@ -121,19 +128,31 @@ pub fn wait_for_ssh(ctx: &Ctx, instance_id: &str, timeout: f64) -> Result<(Strin
     loop {
         let remaining = deadline - ctx.clock.monotonic();
         if remaining <= 0.0 {
-            return Err(timed_out());
+            return Err(timed_out(&reason));
         }
         let live = match poll_instances(ctx, remaining) {
             Ok(live) => live,
-            Err((true, err)) if err.text().contains("Timed out") => return Err(timed_out()),
+            Err((true, err)) if err.text().contains("Timed out") => {
+                return Err(timed_out("provider inventory request timed out"))
+            }
             Err((_, err)) => return Err(err),
         };
         let instance = find_instance(&live, instance_id)
             .ok_or_else(|| Error::msg(format!("Instance {instance_id} not found")))?;
+        if let Some(Value::Str(state)) = instance.get("actual_status") {
+            reason = format!("provider status: {}", redact_text(state));
+            if ["stopped", "exited", "error", "offline", "destroyed"].contains(&state.as_str()) {
+                return Err(Error::msg(format!(
+                    "Instance {instance_id} is {state}; SSH cannot become ready. Next: gpu ls"
+                )));
+            }
+        }
         if instance.get("actual_status") == Some(&Value::str("running")) {
             match update_host(&ctx.env, instance) {
                 // SSH endpoint not provisioned yet.
-                Err(HostError::NotReady(_)) => {}
+                Err(HostError::NotReady(_)) => {
+                    reason = "SSH endpoint not provisioned".into();
+                }
                 Err(HostError::Failed(err)) => return Err(err),
                 Ok(alias) => {
                     let remaining = deadline - ctx.clock.monotonic();
@@ -156,13 +175,18 @@ pub fn wait_for_ssh(ctx: &Ctx, instance_id: &str, timeout: f64) -> Result<(Strin
                                     None => "/workspace".into(),
                                 };
                                 if repo.is_none() {
-                                    ctx.println(
+                                    ctx.eprintln(
                                         "No repository recorded on instance; opening /workspace.",
                                     )?;
                                 }
                                 return Ok((alias, directory));
                             }
-                            Ok(_) | Err(RunError::TimedOut) => {}
+                            Ok(output) => {
+                                reason = format!("SSH probe exited with status {}", output.code);
+                            }
+                            Err(RunError::TimedOut) => {
+                                reason = "SSH probe timed out".into();
+                            }
                             Err(other) => return Err(Error::msg(other.python_text("ssh"))),
                         }
                     }
@@ -171,7 +195,7 @@ pub fn wait_for_ssh(ctx: &Ctx, instance_id: &str, timeout: f64) -> Result<(Strin
         }
         let remaining = deadline - ctx.clock.monotonic();
         if remaining <= 0.0 {
-            return Err(timed_out());
+            return Err(timed_out(&reason));
         }
         ctx.clock.sleep(remaining.min(3.0));
     }
@@ -188,7 +212,7 @@ pub fn edit_instance(
         Some(editor) => editor,
         None => {
             if !ctx.interactive() {
-                return Err(Error::msg(
+                return Err(crate::output::usage(
                     format!("No previous editor; specify --editor cursor|code|zed|nvim. Example: gpu edit {instance_id} --editor code"),
                 ));
             }
@@ -197,6 +221,9 @@ pub fn edit_instance(
     };
     check_editor(&ctx.env, &editor)?;
     let (alias, directory) = wait_for_ssh(ctx, instance_id, timeout)?;
+    ctx.result("ssh_alias", Value::str(&alias));
+    ctx.result("directory", Value::str(&directory));
+    ctx.result("editor", Value::str(&editor));
     let nvim_config = if editor == "nvim" {
         crate::config::nvim_config_text(nvim_config)?
     } else {
@@ -216,8 +243,25 @@ pub fn expire_instance(
     action: &str,
     deadline: Option<Timestamp>,
 ) -> Result<()> {
-    let (alias, _) = wait_for_ssh(ctx, instance_id, 120.0)?;
+    let (alias, _) = wait_for_ssh(ctx, instance_id, ctx.ssh_timeout())?;
     let result = manage_expiry(ctx, &alias, instance_id, action, deadline)?;
+    let deadlines = match result.get("deadline") {
+        Some(Value::Int(seconds)) => Timestamp::from_second(*seconds)
+            .ok()
+            .map(|at| vec![Value::str(at.to_string())])
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    ctx.result(
+        "expiry",
+        Value::Dict(Dict::from_iter([
+            (
+                "status".into(),
+                result.get("status").cloned().unwrap_or(Value::Null),
+            ),
+            ("deadlines".into(), Value::List(deadlines)),
+        ])),
+    );
     ctx.println(&expiry_summary(ctx, instance_id, &result)?)?;
     if result.get("status") == Some(&Value::str("inactive")) {
         return Err(Error::msg(format!(
@@ -235,6 +279,7 @@ pub fn ssh(ctx: &Ctx, instance_id: &str, exec: bool) -> Result<()> {
         argv.extend(words);
         return Err(Error::msg(ctx.exec(&argv)));
     }
+    ctx.result("ssh_command", Value::str(redact_text(&url)));
     ctx.println(&redact_text(&url))
 }
 
@@ -274,10 +319,12 @@ pub fn lifecycle(ctx: &Ctx, instance_id: &str, destroy: bool, yes: bool) -> Resu
     wait_for_lifecycle(ctx, instance_id, action, 60.0)?;
     if destroy {
         remove_host(&ctx.env, instance_id)?;
+        ctx.result("state", Value::str("destroyed"));
         ctx.println(&format!(
             "Instance {instance_id} ({gpu}) destroyed; billing stopped."
         ))
     } else {
+        ctx.result("state", Value::str("stopped"));
         ctx.println(&format!(
             "Instance {instance_id} ({gpu}) stopped; storage charges may continue."
         ))

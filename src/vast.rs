@@ -131,9 +131,23 @@ pub fn list_instances(ctx: &Ctx, timeout: Option<f64>) -> Result<Vec<Dict>> {
 
 /// Decode provider data without exposing raw output or decoder diagnostics.
 pub(crate) fn parse_reply(output: &str) -> Result<Value> {
-    pyjson::loads(output).map_err(|_| {
-        Error::msg("Vast returned no readable data. Log in with: vastai set api-key <api-key>")
-    })
+    let value = pyjson::loads(output).map_err(|_| {
+        crate::provider_errors::vast(output).unwrap_or_else(|| {
+            Error::msg("Vast returned no readable data. Log in with: vastai set api-key <api-key>")
+        })
+    })?;
+    if let Some(dict) = value.as_dict() {
+        if dict.get("success") == Some(&Value::Bool(false)) || dict.get("error").is_some() {
+            for key in ["error", "msg"] {
+                if let Some(detail) = dict.get(key) {
+                    if let Some(error) = crate::provider_errors::vast(&py_str(detail)) {
+                        return Err(error);
+                    }
+                }
+            }
+        }
+    }
+    Ok(value)
 }
 
 /// The listed instance whose `str(id)` equals `instance_id`.

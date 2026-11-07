@@ -1,0 +1,36 @@
+//! Invocation-scoped structured results. Never derive machine data from prose.
+use crate::ctx::Ctx;
+use crate::error::{Error, Result};
+use crate::pyjson::{self, Dict, Value};
+
+#[derive(Default)]
+pub(crate) struct CommandOutput {
+    pub json: bool,
+    pub result: Dict,
+    pub ssh_timeout: Option<f64>,
+}
+
+pub(crate) fn finish(ctx: &Ctx, command: &str, outcome: &Result<()>) -> Result<()> {
+    let mut object = Dict::new();
+    object.insert("command", Value::str(command));
+    object.insert("ok", Value::Bool(outcome.is_ok()));
+    object.insert("result", Value::Dict(ctx.result_snapshot()));
+    if let Err(error) = outcome {
+        let mut detail = Dict::new();
+        detail.insert("code", Value::str(error.code_name()));
+        detail.insert(
+            "message",
+            Value::str(crate::redact::redact_text(error.text())),
+        );
+        detail.insert("exit_code", Value::Int(error.exit_code().into()));
+        object.insert("error", Value::Dict(detail));
+    }
+    // Remote stdout/stderr are caller data, not provider API responses. They
+    // deliberately pass through unchanged. Provider data is redacted at source.
+    ctx.console
+        .println(&pyjson::dumps(&Value::Dict(object), None))
+}
+
+pub(crate) fn usage(text: impl Into<String>) -> Error {
+    Error::Usage(text.into())
+}

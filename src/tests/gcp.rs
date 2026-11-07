@@ -1,4 +1,6 @@
 //! No test in this module can invoke a real cloud command.
+#[path = "gcp_automation.rs"]
+mod automation;
 use crate::ctx::Ctx;
 use crate::gcp::TpuId;
 use crate::process::{Cmd, Output};
@@ -257,7 +259,7 @@ fn dry_run_is_offline_aliases_v5e_and_rejects_missing_or_invalid_safety_flags() 
                 "--yes"
             ]
         ),
-        1
+        2
     );
     assert!(runner.calls().is_empty());
 }
@@ -405,7 +407,7 @@ fn queue_or_task_failures_prevent_paid_create() {
 fn stockout_with_verified_absence_cleans_its_task_and_reports_one_next_command() {
     let (_env, ctx, _runner, state) = fixture();
     state.lock().unwrap().fail_create = true;
-    assert_eq!(main(&ctx, UP), 1);
+    assert_eq!(main(&ctx, UP), 10);
     let message = err(&ctx);
     assert!(
         message.contains("No on-demand capacity in us-east5-b"),
@@ -481,7 +483,19 @@ fn tpu_listing_uses_cached_slice_prices_and_create_time_without_price_requests()
         assert!(out(&ctx).contains(ID));
         assert_eq!(main(&ctx, &["ls", "--provider", "gcp", "--json"]), 0);
         let listing = json(&out(&ctx));
-        let listed = listing.as_list().unwrap()[0].as_dict().unwrap();
+        let listed = listing
+            .as_dict()
+            .unwrap()
+            .get("result")
+            .unwrap()
+            .as_dict()
+            .unwrap()
+            .get("instances")
+            .unwrap()
+            .as_list()
+            .unwrap()[0]
+            .as_dict()
+            .unwrap();
         assert_eq!(listed.get("id"), Some(&Value::str(ID)));
         assert_eq!(listed.get("duration"), Some(&Value::Int(420)));
         assert_eq!(
@@ -506,7 +520,19 @@ fn unknown_tpu_create_times_stay_unknown_and_v5litepod_has_its_public_name() {
         state.lock().unwrap().nodes.push(n);
         assert_eq!(main(&ctx, &["ls", "--provider", "gcp", "--json"]), 0);
         let listing = json(&out(&ctx));
-        let listed = listing.as_list().unwrap()[0].as_dict().unwrap();
+        let listed = listing
+            .as_dict()
+            .unwrap()
+            .get("result")
+            .unwrap()
+            .as_dict()
+            .unwrap()
+            .get("instances")
+            .unwrap()
+            .as_list()
+            .unwrap()[0]
+            .as_dict()
+            .unwrap();
         assert_eq!(listed.get("gpu_name"), Some(&Value::str("v5e-1")));
         assert!(listed.get("duration").is_none());
         assert!(listed.get("dph_total").is_none());
@@ -590,7 +616,7 @@ fn short_tpu_names_before_setup_never_run_gcloud() {
     let env = TestEnv::new();
     let runner = FakeRunner::forbid();
     let ctx = env.ctx().runner(&runner).build();
-    assert_eq!(main(&ctx, &["ssh", "gpu-short"]), 1);
+    assert_eq!(main(&ctx, &["ssh", "gpu-short"]), 12);
     assert!(err(&ctx).contains("Next: gpu setup"));
     assert!(runner.calls().is_empty());
 }
@@ -694,7 +720,10 @@ fn tpu_editor_readiness_timeout_terminal_state_and_iam_failure_do_not_open_or_ch
             s.nodes.push(n);
             s.deny_ssh = mode == "denied";
         }
-        assert_eq!(main(&ctx, &["edit", ID, "--editor", "code"]), 1);
+        assert_eq!(
+            main(&ctx, &["edit", ID, "--editor", "code"]),
+            if mode == "timeout" { 14 } else { 1 }
+        );
         let error = err(&ctx);
         assert!(!error.contains("do-not-print"));
         if mode == "timeout" {
@@ -1069,8 +1098,8 @@ fn declining_creation_or_destruction_never_creates_paid_resources() {
     let (env, _ctx, runner, _state) = fixture();
     let ctx = env.ctx().runner(&runner).input(&["no", "no"]).build();
     let flags: Vec<_> = UP.iter().copied().filter(|s| *s != "--yes").collect();
-    assert_eq!(main(&ctx, &flags), 0);
-    assert_eq!(main(&ctx, &["down", ID]), 0);
+    assert_eq!(main(&ctx, &flags), 2);
+    assert_eq!(main(&ctx, &["down", ID]), 2);
     assert!(!runner
         .argvs()
         .iter()
@@ -1480,7 +1509,7 @@ fn spot_stockout_names_a_different_zone_and_preserves_request_scope() {
     state.lock().unwrap().fail_create = true;
     let mut args = UP.to_vec();
     args.push("--spot");
-    assert_eq!(main(&ctx, &args), 1);
+    assert_eq!(main(&ctx, &args), 10);
     let text = err(&ctx);
     assert!(
         text.contains("No Spot capacity in us-east5-b. No node created. Deletion task removed."),

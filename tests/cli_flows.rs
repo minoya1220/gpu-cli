@@ -4,8 +4,6 @@ mod common;
 
 use std::io::Read;
 use std::process::Stdio;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
 use common::Sandbox;
 
@@ -14,52 +12,17 @@ fn run(sandbox: &Sandbox, args: &[&str]) -> std::process::Output {
 }
 
 #[test]
-fn test_ctrl_c_at_a_line_prompt_cancels_without_traceback() {
+fn nonterminal_missing_flags_refuse_even_with_an_open_stdin_pipe() {
     let sandbox = Sandbox::new();
-    let mut child = sandbox
+    let output = sandbox
         .command(&["up", "--dry-run"])
-        .env("FAKE_CLI_DELAY", "0")
         .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+        .output()
         .unwrap();
-    let stdout = Arc::new(Mutex::new(Vec::new()));
-    let mut pipe = child.stdout.take().unwrap();
-    let collected = stdout.clone();
-    let reader = std::thread::spawn(move || {
-        let mut buffer = [0u8; 4096];
-        while let Ok(n) = pipe.read(&mut buffer) {
-            if n == 0 {
-                break;
-            }
-            collected.lock().unwrap().extend_from_slice(&buffer[..n]);
-        }
-    });
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !String::from_utf8_lossy(&stdout.lock().unwrap()).contains("Enter = No repository: ") {
-        assert!(
-            Instant::now() < deadline,
-            "no prompt: {}",
-            String::from_utf8_lossy(&stdout.lock().unwrap())
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    let pid = rustix::process::Pid::from_raw(child.id() as i32).unwrap();
-    rustix::process::kill_process(pid, rustix::process::Signal::INT).unwrap();
-    let status = child.wait().unwrap();
-    reader.join().unwrap();
-    let mut stderr = String::new();
-    child
-        .stderr
-        .take()
-        .unwrap()
-        .read_to_string(&mut stderr)
-        .unwrap();
-    let stdout = String::from_utf8_lossy(&stdout.lock().unwrap()).into_owned();
-    assert_eq!(status.code(), Some(130));
-    assert!(stdout.ends_with("\nCancelled.\n"), "{stdout:?}");
-    assert!(!stderr.contains("panicked"), "{stderr}");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--expire"));
+    assert!(output.stdout.is_empty());
+    assert!(sandbox.calls().is_empty());
 }
 
 #[test]
@@ -102,6 +65,8 @@ fn dry_run_with_flags_prints_the_exact_request() {
             "Tesla T4",
             "--yes",
             "--dry",
+            "--expire",
+            "2h",
         ],
     );
     assert_eq!(
@@ -147,9 +112,13 @@ case "$1 $2" in
     'create instance')
         echo '{"success": true, "new_contract": 123, "instance_api_key": "secret-instance-key"}'
         ;;
+    'show instances')
+        echo '[{"id":123,"actual_status":"running","ssh_host":"ssh1.vast.ai","ssh_port":22}]'
+        ;;
     *) exit 97 ;;
 esac
 "#);
+    sandbox.stub("ssh", "#!/bin/sh\ncase \"$*\" in *ConnectTimeout=10*) echo '{\"status\":\"armed\",\"deadline\":4102444800}';; *) exit 0;; esac\n");
     let output = run(
         &sandbox,
         &[
@@ -160,6 +129,8 @@ esac
             "--gpu",
             "RTX 4090",
             "--yes",
+            "--expire",
+            "2h",
         ],
     );
     assert_eq!(
@@ -170,7 +141,7 @@ esac
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.ends_with("Created instance 123.\nConnect: gpu ssh 123 --exec\n"),
+        stdout.contains("Created instance 123.\nConnect: gpu ssh 123 --exec\n"),
         "{stdout}"
     );
     assert!(!stdout.contains("secret-instance-key"));
@@ -217,6 +188,8 @@ fn empty_xdg_variables_count_as_unset() {
             "Tesla T4",
             "--yes",
             "--dry-run",
+            "--expire",
+            "2h",
         ])
         .env("XDG_CACHE_HOME", "")
         .env("XDG_STATE_HOME", "")

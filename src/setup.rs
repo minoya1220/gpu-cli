@@ -68,6 +68,25 @@ pub(crate) fn provider_screen(ctx: &Ctx, cfg: &Dict) -> Screen<String, String> {
 }
 
 pub fn run(ctx: &Ctx, cfg: &Dict, flags: &SetupFlags) -> Result<()> {
+    ctx.result(
+        "provider",
+        flags.provider.as_ref().map_or(Value::Null, Value::str),
+    );
+    ctx.result(
+        "project",
+        flags.project.as_ref().map_or(Value::Null, Value::str),
+    );
+    ctx.result("dry_run", Value::Bool(flags.dry_run));
+    ctx.result(
+        "action",
+        Value::str(if flags.remove {
+            "remove"
+        } else if flags.provider.is_none() {
+            "status"
+        } else {
+            "configure"
+        }),
+    );
     if flags.zone.is_some() {
         return Err(Error::msg(
             "Setup needs no TPU zone. Choose it at launch. Next: gpu setup --provider gcp",
@@ -93,6 +112,8 @@ pub fn run(ctx: &Ctx, cfg: &Dict, flags: &SetupFlags) -> Result<()> {
         None if ctx.interactive() => pick(ctx, provider_screen(ctx, cfg))?,
         None => {
             let vast = crate::vast::list_instances(ctx, None).is_ok();
+            ctx.result("vast_ready", Value::Bool(vast));
+            ctx.result("gcp_ready", Value::Bool(gcp_ready(cfg)));
             let rows = [
                 [
                     "Vast.ai".into(),
@@ -118,13 +139,15 @@ pub fn run(ctx: &Ctx, cfg: &Dict, flags: &SetupFlags) -> Result<()> {
         }
     };
     if provider == "vast" {
-        return if crate::vast::list_instances(ctx, None).is_ok() {
-            ctx.println("Vast.ai  ✓ set up\nNext: gpu up")
-        } else {
-            Err(Error::msg(
+        crate::vast::list_instances(ctx, None).map_err(|error| match error {
+            Error::Status(_, _) => error,
+            _ => Error::status(
+                crate::error::ExitCode::NotSetup,
                 "Set up Vast.ai authentication. Next: vastai login",
-            ))
-        };
+            ),
+        })?;
+        ctx.result("ready", Value::Bool(true));
+        return ctx.println("Vast.ai  ✓ set up\nNext: gpu up");
     }
     // No status probe, hardware screen, or other command receives this capability.
     let cloud = ctx.for_gcp_setup();
@@ -160,7 +183,11 @@ pub fn run(ctx: &Ctx, cfg: &Dict, flags: &SetupFlags) -> Result<()> {
         } else {
             "\nNext: gpu setup"
         };
-        Error::msg(format!("{}{next}", e.text()))
+        let message = format!("{}{next}", e.text());
+        match e {
+            Error::Status(code, _) => Error::status(code, message),
+            _ => Error::msg(message),
+        }
     })
 }
 
@@ -503,12 +530,19 @@ fn setup_gcp(ctx: &Ctx, cfg: &Dict, flags: &SetupFlags) -> Result<()> {
         version: previous.as_ref().map_or(0, |p| p.version),
         removing: false,
     };
+    ctx.result("project", Value::str(&plan.project));
+    ctx.result("ready", Value::Bool(gcp_ready(cfg)));
+    ctx.result("queue", Value::str(plan.resource()));
     let enabled = plan.services(ctx)?;
     let missing: Vec<_> = APIS
         .iter()
         .filter(|api| !enabled.iter().any(|s| s == **api))
         .copied()
         .collect();
+    ctx.result(
+        "enable_apis",
+        Value::List(missing.iter().map(|api| Value::str(*api)).collect()),
+    );
     // Listing queues with a disabled API can trigger an enable prompt; never do it.
     let exists =
         enabled.iter().any(|s| s == "cloudtasks.googleapis.com") && plan.queue_exists(ctx)?;
@@ -598,6 +632,7 @@ fn setup_gcp(ctx: &Ctx, cfg: &Dict, flags: &SetupFlags) -> Result<()> {
     crate::gcp_facts::refresh_skus(ctx, &plan.project)?;
     plan.version = 1;
     save_config(ctx, Some(plan.config()))?;
+    ctx.result("ready", Value::Bool(true));
     ctx.println("Google Cloud  ✓ set up\nNext: gpu up --provider gcp")
 }
 
@@ -669,6 +704,7 @@ fn remove_gcp(ctx: &Ctx, cfg: &Dict, flags: &SetupFlags) -> Result<()> {
                 "No gpu setup record. Cannot remove untracked infrastructure.",
             ))
         } else {
+            ctx.result("ready", Value::Bool(false));
             ctx.println("Google Cloud  not set up (nothing to remove).")
         };
     };
@@ -734,6 +770,7 @@ fn remove_gcp(ctx: &Ctx, cfg: &Dict, flags: &SetupFlags) -> Result<()> {
         return Err(Error::msg("API removal unverified. Undo record kept."));
     }
     save_config(ctx, None)?;
+    ctx.result("ready", Value::Bool(false));
     ctx.println("Removed gpu setup. Google Cloud  not set up\nNext: gpu setup")
 }
 

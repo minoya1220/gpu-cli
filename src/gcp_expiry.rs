@@ -366,6 +366,13 @@ pub fn manage(
     let queue = queue_for_node(cfg, id, &node)?;
     if action == "cancel" {
         queue.cancel(ctx, id)?;
+        ctx.result(
+            "expiry",
+            Value::Dict(crate::pyjson::Dict::from_iter([
+                ("status".into(), Value::str("cancelled")),
+                ("deadlines".into(), Value::List(Vec::new())),
+            ])),
+        );
         return ctx.println(&format!("Expiry cancelled; billing continues. In-flight deletion cannot be stopped.\nNext: gpu down {}", id.cli()));
     }
     queue.check(ctx)?;
@@ -374,6 +381,20 @@ pub fn manage(
         if old.is_empty() {
             return Err(Error::msg("No pending task; expiry unarmed or already dispatched. Next: gpu ls --provider gcp"));
         }
+        ctx.result(
+            "expiry",
+            Value::Dict(crate::pyjson::Dict::from_iter([
+                ("status".into(), Value::str("armed")),
+                (
+                    "deadlines".into(),
+                    Value::List(
+                        old.iter()
+                            .map(|task| text(task, "scheduleTime").map_or(Value::Null, Value::str))
+                            .collect(),
+                    ),
+                ),
+            ])),
+        );
         for task in old {
             ctx.println(&format!("TPU {}: deletion dispatch/retry scheduled for {}; queue is RUNNING (API/IAM health is not guaranteed).", id.cli(), text(&task, "scheduleTime").unwrap_or("unknown")))?;
         }
@@ -383,6 +404,16 @@ pub fn manage(
     // Create and verify replacement first. If interrupted, the earlier of both
     // deadlines wins; never silently lose the only safety task.
     queue.arm(ctx, id, deadline)?;
+    ctx.result(
+        "expiry",
+        Value::Dict(crate::pyjson::Dict::from_iter([
+            ("status".into(), Value::str("armed")),
+            (
+                "deadlines".into(),
+                Value::List(vec![Value::str(deadline.to_string())]),
+            ),
+        ])),
+    );
     queue.delete_tasks(ctx, id, &old).map_err(|_| Error::msg(format!("New expiry is armed but old tasks remain; an earlier deadline may still destroy this TPU. Next: gpu expire {} show", id.cli())))?;
     ctx.println(&format!(
         "Delete {} at {deadline}; works offline.\nNext: gpu expire {} show",

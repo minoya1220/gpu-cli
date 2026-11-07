@@ -27,6 +27,8 @@ use crate::pyfmt::{casefold, is_printable, is_printable_str};
 pub struct Opt<V> {
     pub value: V,
     pub label: String,
+    /// Explicit digit on unfiltered menus; otherwise numbering is positional.
+    pub digit: Option<u8>,
 }
 
 impl<V> Opt<V> {
@@ -34,7 +36,13 @@ impl<V> Opt<V> {
         Opt {
             value,
             label: label.into(),
+            digit: None,
         }
+    }
+
+    pub fn digit(mut self, digit: u8) -> Self {
+        self.digit = Some(digit);
+        self
     }
 }
 
@@ -49,14 +57,17 @@ impl PickValue for String {
     }
 }
 
-/// What selecting leads to: another screen, or the flow's result.
+/// What selecting leads to: a screen, an inline notice, or the flow's result.
 #[allow(clippy::large_enum_variant)] // Built once per key press; boxing buys nothing.
 pub enum Next<V, R> {
     Screen(Screen<V, R>),
+    /// Keep the current screen and show an actionable message until dismissed.
+    Notice(String),
     Done(R),
 }
 
 type Options<V> = Box<dyn Fn() -> Vec<Opt<V>>>;
+type SearchOptions<V> = Box<dyn Fn(&str) -> Vec<Opt<V>>>;
 /// Checks text entry; the error is shown inline.
 pub type Validate = Box<dyn Fn(&str) -> std::result::Result<(), String>>;
 type Settled<V, R> = Box<dyn Fn() -> Option<Next<V, R>>>;
@@ -65,28 +76,38 @@ type Settled<V, R> = Box<dyn Fn() -> Option<Next<V, R>>>;
 ///
 /// `options` is called on every redraw, so labels can reflect data that loads
 /// later. `select` returns the next screen, or the flow's final result.
+type SelectionNote<V> = Box<dyn Fn(&V) -> String>;
+
 pub struct Screen<V, R> {
     pub title: String,
+    pub title_source: Option<Box<dyn Fn() -> String>>,
     pub options: Options<V>,
     pub select: Box<dyn Fn(V) -> Next<V, R>>,
     /// Options searched instead of `options` while a filter is typed.
-    pub search: Option<Options<V>>,
+    pub search: Option<SearchOptions<V>>,
     /// Must finish before options are shown; starts when the screen first opens.
     pub load: Option<Box<dyn AnyJob>>,
     pub loading: String,
     pub empty: String,
-    /// F2 starts it; `options` should read its result.
-    pub prices: Option<Box<dyn AnyJob>>,
-    /// Digits 1-9 choose directly on short, unfiltered lists instead of filtering.
+    /// Starts on open, never blocks choices. Results update labels on redraw.
+    pub background: Vec<Rc<dyn AnyJob>>,
+    pub selection_note: Option<SelectionNote<V>>,
+    /// Digits choose directly on unfiltered lists with explicit digits or at most nine rows.
     pub quick_select: bool,
     /// Optional background load: static choices remain usable while it runs or fails.
     pub load_required: bool,
     /// Text entry shares the same loop and stack; validation gives an inline error.
     pub text_input: bool,
+    pub submit_on_right: bool,
+    pub input_label: String,
+    pub input_hint: String,
+    pub back_clears_input: bool,
     pub validate: Option<Validate>,
     pub on_settled: Option<Settled<V, R>>,
+    pub settle_active_only: bool,
     pub notice: String,
     pub wait_initial: bool,
+    pub initial_cursor: Option<Box<dyn Fn() -> usize>>,
 }
 
 impl<V: PickValue, R: 'static> Screen<V, R> {
@@ -97,26 +118,95 @@ impl<V: PickValue, R: 'static> Screen<V, R> {
     ) -> Screen<V, R> {
         Screen {
             title: title.into(),
+            title_source: None,
             options: Box::new(options),
             select: Box::new(select),
             search: None,
             load: None,
             loading: "Loading...".into(),
             empty: "Nothing to choose from".into(),
-            prices: None,
+            background: Vec::new(),
+            selection_note: None,
             quick_select: true,
             load_required: true,
             text_input: false,
+            submit_on_right: true,
+            input_label: "Input".into(),
+            input_hint: String::new(),
+            back_clears_input: true,
             validate: None,
             on_settled: None,
+            settle_active_only: false,
             notice: String::new(),
             wait_initial: false,
+            initial_cursor: None,
         }
     }
 
     pub fn search(mut self, search: impl Fn() -> Vec<Opt<V>> + 'static) -> Self {
+        self.search = Some(Box::new(move |_| search()));
+        self
+    }
+
+    /// Query-aware discovery without expanding all variants for a broad filter.
+    pub fn search_filtered(mut self, search: impl Fn(&str) -> Vec<Opt<V>> + 'static) -> Self {
         self.search = Some(Box::new(search));
         self
+    }
+
+    /// Adapt a nested flow without ending the current loop or losing its stack.
+    pub(crate) fn remap<W: PickValue, S: 'static>(
+        self,
+        wrap: Rc<dyn Fn(V) -> W>,
+        unwrap: Rc<dyn Fn(W) -> V>,
+        done: Rc<dyn Fn(R) -> Next<W, S>>,
+    ) -> Screen<W, S> {
+        let options = self.options;
+        let output = wrap.clone();
+        let select = self.select;
+        let w = wrap.clone();
+        let u = unwrap.clone();
+        let d = done.clone();
+        let search = self.search.map(|source| {
+            let w = wrap.clone();
+            Box::new(move |q: &str| map_options(source(q), &w)) as SearchOptions<W>
+        });
+        let note = self.selection_note.map(|note| {
+            let u = unwrap.clone();
+            Box::new(move |value: &W| note(&u(value.clone()))) as SelectionNote<W>
+        });
+        let settled = self.on_settled.map(|callback| {
+            let w = wrap.clone();
+            let u = unwrap.clone();
+            let d = done.clone();
+            Box::new(move || callback().map(|n| map_next(n, w.clone(), u.clone(), d.clone())))
+                as Settled<W, S>
+        });
+        Screen {
+            title: self.title,
+            title_source: self.title_source,
+            options: Box::new(move || map_options(options(), &output)),
+            select: Box::new(move |v| map_next(select(u(v)), w.clone(), unwrap.clone(), d.clone())),
+            search,
+            selection_note: note,
+            on_settled: settled,
+            settle_active_only: self.settle_active_only,
+            load: self.load,
+            loading: self.loading,
+            empty: self.empty,
+            background: self.background,
+            quick_select: self.quick_select,
+            load_required: self.load_required,
+            text_input: self.text_input,
+            submit_on_right: self.submit_on_right,
+            input_label: self.input_label,
+            input_hint: self.input_hint,
+            back_clears_input: self.back_clears_input,
+            validate: self.validate,
+            notice: self.notice,
+            wait_initial: self.wait_initial,
+            initial_cursor: self.initial_cursor,
+        }
     }
 
     pub fn load(mut self, job: impl AnyJob + 'static) -> Self {
@@ -134,8 +224,15 @@ impl<V: PickValue, R: 'static> Screen<V, R> {
         self
     }
 
-    pub fn prices(mut self, job: impl AnyJob + 'static) -> Self {
-        self.prices = Some(Box::new(job));
+    pub fn background(mut self, job: impl AnyJob + 'static) -> Self {
+        self.background.push(Rc::new(job));
+        self
+    }
+    pub fn prices(self, job: impl AnyJob + 'static) -> Self {
+        self.background(job)
+    }
+    pub fn selection_note(mut self, note: impl Fn(&V) -> String + 'static) -> Self {
+        self.selection_note = Some(Box::new(note));
         self
     }
 
@@ -155,13 +252,50 @@ impl<V: PickValue, R: 'static> Screen<V, R> {
         self
     }
 
+    pub(crate) fn title_with(mut self, title: impl Fn() -> String + 'static) -> Self {
+        self.title_source = Some(Box::new(title));
+        self
+    }
+
+    pub(crate) fn submit_on_right(mut self, on: bool) -> Self {
+        self.submit_on_right = on;
+        self
+    }
+
+    pub fn input_hint(mut self, hint: impl Into<String>) -> Self {
+        self.input_hint = hint.into();
+        self
+    }
+
+    pub fn back_clears_input(mut self, on: bool) -> Self {
+        self.back_clears_input = on;
+        self
+    }
+
+    pub fn input_label(mut self, label: impl Into<String>) -> Self {
+        self.input_label = label.into();
+        self
+    }
+
     pub fn on_settled(mut self, f: impl Fn() -> Option<Next<V, R>> + 'static) -> Self {
         self.on_settled = Some(Box::new(f));
         self
     }
 
+    /// Approval continuations must not complete after Back removed their page.
+    /// Repository invalidation intentionally retains its global callback policy.
+    pub(crate) fn settle_active_only(mut self) -> Self {
+        self.settle_active_only = true;
+        self
+    }
+
     pub fn notice(mut self, text: impl Into<String>) -> Self {
         self.notice = text.into();
+        self
+    }
+
+    pub fn highlight(mut self, cursor: impl Fn() -> usize + 'static) -> Self {
+        self.initial_cursor = Some(Box::new(cursor));
         self
     }
 
@@ -171,12 +305,53 @@ impl<V: PickValue, R: 'static> Screen<V, R> {
     }
 }
 
+fn map_options<V, W>(options: Vec<Opt<V>>, wrap: &Rc<dyn Fn(V) -> W>) -> Vec<Opt<W>> {
+    options
+        .into_iter()
+        .map(|o| Opt {
+            value: wrap(o.value),
+            label: o.label,
+            digit: o.digit,
+        })
+        .collect()
+}
+pub(crate) fn map_next<V: PickValue, R: 'static, W: PickValue, S: 'static>(
+    next: Next<V, R>,
+    wrap: Rc<dyn Fn(V) -> W>,
+    unwrap: Rc<dyn Fn(W) -> V>,
+    done: Rc<dyn Fn(R) -> Next<W, S>>,
+) -> Next<W, S> {
+    match next {
+        Next::Screen(s) => Next::Screen(s.remap(wrap, unwrap, done)),
+        Next::Notice(m) => Next::Notice(m),
+        Next::Done(r) => done(r),
+    }
+}
+
+/// Append a flow without ending its loop or discarding its navigation stack.
+pub(crate) fn then<V: PickValue, R: 'static, S: 'static>(
+    step: Next<V, R>,
+    done: impl Fn(R) -> Next<V, S> + 'static,
+) -> Next<V, S> {
+    map_next(step, Rc::new(|v| v), Rc::new(|v| v), Rc::new(done))
+}
+
+pub(crate) fn resolve<V: PickValue, R: 'static>(ctx: &Ctx, step: Next<V, R>) -> Result<R> {
+    match step {
+        Next::Screen(screen) => pick(ctx, screen),
+        Next::Notice(message) => Err(Error::msg(message)),
+        Next::Done(done) => Ok(done),
+    }
+}
+
 /// A screen on the navigation stack with its filter and cursor.
 struct View<V, R> {
     screen: Rc<Screen<V, R>>,
     filter: String,
     cursor: usize,
+    moved: bool,
     error: String,
+    selection_notice: Option<String>,
 }
 
 impl<V: PickValue, R: 'static> View<V, R> {
@@ -185,7 +360,9 @@ impl<V: PickValue, R: 'static> View<V, R> {
             screen: Rc::new(screen),
             filter: String::new(),
             cursor: 0,
+            moved: false,
             error: String::new(),
+            selection_notice: None,
         }
     }
 
@@ -204,7 +381,7 @@ impl<V: PickValue, R: 'static> View<V, R> {
             return Vec::new();
         }
         let source = match &self.screen.search {
-            Some(search) if !self.filter.is_empty() => search(),
+            Some(search) if !self.filter.is_empty() => search(&self.filter),
             _ => (self.screen.options)(),
         };
         let needle = casefold(&self.filter);
@@ -215,11 +392,22 @@ impl<V: PickValue, R: 'static> View<V, R> {
     }
 
     fn current(&self, count: usize) -> usize {
-        self.cursor.min(count.saturating_sub(1))
+        let cursor = if !self.moved && self.filter.is_empty() {
+            self.screen
+                .initial_cursor
+                .as_ref()
+                .map(|f| f())
+                .unwrap_or(self.cursor)
+        } else {
+            self.cursor
+        };
+        cursor.min(count.saturating_sub(1))
     }
 
     fn quick_select(&self, entries: &[Opt<V>]) -> bool {
-        self.screen.quick_select && self.filter.is_empty() && (1..=9).contains(&entries.len())
+        self.screen.quick_select
+            && self.filter.is_empty()
+            && (entries.iter().any(|o| o.digit.is_some()) || (1..=9).contains(&entries.len()))
     }
 
     fn load_failed_required(&self) -> bool {
@@ -234,6 +422,7 @@ impl<V: PickValue, R: 'static> View<V, R> {
     fn set_filter(&mut self, filter: String) {
         self.filter = filter;
         self.cursor = 0;
+        self.moved = true;
         self.error.clear();
     }
 }
@@ -258,9 +447,11 @@ pub enum Style {
 /// One logical line of styled text.
 pub type Line = Vec<(Style, String)>;
 
-/// What to draw: header and footer are cut at the width, the body wraps.
+/// Body lines wrap. Long typed-prompt titles also wrap so paid quotes cannot
+/// lose their price/deadline on narrow terminals; other header lines are cut.
 pub struct Frame {
     pub header: Vec<Line>,
+    pub wrap_title: bool,
     pub body: Vec<Line>,
     /// The body line holding the selection, kept visible when scrolling.
     pub cursor_line: Option<usize>,
@@ -328,6 +519,11 @@ impl<V: PickValue, R: 'static> Core<V, R> {
     /// Start the top screen's load (`retry` restarts a failed one).
     pub fn open(&mut self, retry: bool) {
         let screen = self.view().screen.clone();
+        for job in &screen.background {
+            if job.state() == JobState::Idle || (retry && job.state() == JobState::Failed) {
+                job.start(Box::new(|| {}));
+            }
+        }
         let Some(load) = screen.load.as_deref() else {
             return;
         };
@@ -343,6 +539,12 @@ impl<V: PickValue, R: 'static> Core<V, R> {
     }
 
     fn settled(core: &Rc<RefCell<Core<V, R>>>, screen: &Rc<Screen<V, R>>) {
+        if screen.settle_active_only {
+            let state = core.borrow();
+            if state.finished() || !Rc::ptr_eq(&state.view().screen, screen) {
+                return;
+            }
+        }
         let Some(on_settled) = &screen.on_settled else {
             return;
         };
@@ -351,6 +553,9 @@ impl<V: PickValue, R: 'static> Core<V, R> {
                 let mut core = core.borrow_mut();
                 core.stack = vec![View::new(replacement)];
                 core.open(false);
+            }
+            Some(Next::Notice(message)) => {
+                core.borrow_mut().view_mut().selection_notice = Some(message)
             }
             Some(Next::Done(result)) => core.borrow_mut().exit(Outcome::Done(result)),
             None => {}
@@ -364,6 +569,7 @@ impl<V: PickValue, R: 'static> Core<V, R> {
                 self.stack.push(View::new(screen));
                 self.open(false);
             }
+            Next::Notice(message) => self.view_mut().selection_notice = Some(message),
             Next::Done(result) => self.exit(Outcome::Done(result)),
         }
     }
@@ -374,6 +580,7 @@ impl<V: PickValue, R: 'static> Core<V, R> {
             let view = self.view_mut();
             let current = view.current(count) as isize;
             view.cursor = (current + delta).rem_euclid(count as isize) as usize;
+            view.moved = true;
         }
     }
 
@@ -381,17 +588,27 @@ impl<V: PickValue, R: 'static> Core<V, R> {
         if self.outcome.is_some() {
             return;
         }
+        // A selection notice is modal: don't change hidden choices or let
+        // buffered selection presses dismiss setup instructions before they are read.
+        if self.view().selection_notice.is_some()
+            && !matches!(key, Key::Left | Key::CtrlC | Key::CtrlD)
+        {
+            return;
+        }
         // Any key but a back key disarms the first-screen quit, including ignored keys.
-        let back = matches!(key, Key::Left | Key::Char('`'));
+        let back = matches!(key, Key::Left);
         if !back {
             self.quit_pending = false;
         }
         match key {
             Key::Up => self.move_cursor(-1),
             Key::Down => self.move_cursor(1),
-            Key::Enter | Key::Right => self.enter(),
-            Key::Left | Key::Char('`') => {
-                if !self.view().filter.is_empty() {
+            Key::Right if self.view().screen.submit_on_right => self.enter(),
+            Key::Enter => self.enter(),
+            Key::Left => {
+                if self.view().selection_notice.is_some() {
+                    self.view_mut().selection_notice = None;
+                } else if !self.view().filter.is_empty() && self.view().screen.back_clears_input {
                     self.view_mut().set_filter(String::new());
                 } else if self.stack.len() > 1 {
                     self.stack.pop();
@@ -407,11 +624,6 @@ impl<V: PickValue, R: 'static> Core<V, R> {
                 self.view_mut().set_filter(filter);
             }
             Key::CtrlR => self.open(true),
-            Key::F2 => {
-                if let Some(prices) = self.view().screen.prices.as_deref() {
-                    prices.start(Box::new(|| {}));
-                }
-            }
             Key::CtrlC => self.exit(Outcome::Cancelled(130)),
             Key::CtrlD => self.exit(Outcome::Cancelled(1)),
             Key::Paste(text) => {
@@ -421,13 +633,20 @@ impl<V: PickValue, R: 'static> Core<V, R> {
                     self.view_mut().set_filter(filter);
                 }
             }
+            Key::Right | Key::Char('`') | Key::Escape | Key::Ignored | Key::F2 => {}
             Key::Char(c) => self.type_char(c),
-            Key::Escape | Key::Ignored => {}
         }
     }
 
     fn enter(&mut self) {
         let view = self.view();
+        if view.load_failed_required() {
+            self.open(true);
+            return;
+        }
+        if !view.ready() {
+            return;
+        }
         if view.screen.text_input {
             if let Some(validate) = &view.screen.validate {
                 if let Err(error) = validate(&view.filter) {
@@ -437,10 +656,6 @@ impl<V: PickValue, R: 'static> Core<V, R> {
             }
             let text = view.filter.clone();
             self.choose(V::from_text(text));
-            return;
-        }
-        if view.load_failed_required() {
-            self.open(true);
             return;
         }
         let entries = view.entries();
@@ -454,12 +669,18 @@ impl<V: PickValue, R: 'static> Core<V, R> {
         if !is_printable(c) {
             return;
         }
-        if let Some(digit) = c.to_digit(10).filter(|d| (1..=9).contains(d)) {
+        if let Some(digit) = c.to_digit(10) {
             let entries = self.view().entries();
-            if self.view().quick_select(&entries) && digit as usize <= entries.len() {
-                let value = entries[digit as usize - 1].value.clone();
-                self.choose(value);
-                return;
+            if self.view().quick_select(&entries) {
+                let option = if entries.iter().any(|o| o.digit.is_some()) {
+                    entries.iter().find(|o| o.digit == Some(digit as u8))
+                } else {
+                    digit.checked_sub(1).and_then(|i| entries.get(i as usize))
+                };
+                if let Some(option) = option {
+                    self.choose(option.value.clone());
+                    return;
+                }
             }
         }
         let filter = format!("{}{c}", self.view().filter);
@@ -467,7 +688,12 @@ impl<V: PickValue, R: 'static> Core<V, R> {
     }
 
     pub fn title(&self) -> String {
-        self.view().screen.title.clone()
+        let screen = &self.view().screen;
+        screen
+            .title_source
+            .as_ref()
+            .map(|f| f())
+            .unwrap_or_else(|| screen.title.clone())
     }
 
     pub fn filter(&self) -> String {
@@ -481,10 +707,10 @@ impl<V: PickValue, R: 'static> Core<V, R> {
 
     pub fn header(&self) -> Vec<Line> {
         let view = self.view();
-        let mut header = vec![vec![(Style::Title, view.screen.title.clone())]];
-        if !view.filter.is_empty() {
+        let mut header = vec![vec![(Style::Title, self.title())]];
+        if (view.screen.text_input && view.ready()) || !view.filter.is_empty() {
             let prefix = if view.screen.text_input {
-                "Repository"
+                &view.screen.input_label
             } else {
                 "Filter"
             };
@@ -503,18 +729,8 @@ impl<V: PickValue, R: 'static> Core<V, R> {
                 .map(|l| vec![(style, l.to_string())])
                 .collect()
         };
-        if screen.text_input {
-            return if view.error.is_empty() {
-                (
-                    one(
-                        Style::Note,
-                        "  Type HTTPS/git@ URL or owner/name, then Enter/\u{2192}".into(),
-                    ),
-                    None,
-                )
-            } else {
-                (one(Style::Error, view.error.clone()), None)
-            };
+        if let Some(message) = &view.selection_notice {
+            return (one(Style::Error, message.clone()), None);
         }
         if view.load_failed_required() {
             let error = load.map(|l| l.error()).unwrap_or_default();
@@ -527,13 +743,25 @@ impl<V: PickValue, R: 'static> Core<V, R> {
         if !view.ready() {
             return (one(Style::Note, format!("  {}", screen.loading)), None);
         }
+        if screen.text_input {
+            return if !view.error.is_empty() {
+                (one(Style::Error, view.error.clone()), None)
+            } else if screen.input_hint.is_empty() {
+                (Vec::new(), None)
+            } else {
+                (one(Style::Note, format!("  {}", screen.input_hint)), None)
+            };
+        }
         let entries = view.entries();
         if entries.is_empty() {
-            let text = if view.filter.is_empty() {
-                format!("  {}", screen.empty)
-            } else {
-                "  No matches".into()
-            };
+            let text =
+                if load.is_some_and(|l| matches!(l.state(), JobState::Idle | JobState::Running)) {
+                    format!("  {}", screen.loading)
+                } else if view.filter.is_empty() {
+                    format!("  {}", screen.empty)
+                } else {
+                    "  No matches".into()
+                };
             return (one(Style::Note, text), None);
         }
         let current = view.current(entries.len());
@@ -542,9 +770,20 @@ impl<V: PickValue, R: 'static> Core<V, R> {
         if !screen.notice.is_empty() {
             lines.extend(one(Style::Error, format!("  {}", screen.notice)));
         }
+        if let Some(note) = &screen.selection_note {
+            let text = note(&entries[current].value);
+            if !text.is_empty() {
+                lines.extend(one(Style::Note, format!("  {text}")));
+            }
+        }
         let mut cursor_line = None;
         for (index, option) in entries.iter().enumerate() {
-            let number = format!("{:>width$}", index + 1);
+            let number = if view.filter.is_empty() {
+                option.digit.map(usize::from).unwrap_or(index + 1)
+            } else {
+                index + 1
+            };
+            let number = format!("{number:>width$}");
             let label_lines: Vec<&str> = option.label.split('\n').collect();
             if index == current {
                 // Scrolls the list so the selected line stays visible.
@@ -578,47 +817,56 @@ impl<V: PickValue, R: 'static> Core<V, R> {
 
     pub fn footer(&self) -> String {
         let view = self.view();
+        if view.screen.text_input {
+            return "\u{2190} back".into();
+        }
+        if view.selection_notice.is_some() {
+            return "\u{2190} return to choices  Ctrl-C quit".into();
+        }
         let screen = &view.screen;
         let load = screen.load.as_deref();
-        let mut hints: Vec<String> = if screen.text_input {
-            vec!["Enter/\u{2192} continue".into(), "Backspace edit".into()]
-        } else if view.load_failed_required() {
-            vec!["Enter/\u{2192} retry".into()]
+        let mut hints: Vec<String> = if view.load_failed_required() {
+            vec![if screen.submit_on_right {
+                "\u{2192} retry"
+            } else {
+                "Enter retry"
+            }
+            .into()]
         } else {
-            let mut hints = vec![
+            vec![
                 "\u{2191}/\u{2193} move".to_string(),
-                "Enter/\u{2192} select".into(),
-            ];
-            if view.quick_select(&view.entries()) {
-                hints.push("1-9 select".into());
-            }
-            hints
+                "\u{2192} select".into(),
+            ]
         };
-        if !view.filter.is_empty() {
-            hints.push("`/\u{2190} clear".into());
+        if !view.filter.is_empty() && screen.back_clears_input {
+            hints.push("\u{2190} clear".into());
         } else if self.quit_pending {
-            hints.push("Press `/\u{2190} again to quit".into());
+            hints.push("Press \u{2190} again to quit".into());
         } else if self.stack.len() > 1 {
-            hints.push("`/\u{2190} back".into());
+            hints.push("\u{2190} back".into());
         } else {
-            hints.push("`/\u{2190} quit (twice)".into());
+            hints.push("\u{2190} quit (twice)".into());
         }
-        if !screen.load_required && load.is_some_and(|l| l.state() == JobState::Failed) {
-            hints.push("Ctrl-R retry repositories".into());
-        }
-        if let Some(prices) = screen.prices.as_deref() {
-            match prices.state() {
-                JobState::Idle => hints.push("F2 prices".into()),
-                JobState::Running => hints.push("Loading prices...".into()),
-                JobState::Failed => {
-                    let error = prices.error();
-                    hints.push(format!(
-                        "F2 retry prices ({})",
-                        crate::pyfmt::splitlines(&error).first().unwrap_or(&"")
-                    ));
-                }
-                JobState::Done => {}
+        if !view.load_failed_required() {
+            let entries = view.entries();
+            if view.quick_select(&entries) {
+                hints.push(
+                    if entries.iter().any(|o| o.digit == Some(0)) {
+                        "0-9 select"
+                    } else {
+                        "1-9 select"
+                    }
+                    .into(),
+                );
             }
+        }
+        if (!screen.load_required && load.is_some_and(|l| l.state() == JobState::Failed))
+            || screen
+                .background
+                .iter()
+                .any(|j| j.state() == JobState::Failed)
+        {
+            hints.push("Ctrl-R retry".into());
         }
         hints.join("  ")
     }
@@ -627,6 +875,7 @@ impl<V: PickValue, R: 'static> Core<V, R> {
         let (body, cursor_line) = self.body();
         Frame {
             header: self.header(),
+            wrap_title: self.view().screen.text_input,
             body,
             cursor_line,
             footer: self.footer(),

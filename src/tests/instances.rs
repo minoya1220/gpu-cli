@@ -92,7 +92,7 @@ fn test_picker_zero_one_many() {
         let t = TestEnv::new();
         let runner = fake_vast(instances()[..count].to_vec(), no_other);
         // Select the last instance, as the Python test's patched picker does.
-        let keys = format!("{}{ENTER}", DOWN.repeat(count.saturating_sub(1)));
+        let keys = format!("{}{RIGHT}", DOWN.repeat(count.saturating_sub(1)));
         let pickers: Vec<&str> = if count == 0 {
             vec![]
         } else {
@@ -146,7 +146,7 @@ fn test_instance_picker_real_keys() {
         assert!(matches!(cancelled, Outcome::Cancelled(_)));
         let selected = drive(instance_screen(count), move |keys| {
             keys.wait(|s| s.labels.len() == count);
-            keys.press(ENTER);
+            keys.press(RIGHT);
         });
         assert_eq!(selected, Outcome::Done("12".to_string()));
     }
@@ -179,7 +179,7 @@ fn test_down_selection_still_confirms_and_cancel_is_safe() {
     let ctx = t
         .ctx()
         .runner(&runner)
-        .pickers(&[ENTER])
+        .pickers(&[RIGHT])
         .input(&["no"])
         .build();
     assert_eq!(main(&ctx, &["down"]), 0);
@@ -191,7 +191,7 @@ fn test_down_selection_still_confirms_and_cancel_is_safe() {
     let ctx = t
         .ctx()
         .runner(&runner)
-        .pickers(&[ENTER])
+        .pickers(&[RIGHT])
         .input(&["yes"])
         .build();
     assert_eq!(main(&ctx, &["down"]), 0, "{}", err(&ctx));
@@ -318,8 +318,8 @@ fn test_onstart_repo_and_untrusted_label() {
 #[test]
 fn test_up_offers_editor_on_success() {
     for (editor, keys) in [
-        ("code", format!("{ENTER}{DOWN}{ENTER}")),
-        ("none", format!("{DOWN}{ENTER}")),
+        ("code", format!("{RIGHT}{DOWN}{RIGHT}")),
+        ("none", format!("{DOWN}{RIGHT}")),
     ] {
         let t = TestEnv::new();
         editor_stubs(&t);
@@ -342,7 +342,6 @@ fn test_up_offers_editor_on_success() {
             .runner(&runner)
             .interactive(true)
             .pickers(&[&keys])
-            .input(&["yes"])
             .build();
         let args = UpArgs {
             repo: Some(Repo::from_arg("ThunderKittens")),
@@ -350,6 +349,7 @@ fn test_up_offers_editor_on_success() {
             gpu: Some("H100".into()),
             num_gpus: 1,
             offer: Some(9),
+            yes: true,
             ..UpArgs::default()
         };
         launch(&ctx, &args, &defaults(), None).unwrap();

@@ -6,15 +6,25 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::ctx::{Ctx, Env};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::offers::{
-    category_label, group_by_category, model_label, offer_rows, OfferSearch, Stats, NO_OFFERS,
+    category_columns, group_by_category, hardware_labels, model_columns, offer_rows,
+    HardwareColumns, OfferSearch, Stats, NO_OFFERS,
 };
 use crate::picker::{pick, AnyJob, Job, JobState, Next, Opt, PickValue, Screen};
 use crate::pyjson::Dict;
 use crate::repos::{load_cached_repos, resolve_repo, Repo};
 
 pub const MODES: [&str; 2] = ["container", "vm"];
+
+pub const TPU_CATEGORY: &str = "TPU (Google Cloud)";
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum TpuChoice {
+    ChooseType,
+    /// A generation shortcut, or a complete generation-size accelerator name.
+    Type(String),
+}
 
 /// Launch choices; `None` means not chosen yet.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -23,6 +33,8 @@ pub struct Picks {
     pub mode: Option<String>,
     pub gpu: Option<String>,
     pub offer: Option<Dict>,
+    pub tpu: Option<TpuChoice>,
+    pub(crate) cloud: Option<crate::gcp_wizard::Selection>,
 }
 
 impl Picks {
@@ -32,6 +44,8 @@ impl Picks {
             mode: mode.map(String::from),
             gpu: gpu.map(String::from),
             offer: None,
+            tpu: None,
+            cloud: None,
         }
     }
 }
@@ -40,10 +54,13 @@ impl Picks {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Choice {
     Repo(Repo),
+    AllRepos,
     CloneUrl,
     Text(String),
+    Cloud(String),
     Mode(String),
     Gpu(String),
+    Tpu(TpuChoice),
     Category(String),
     Offer(Dict),
 }
@@ -70,7 +87,28 @@ impl Search for OfferSearch {
     }
 }
 
+pub type CloudTransition = Rc<dyn Fn(LaunchWizard, Picks) -> Next<Choice, Picks>>;
+
 type WizardScreen = Screen<Choice, Picks>;
+
+fn hardware_options(rows: Vec<(Choice, HardwareColumns)>, query: Option<&str>) -> Vec<Opt<Choice>> {
+    let needle = query.map(crate::pyfmt::casefold);
+    // Measure visible matches together, not hidden long model names. The picker
+    // repeats the same casefolded match, preserving its normal filter semantics.
+    let (values, cells): (Vec<_>, Vec<_>) = rows
+        .into_iter()
+        .filter(|(_, cells)| {
+            needle
+                .as_ref()
+                .is_none_or(|needle| crate::pyfmt::casefold(&cells.join("  ")).contains(needle))
+        })
+        .unzip();
+    values
+        .into_iter()
+        .zip(hardware_labels(&cells))
+        .map(|(value, label)| Opt::new(value, label))
+        .collect()
+}
 type Step = Next<Choice, Picks>;
 
 struct State {
@@ -86,7 +124,16 @@ struct State {
     categories: Vec<(String, Vec<String>)>,
     recent_gpus: Vec<String>,
     choose_offer: bool,
+    tpu_setup_error: Option<String>,
+    tpu_transition: Option<CloudTransition>,
+    tpu_prices: Job<Arc<crate::gcp_prices::Prices>>,
+    prefetch_tpu_prices: bool,
+    tpu_cached_prices: Option<Arc<crate::gcp_prices::Prices>>,
+    tpu_types: Vec<String>,
+    tpu_catalog: Option<Job<Vec<String>>>,
     prices: RefCell<HashMap<String, Job<Stats>>>,
+    prefetch_attached: Cell<bool>,
+    preferred_mode: String,
 }
 
 /// Builds the screens for whatever `Picks` are still missing.
@@ -105,6 +152,13 @@ pub struct WizardOptions {
     pub models: Vec<String>,
     pub recent_gpus: Vec<String>,
     pub choose_offer: bool,
+    /// Local config preflight only; no cloud calls on a screen transition.
+    pub tpu_setup_error: Option<String>,
+    pub tpu_transition: Option<CloudTransition>,
+    pub tpu_prices: Option<Job<Arc<crate::gcp_prices::Prices>>>,
+    pub tpu_cached_prices: Option<Arc<crate::gcp_prices::Prices>>,
+    pub tpu_types: Vec<String>,
+    pub tpu_catalog: Option<Job<Vec<String>>>,
     pub owner: String,
 }
 
@@ -115,7 +169,7 @@ impl LaunchWizard {
             .recent_gpus
             .into_iter()
             .filter(|g| options.models.contains(g))
-            .take(5)
+            .take(3)
             .collect();
         LaunchWizard {
             state: Rc::new(State {
@@ -131,7 +185,21 @@ impl LaunchWizard {
                 models: options.models,
                 recent_gpus,
                 choose_offer: options.choose_offer,
+                tpu_setup_error: options.tpu_setup_error,
+                tpu_transition: options.tpu_transition,
+                tpu_cached_prices: options.tpu_cached_prices,
+                tpu_types: options.tpu_types,
+                tpu_catalog: options.tpu_catalog,
+                prefetch_tpu_prices: options.tpu_prices.is_some(),
+                tpu_prices: options
+                    .tpu_prices
+                    .unwrap_or_else(|| Job::new(|| Err("needs gpu setup".into()))),
                 prices: RefCell::new(HashMap::new()),
+                prefetch_attached: Cell::new(false),
+                preferred_mode: crate::history::recent_picks(env, "mode")
+                    .into_iter()
+                    .find(|m| MODES.contains(&m.as_str()))
+                    .unwrap_or_else(|| MODES[0].into()),
             }),
         }
     }
@@ -139,11 +207,38 @@ impl LaunchWizard {
     pub fn run(&self, ctx: &Ctx, picks: Picks) -> Result<Picks> {
         match self.next(picks) {
             Next::Screen(first) => pick(ctx, first),
+            Next::Notice(message) => Err(Error::msg(message)),
             Next::Done(picks) => Ok(picks),
         }
     }
 
     pub fn next(&self, picks: Picks) -> Step {
+        let mode = picks
+            .mode
+            .clone()
+            .unwrap_or_else(|| self.state.preferred_mode.clone());
+        match self.next_step(picks) {
+            Next::Screen(mut screen) if !self.state.prefetch_attached.replace(true) => {
+                // Jobs need the picker's Runtime. Attach to its first screen,
+                // not just GPU: reads overlap repository/mode input, never draw.
+                if self.state.search.is_some() {
+                    screen = screen.prices(self.price_job(&mode));
+                }
+                if self.state.tpu_setup_error.is_none() {
+                    if self.state.prefetch_tpu_prices {
+                        screen = screen.prices(self.state.tpu_prices.clone());
+                    }
+                    if let Some(catalog) = &self.state.tpu_catalog {
+                        screen = screen.background(catalog.clone());
+                    }
+                }
+                Next::Screen(screen)
+            }
+            step => step,
+        }
+    }
+
+    fn next_step(&self, picks: Picks) -> Step {
         let s = &self.state;
         if picks.repo.is_none() {
             return Next::Screen(self.repo_screen(picks, String::new()));
@@ -151,10 +246,10 @@ impl LaunchWizard {
         if picks.mode.is_none() {
             return Next::Screen(self.mode_screen(picks));
         }
-        if picks.gpu.is_none() {
+        if picks.gpu.is_none() && picks.tpu.is_none() {
             return Next::Screen(self.gpu_screen(picks));
         }
-        if picks.offer.is_none() && s.choose_offer {
+        if picks.tpu.is_none() && picks.offer.is_none() && s.choose_offer {
             return Next::Screen(self.offer_screen(picks));
         }
         if s.entered_repo_screen.get() {
@@ -223,33 +318,58 @@ impl LaunchWizard {
         }
     }
 
+    fn repo_options(&self, all: bool, searching: bool) -> Vec<Opt<Choice>> {
+        let s = &self.state;
+        let names = if s.repos.state() == JobState::Done {
+            s.repos.result()
+        } else {
+            s.cached.clone()
+        }
+        .unwrap_or_default();
+        let count = names.len();
+        let mut options: Vec<_> = names
+            .into_iter()
+            .take(if all || searching { usize::MAX } else { 7 })
+            .enumerate()
+            .map(|(i, n)| {
+                let option = Opt::new(Choice::Repo(Repo::Named(n.clone())), n);
+                if all || searching {
+                    option
+                } else {
+                    option.digit((i + 1) as u8)
+                }
+            })
+            .collect();
+        if !all {
+            if count > 7 && !searching {
+                options.push(Opt::new(Choice::AllRepos, "All repositories...").digit(8));
+            }
+            options.push(Opt::new(Choice::CloneUrl, "Clone from URL...").digit(9));
+            options.push(Opt::new(Choice::Repo(Repo::NoRepo), "No repository").digit(0));
+        }
+        options
+    }
+
     fn repo_screen(&self, picks: Picks, notice: String) -> WizardScreen {
+        self.repo_list_screen(picks, notice, false)
+    }
+
+    fn repo_list_screen(&self, picks: Picks, notice: String, all: bool) -> WizardScreen {
         let s = &self.state;
         s.entered_repo_screen.set(true);
         let wizard = self.clone();
-        let options = move || {
-            let s = &wizard.state;
-            let mut options = vec![
-                Opt::new(Choice::Repo(Repo::NoRepo), "No repository"),
-                Opt::new(Choice::CloneUrl, "Clone from URL..."),
-            ];
-            let names = if s.repos.state() == JobState::Done {
-                s.repos.result()
-            } else {
-                s.cached.clone()
-            };
-            options.extend(
-                names
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|n| Opt::new(Choice::Repo(Repo::Named(n.clone())), n)),
-            );
-            options
-        };
+        let options = move || wizard.repo_options(all, false);
         let wizard = self.clone();
         let select = move |choice: Choice| -> Step {
             let s = &wizard.state;
             let repo = match choice {
+                Choice::AllRepos => {
+                    return Next::Screen(wizard.repo_list_screen(
+                        picks.clone(),
+                        String::new(),
+                        true,
+                    ))
+                }
                 Choice::CloneUrl => return Next::Screen(wizard.url_screen(picks.clone())),
                 Choice::Repo(repo) => repo,
                 _ => return Next::Done(picks.clone()),
@@ -266,22 +386,30 @@ impl LaunchWizard {
             })
         };
         let wizard = self.clone();
-        Screen::new("Repository", options, select)
-            .load(s.repos.clone())
-            .load_required(false)
-            .wait_initial(s.cached.is_none())
-            .loading("Loading repositories...")
-            .notice(notice)
-            .on_settled(move || wizard.sync_result().map(Next::Screen))
+        let search_wizard = self.clone();
+        Screen::new(
+            if all {
+                "All repositories"
+            } else {
+                "Repository"
+            },
+            options,
+            select,
+        )
+        .search(move || search_wizard.repo_options(all, true))
+        .load(s.repos.clone())
+        .load_required(false)
+        .wait_initial(s.cached.is_none())
+        .loading("Loading repositories...")
+        .notice(notice)
+        .on_settled(move || wizard.sync_result().map(Next::Screen))
     }
 
     fn url_screen(&self, picks: Picks) -> WizardScreen {
         let owner = self.state.owner.clone();
         let validate = move |value: &str| -> std::result::Result<(), String> {
             if value.is_empty() {
-                return Err(
-                    "Enter a repository, or `/\u{2190} back to choose No repository".into(),
-                );
+                return Err("Type a repository, or \u{2190} back to choose No repository".into());
             }
             resolve_repo(value, &owner)
                 .map(|_| ())
@@ -301,6 +429,8 @@ impl LaunchWizard {
         };
         Screen::new("Clone from URL", Vec::new, select)
             .text_input(Some(Box::new(validate)))
+            .input_label("Repository")
+            .input_hint("HTTPS/git@ URL or owner/name")
             .quick_select(false)
     }
 
@@ -324,55 +454,223 @@ impl LaunchWizard {
         )
     }
 
+    fn tpu_types(&self) -> Vec<String> {
+        if self.state.tpu_setup_error.is_some() {
+            return Vec::new();
+        }
+        let mut types = self
+            .state
+            .tpu_catalog
+            .as_ref()
+            .and_then(Job::result)
+            .unwrap_or_else(|| self.state.tpu_types.clone());
+        types = types
+            .into_iter()
+            .map(|s| {
+                s.strip_prefix("v5litepod-")
+                    .map(|n| format!("v5e-{n}"))
+                    .unwrap_or(s)
+            })
+            .collect();
+        types.sort();
+        types.dedup();
+        types
+    }
+    pub(crate) fn tpu_data(&self) -> crate::gcp_wizard::Types {
+        crate::gcp_wizard::Types {
+            initial: self.tpu_types(),
+            catalog: self.state.tpu_catalog.clone().unwrap_or_else(|| {
+                let types = self.tpu_types();
+                Job::new(move || Ok(types.clone()))
+            }),
+            rates: self.state.tpu_prices.clone(),
+            cached: self.state.tpu_cached_prices.clone(),
+        }
+    }
+    fn tpu_prices(&self) -> Option<Arc<crate::gcp_prices::Prices>> {
+        if self.state.tpu_setup_error.is_some() {
+            None
+        } else {
+            self.state
+                .tpu_prices
+                .result()
+                .or_else(|| self.state.tpu_cached_prices.clone())
+        }
+    }
+    fn price_placeholder(state: JobState) -> &'static str {
+        if matches!(state, JobState::Idle | JobState::Running) {
+            "…"
+        } else {
+            "-"
+        }
+    }
+    fn tpu_rows(&self, shortcuts: Vec<String>) -> Vec<(Choice, HardwareColumns)> {
+        let shortcuts = if self.state.tpu_setup_error.is_some() {
+            Vec::new()
+        } else {
+            shortcuts
+        };
+        let values = std::iter::once(None)
+            .chain(shortcuts.into_iter().map(Some))
+            .collect::<Vec<_>>();
+        let prices = self.tpu_prices();
+        let types = self.tpu_types();
+        values
+            .into_iter()
+            .map(|value| {
+                let name = value
+                    .as_ref()
+                    .map(|t| format!("TPU {t}"))
+                    .unwrap_or_else(|| TPU_CATEGORY.into());
+                let [demand, spot] = if let Some(p) = &prices {
+                    let (members, minimum) = match &value {
+                        Some(t) if t.contains('-') => (vec![t.clone()], false),
+                        Some(g) => (crate::gcp_types::members(&types, g), true),
+                        None => (types.clone(), true),
+                    };
+                    p.rate_columns(
+                        &members.iter().map(String::as_str).collect::<Vec<_>>(),
+                        minimum,
+                    )
+                } else if self.state.tpu_setup_error.is_some() {
+                    ["needs gpu setup".into(), "Spot -".into()]
+                } else {
+                    let pending = matches!(
+                        self.state.tpu_prices.state(),
+                        JobState::Idle | JobState::Running
+                    );
+                    let value = if pending { "…" } else { "-" };
+                    [value.into(), format!("Spot {value}")]
+                };
+                (
+                    Choice::Tpu(value.map(TpuChoice::Type).unwrap_or(TpuChoice::ChooseType)),
+                    [name, demand, spot, "-".into()],
+                )
+            })
+            .collect()
+    }
     fn gpu_screen(&self, picks: Picks) -> WizardScreen {
         let prices = self.price_job(picks.mode.as_deref().unwrap_or(""));
-        let (wizard, stats_job) = (self.clone(), prices.clone());
-        let options = move || {
-            let stats = stats_job.result().unwrap_or_default();
-            let s = &wizard.state;
-            let mut options: Vec<Opt<Choice>> = s
-                .recent_gpus
-                .iter()
-                .map(|gpu| {
-                    Opt::new(
-                        Choice::Gpu(gpu.clone()),
-                        format!("Recent: {}", model_label(gpu, &stats)),
-                    )
-                })
-                .collect();
-            options.extend(s.categories.iter().map(|(name, members)| {
-                Opt::new(
-                    Choice::Category(name.clone()),
-                    category_label(name, members, &stats),
-                )
-            }));
-            options
+        let this = self.clone();
+        let opts = self.clone();
+        let search = self.clone();
+        let cloud = self.clone();
+        let vast_context = prices.clone();
+        let options = {
+            let prices = prices.clone();
+            move || {
+                let stats = prices.result().unwrap_or_default();
+                let status = prices.state();
+                let pending = Self::price_placeholder(status);
+                let mut rows = Vec::new();
+                for model in &opts.state.recent_gpus {
+                    let mut cells = model_columns(model, &stats, pending);
+                    cells[0] = format!("Recent: {model}");
+                    rows.push((Choice::Gpu(model.clone()), cells));
+                }
+                for (category, models) in &opts.state.categories {
+                    rows.push((
+                        Choice::Category(category.clone()),
+                        category_columns(category, models, &stats, pending),
+                    ));
+                }
+                rows.extend(opts.tpu_rows(Vec::new()));
+                hardware_options(rows, None)
+            }
         };
-        let (wizard, stats_job) = (self.clone(), prices.clone());
-        let search = move || {
-            let stats = stats_job.result().unwrap_or_default();
-            wizard
-                .state
-                .models
-                .iter()
-                .map(|gpu| Opt::new(Choice::Gpu(gpu.clone()), model_label(gpu, &stats)))
-                .collect()
+        let searching = {
+            let prices = prices.clone();
+            move |query: &str| {
+                let stats = prices.result().unwrap_or_default();
+                let status = prices.state();
+                let mut rows = search
+                    .state
+                    .models
+                    .iter()
+                    .map(|model| {
+                        (
+                            Choice::Gpu(model.clone()),
+                            model_columns(model, &stats, Self::price_placeholder(status)),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+
+                let types = search.tpu_types();
+                let values = if query.contains('-') {
+                    types
+                } else {
+                    crate::gcp_types::generations(&types)
+                };
+                rows.extend(search.tpu_rows(values));
+                hardware_options(rows, Some(query))
+            }
         };
-        let wizard = self.clone();
-        let select = move |choice: Choice| match choice {
-            Choice::Category(name) => Next::Screen(wizard.category_screen(picks.clone(), name)),
-            Choice::Gpu(gpu) => wizard.next(Picks {
+        let follow = picks.clone();
+        let mut screen = Screen::new("GPU", options, move |choice| match choice {
+            Choice::Gpu(gpu) => this.next(Picks {
                 gpu: Some(gpu),
-                ..picks.clone()
+                ..follow.clone()
             }),
-            _ => Next::Done(picks.clone()),
-        };
-        Screen::new("GPU", options, select)
-            .search(search)
-            .prices(prices)
-            // Digits belong to names such as "RTX 4090".
-            .quick_select(false)
-            .empty("No known GPU models")
+            Choice::Tpu(tpu) => match &this.state.tpu_setup_error {
+                Some(message) => Next::Notice(format!("{message}\nNo TPU created.")),
+                None => {
+                    let picks = Picks {
+                        tpu: Some(tpu),
+                        ..follow.clone()
+                    };
+                    if let Some(flow) = &this.state.tpu_transition {
+                        flow(this.clone(), picks)
+                    } else {
+                        this.next(picks)
+                    }
+                }
+            },
+            Choice::Category(category) => {
+                Next::Screen(this.category_screen(follow.clone(), category))
+            }
+            _ => unreachable!(),
+        })
+        .search_filtered(searching)
+        .quick_select(false)
+        .prices(prices)
+        .prices(self.state.tpu_prices.clone())
+        .selection_note(move |choice| {
+            if matches!(choice, Choice::Tpu(_)) {
+                if let Some(prices) = cloud.tpu_prices() {
+                    let cache = prices.cache_note();
+                    format!(
+                        "TPU prices: {}  USD list{}",
+                        prices.region,
+                        if cache.is_empty() {
+                            String::new()
+                        } else {
+                            format!("  {cache}")
+                        }
+                    )
+                } else if cloud.state.tpu_setup_error.is_some() {
+                    String::new()
+                } else {
+                    crate::redact::redact_text(&cloud.state.tpu_prices.error())
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .to_string()
+                }
+            } else {
+                crate::redact::redact_text(&vast_context.error())
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .to_string()
+            }
+        });
+        if self.state.tpu_setup_error.is_none() {
+            screen = screen.prices(self.state.tpu_prices.clone());
+        }
+        if let Some(job) = &self.state.tpu_catalog {
+            screen = screen.background(job.clone());
+        }
+        screen
     }
 
     fn category_screen(&self, picks: Picks, category: String) -> WizardScreen {
@@ -387,10 +685,16 @@ impl LaunchWizard {
                 .find(|(n, _)| *n == name)
                 .map(|(_, m)| m.clone())
                 .unwrap_or_default();
-            members
+            let rows = members
                 .iter()
-                .map(|gpu| Opt::new(Choice::Gpu(gpu.clone()), model_label(gpu, &stats)))
-                .collect()
+                .map(|gpu| {
+                    (
+                        Choice::Gpu(gpu.clone()),
+                        model_columns(gpu, &stats, Self::price_placeholder(stats_job.state())),
+                    )
+                })
+                .collect();
+            hardware_options(rows, None)
         };
         let wizard = self.clone();
         let select = move |choice: Choice| match choice {
@@ -445,7 +749,7 @@ impl LaunchWizard {
             .empty(NO_OFFERS)
     }
 
-    /// One shared price search per mode, so F2 on any GPU screen prices them all.
+    /// One shared price search per mode, including the launch-time prefetch.
     fn price_job(&self, mode: &str) -> Job<Stats> {
         let mut prices = self.state.prices.borrow_mut();
         prices

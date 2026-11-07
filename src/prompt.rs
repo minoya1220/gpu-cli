@@ -4,6 +4,7 @@ use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use crate::history::{by_frequent_recency, recent_picks};
 use crate::offers::{category_label, group_by_category, model_label, Stats};
+use crate::picker::AnyJob;
 use crate::pyfmt::{casefold, is_digits, repr_str};
 
 const PAGE_SIZE: usize = 12;
@@ -256,8 +257,71 @@ pub fn choose_gpu(ctx: &Ctx, models: &[String], stats: &Stats) -> Result<String>
     }
 }
 
+/// Plain line input off-TTY, raw picker input on-TTY. Decoding arrows here
+/// prevents canonical-mode echo in standalone setup/destruction prompts too.
+pub(crate) fn read_text(ctx: &Ctx, prompt: &str) -> Result<String> {
+    if !ctx.interactive() {
+        return ctx.input_or(prompt, Error::Cancelled(1));
+    }
+    crate::picker::pick(
+        ctx,
+        crate::picker::Screen::new(prompt.trim_end(), Vec::new, crate::picker::Next::Done)
+            .text_input(None)
+            .input_label("Reply")
+            .submit_on_right(false)
+            .back_clears_input(false),
+    )
+}
+
+#[derive(Clone)]
+pub(crate) struct Confirmation<T> {
+    pub title: String,
+    pub value: T,
+}
+
+/// A launch approval is a normal page on its parent's stack. No slow work
+/// runs here: the Job supplies an immutable plan and the exact quote shown.
+pub(crate) fn confirmation_screen<V: crate::picker::PickValue, T: Clone + Send + Sync + 'static>(
+    job: crate::picker::Job<Confirmation<T>>,
+) -> crate::picker::Screen<V, T> {
+    let title = job.clone();
+    let selected = job.clone();
+    crate::picker::Screen::new("Confirm launch", Vec::new, move |_| {
+        match selected.result() {
+            Some(confirmation) => crate::picker::Next::Done(confirmation.value),
+            None => crate::picker::Next::Notice("Wait for launch checks".into()),
+        }
+    })
+    .title_with(move || {
+        title
+            .result()
+            .map(|c| crate::redact::redact_text(&c.title))
+            .unwrap_or_else(|| {
+                if title.state() == crate::picker::JobState::Failed {
+                    "Launch unavailable"
+                } else {
+                    "Checking launch..."
+                }
+                .into()
+            })
+    })
+    .load(job)
+    .loading("Checking launch...")
+    .text_input(Some(Box::new(|text| {
+        if text.trim().eq_ignore_ascii_case("yes") {
+            Ok(())
+        } else {
+            Err("Type yes to confirm".into())
+        }
+    })))
+    .input_label("Type yes")
+    .submit_on_right(false)
+    .back_clears_input(false)
+    .settle_active_only()
+}
+
 /// `input(prompt).strip().lower() == "yes"`; end of input cancels with status 1.
 pub fn confirm(ctx: &Ctx, prompt: &str) -> Result<bool> {
-    let answer = ctx.input_or(prompt, Error::Cancelled(1))?;
+    let answer = read_text(ctx, prompt)?;
     Ok(answer.trim().to_lowercase() == "yes")
 }

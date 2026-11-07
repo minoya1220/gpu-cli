@@ -1,0 +1,13 @@
+{
+  "zones": [
+    {"name":"us-east5-b","types":["v5litepod-1","v5litepod-4","v5litepod-8","v6e-1","v6e-4","v6e-8","v5p-8","v5p-16","v4-8","v3-8","v2-8"]},
+    {"name":"us-central1-a","types":["v5litepod-1","v6e-1"]}
+  ],
+  "skus": [
+    {"id":"test-demand","generation":"v6e","description":"TpuV6e attached to VMs running in Columbus","category":{"resourceGroup":"TPU","usageType":"OnDemand","serviceDisplayName":"Compute Engine"},"regions":["us-east5","us-central1"]},
+    {"id":"test-spot","generation":"v6e","description":"TpuV6e attached to Spot Preemptible VMs running in Columbus","category":{"resourceGroup":"TPU","usageType":"Preemptible","serviceDisplayName":"Compute Engine"},"regions":["us-east5"]},
+    {"id":"test-central-spot","generation":"v6e","description":"TPU v6e chip Spot","category":{"resourceGroup":"TPU","usageType":"Preemptible","serviceDisplayName":"Compute Engine"},"regions":["us-central1"]},
+    {"id":"test-v5e-demand","generation":"v5e","description":"TPU v5 Lite Pod chip","category":{"resourceGroup":"TPU","usageType":"OnDemand","serviceDisplayName":"Compute Engine"},"regions":["us-east5","us-central1"]},
+    {"id":"test-v5e-spot","generation":"v5e","description":"TPU v5 Lite Pod chip Spot","category":{"resourceGroup":"TPU","usageType":"Preemptible","serviceDisplayName":"Compute Engine"},"regions":["us-east5","us-central1"]}
+  ]
+}

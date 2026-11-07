@@ -234,31 +234,119 @@ pub fn offer_label(offer: &Dict) -> Result<String> {
 
 /// Aligned one-line offer rows for a single GPU model (the picker title names it).
 pub fn offer_rows(offers: &[Dict]) -> Result<Vec<String>> {
-    let mut prices = Vec::new();
-    let mut checks = Vec::new();
-    let mut ids = Vec::new();
-    for offer in offers {
-        prices.push(format!("${}/hr", fixed(offer_price(offer)?, 3)));
-        checks.push(text_or(offer, "verification", "unknown"));
-        ids.push(format!("id={}", py_str(field(offer, "id")?)));
-    }
-    let width = |items: &[String]| items.iter().map(|s| s.chars().count()).max().unwrap_or(0);
-    let (price_width, check_width, id_width) = (width(&prices), width(&checks), width(&ids));
-    let mut rows = Vec::new();
-    for (i, offer) in offers.iter().enumerate() {
-        rows.push(format!(
-            "{:>pw$}  {:>6} reliable  {:<cw$}  {:<iw$}  {}",
-            prices[i],
-            percent(reliability(offer)?, 1),
-            checks[i],
-            ids[i],
-            text_or(offer, "geolocation", "?"),
-            pw = price_width,
-            cw = check_width,
-            iw = id_width,
-        ));
-    }
-    Ok(rows)
+    let rows = offers
+        .iter()
+        .map(|offer| {
+            Ok([
+                format!("${}/hr", fixed(offer_price(offer)?, 3)),
+                format!("{:>6} reliable", percent(reliability(offer)?, 1)),
+                text_or(offer, "verification", "unknown"),
+                format!("id={}", py_str(field(offer, "id")?)),
+                text_or(offer, "geolocation", "?"),
+            ])
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(aligned_rows(
+        &rows,
+        [
+            Column::Right,
+            Column::Plain,
+            Column::Left,
+            Column::Left,
+            Column::Plain,
+        ],
+    ))
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum Column {
+    Left,
+    Right,
+    Plain,
+}
+
+/// The Vast picker's measured widths and double-space gutters, shared by TPU
+/// rows. Plain cells retain their own formatting (e.g. reliability and location).
+pub(crate) fn aligned_rows<const N: usize>(
+    rows: &[[String; N]],
+    columns: [Column; N],
+) -> Vec<String> {
+    let widths: [usize; N] =
+        std::array::from_fn(|i| rows.iter().map(|r| r[i].chars().count()).max().unwrap_or(0));
+    rows.iter()
+        .map(|row| {
+            row.iter()
+                .enumerate()
+                .map(|(i, cell)| match columns[i] {
+                    Column::Left => format!("{cell:<w$}", w = widths[i]),
+                    Column::Right => format!("{cell:>w$}", w = widths[i]),
+                    Column::Plain => cell.clone(),
+                })
+                .collect::<Vec<_>>()
+                .join("  ")
+        })
+        .collect()
+}
+
+/// Hardware discovery uses one four-column grid across providers. Vast Spot
+/// remains unquoted until the separate interruptible UI work is approved.
+pub(crate) type HardwareColumns = [String; 4];
+
+pub(crate) fn hardware_labels(rows: &[HardwareColumns]) -> Vec<String> {
+    aligned_rows(
+        rows,
+        [Column::Left, Column::Right, Column::Left, Column::Plain],
+    )
+    .into_iter()
+    .map(|label| label.trim_end().to_string())
+    .collect()
+}
+
+pub(crate) fn model_columns(model: &str, stats: &Stats, pending: &str) -> HardwareColumns {
+    let price = stats
+        .get(model)
+        .map(|(price, _)| *price)
+        .filter(|price| price.is_finite() && *price >= 0.0);
+    [
+        model.into(),
+        price
+            .map(|price| format!("${}/hr", fixed(price, 3)))
+            .unwrap_or_else(|| pending.into()),
+        "Spot -".into(),
+        stats
+            .get(model)
+            .map(|(_, count)| plural(*count, "offer"))
+            .unwrap_or_else(|| "-".into()),
+    ]
+}
+
+pub(crate) fn category_columns(
+    category: &str,
+    models: &[String],
+    stats: &Stats,
+    pending: &str,
+) -> HardwareColumns {
+    let values = models
+        .iter()
+        .filter_map(|model| stats.get(model))
+        .collect::<Vec<_>>();
+    let cheapest = values
+        .iter()
+        .map(|(price, _)| *price)
+        .filter(|price| price.is_finite() && *price >= 0.0)
+        .min_by(f64::total_cmp);
+    [
+        category.into(),
+        cheapest
+            .map(|price| format!("from ${}/hr", fixed(price, 3)))
+            .unwrap_or_else(|| pending.into()),
+        "Spot -".into(),
+        if values.is_empty() {
+            "-".into()
+        } else {
+            plural(values.iter().map(|(_, count)| count).sum(), "offer")
+        },
+    ]
 }
 
 pub fn model_label(model: &str, stats: &Stats) -> String {

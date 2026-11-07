@@ -54,6 +54,32 @@ pub fn menu<R: 'static>(
     )
 }
 
+#[test]
+fn selection_notice_stays_visible_until_back_without_changing_hidden_choices() {
+    let first = menu("Hardware", &["TPU", "GPU"], |value| {
+        if value == "TPU" {
+            Next::Notice("Set up Google Cloud. Press back to return.".into())
+        } else {
+            Next::Done(value)
+        }
+    });
+    let result = drive(first, |keys| {
+        keys.press_until(RIGHT, |s| s.body.join(" ").contains("Set up Google Cloud"));
+        let body = keys.snapshot().body;
+        assert!(keys.snapshot().footer.contains("return to choices"));
+        assert!(!keys.snapshot().footer.contains("select"));
+        for key in [RIGHT, DOWN, "x", F2] {
+            keys.press(key);
+            assert_eq!(keys.snapshot().body, body);
+        }
+        keys.press_until(BACK, |s| !s.body.join(" ").contains("Set up Google Cloud"));
+        assert!(keys.snapshot().body[0].contains("TPU"));
+        keys.press(DOWN);
+        keys.press(RIGHT);
+    });
+    assert_eq!(result, Outcome::Done("GPU".into()));
+}
+
 type Three = (String, String, String);
 
 /// Three screens; the result records the value chosen on each.
@@ -116,13 +142,13 @@ fn quit_pending(s: &crate::picker::Snapshot) -> bool {
 }
 
 #[test]
-fn test_typing_filters_and_enter_selects_the_highlighted_match() {
+fn test_typing_filters_and_right_selects_the_highlighted_match() {
     let result = drive(
         menu("Choose", &["alpha", "beta", "alphabet"], Next::Done),
         |keys| {
             keys.type_text("alp");
             keys.press(DOWN);
-            keys.press(ENTER);
+            keys.press(RIGHT);
         },
     );
     assert_eq!(result, Outcome::Done("alphabet".to_string()));
@@ -140,7 +166,7 @@ fn test_digits_quick_select_only_short_unfiltered_lists() {
     let refs: Vec<&str> = names.iter().map(String::as_str).collect();
     let filter_4090 = |keys: &Keyboard| {
         keys.type_text("4090");
-        keys.press(ENTER);
+        keys.press(RIGHT);
     };
     assert_eq!(
         drive(menu("Long", &refs, Next::Done), filter_4090),
@@ -166,18 +192,19 @@ fn test_search_list_replaces_options_while_filtering() {
         .quick_select(false);
     let result = drive(screen, |keys| {
         keys.type_text("t4");
-        keys.press(ENTER);
+        keys.press(RIGHT);
     });
     assert_eq!(result, Outcome::Done("Tesla T4".to_string()));
 }
 
 #[test]
 fn test_back_clears_filter_then_goes_back_one_screen_then_quits_on_first_twice() {
-    for back in [BACK, LEFT] {
+    {
+        let back = LEFT;
         let result = drive(chain(), move |keys| {
             keys.press(DOWN);
-            keys.press_until(ENTER, on("Second"));
-            keys.press_until(ENTER, on("Third"));
+            keys.press_until(RIGHT, on("Second"));
+            keys.press_until(RIGHT, on("Third"));
             keys.type_text("x");
             keys.press_until(back, |s| s.filter.is_empty());
             assert_eq!(keys.title(), "Third");
@@ -194,26 +221,148 @@ fn test_back_clears_filter_then_goes_back_one_screen_then_quits_on_first_twice()
 fn test_going_back_restores_the_previous_screen_as_it_was_left() {
     let result = drive(chain(), |keys| {
         keys.press(DOWN);
-        keys.press_until(ENTER, on("Second"));
+        keys.press_until(RIGHT, on("Second"));
         keys.press_until(BACK, on("First"));
-        keys.press_until(ENTER, on("Second"));
-        keys.press_until(ENTER, on("Third"));
-        keys.press(ENTER);
+        keys.press_until(RIGHT, on("Second"));
+        keys.press_until(RIGHT, on("Third"));
+        keys.press(RIGHT);
     });
     assert_eq!(result, three("b", "c", "e"));
 }
 
 #[test]
-fn test_right_selects_like_enter() {
-    for enter in [ENTER, RIGHT] {
-        let result = drive(chain(), move |keys| {
-            keys.press(DOWN);
-            keys.press_until(enter, on("Second"));
-            keys.type_text("d");
-            keys.press_until(enter, on("Third"));
-            keys.press(enter);
+fn test_list_enter_selects_backtick_is_ignored_and_footer_orders_back_before_digits() {
+    let result = drive(chain(), |keys| {
+        assert!(!keys.footer().contains("Enter") && !keys.footer().contains('`'));
+        keys.press("`");
+        keys.press(DOWN);
+        keys.wait(|s| {
+            s.title == "First" && s.body.iter().any(|l| l.starts_with('›') && l.contains("b"))
         });
-        assert_eq!(result, three("b", "d", "e"), "{enter:?}");
+        assert_eq!(keys.filter(), "");
+        keys.press_until(ENTER, on("Second"));
+        assert_eq!(keys.footer(), "↑/↓ move  → select  ← back  1-9 select");
+        keys.type_text("d");
+        keys.press("`");
+        keys.press(UP);
+        keys.wait(|s| s.title == "Second" && s.filter == "d");
+        keys.press_until(ENTER, on("Third"));
+        keys.press(ENTER);
+    });
+    assert_eq!(result, three("b", "d", "e"));
+}
+
+#[test]
+fn paid_confirmation_waits_for_checks_and_left_restores_parent_with_filter() {
+    let gate = Gate::default();
+    let blocked = gate.clone();
+    let quote = Job::new(move || {
+        assert!(blocked.wait());
+        Ok(crate::prompt::Confirmation {
+            title: "Launch GPU container for repo at $0.10/hr?".into(),
+            value: "approved".to_string(),
+        })
+    });
+    let parent = menu("Offers", &["CPU", "GPU"], Next::Done);
+    let Next::Screen(first) = crate::picker::then(Next::Screen(parent), move |_| {
+        Next::Screen(crate::prompt::confirmation_screen::<String, _>(
+            quote.clone(),
+        ))
+    }) else {
+        panic!("missing flow")
+    };
+    let result = drive(first, move |keys| {
+        keys.type_text("gpu");
+        keys.press_until(RIGHT, on("Checking launch..."));
+        keys.type_text("yes");
+        keys.press(ENTER);
+        assert!(!keys.snapshot().done, "a pending quote cannot be approved");
+        keys.press_until(LEFT, on("Offers"));
+        assert_eq!(keys.filter(), "gpu", "back preserves the previous page");
+        gate.set();
+        keys.press_until(RIGHT, on("Launch GPU container for repo at $0.10/hr?"));
+        assert_eq!(
+            keys.filter(),
+            "",
+            "approval text must not leak across visits"
+        );
+        assert_eq!(keys.footer(), "← back");
+        assert!(
+            keys.snapshot().body.is_empty(),
+            "no instructional or blank note line"
+        );
+        keys.type_text("no");
+        keys.press(ENTER);
+        assert!(!keys.snapshot().done);
+        keys.press(BACKSPACE);
+        keys.press(BACKSPACE);
+        keys.type_text("yes");
+        keys.press(RIGHT);
+        assert!(
+            !keys.snapshot().done,
+            "Right cannot authorize a paid launch"
+        );
+        keys.press(ENTER);
+    });
+    assert_eq!(result, Outcome::Done("approved".into()));
+}
+
+#[test]
+fn leaving_a_pending_retry_approval_prevents_its_late_auto_completion() {
+    let gate = Gate::default();
+    let blocked = gate.clone();
+    let job = Job::new(move || {
+        assert!(blocked.wait());
+        Ok(crate::prompt::Confirmation {
+            title: "Retry?".into(),
+            value: "approved".to_string(),
+        })
+    });
+    let observed = job.observer();
+    let parent = menu("Zones", &["zone-a", "zone-b"], move |_| {
+        let watched = job.clone();
+        Next::Screen(
+            crate::prompt::confirmation_screen::<String, _>(job.clone()).on_settled(move || {
+                watched
+                    .result()
+                    .map(|confirmation| Next::Done(confirmation.value))
+            }),
+        )
+    });
+    let result = drive(parent, move |keys| {
+        keys.press_until(RIGHT, on("Checking launch..."));
+        keys.press_until(LEFT, on("Zones"));
+        gate.set();
+        keys.wait_for("cancelled page's read-only preflight", || {
+            observed.state() == JobState::Done
+        });
+        assert_eq!(keys.title(), "Zones");
+        assert!(
+            !keys.snapshot().done,
+            "a popped approval page cannot authorize a retry"
+        );
+        keys.press(CTRL_C);
+    });
+    assert_eq!(result, Outcome::Cancelled(130));
+}
+
+#[test]
+fn test_enter_still_submits_text_entry_screens() {
+    for submit in [ENTER, RIGHT] {
+        let first = menu("First", &["text"], |_| {
+            Next::Screen(Screen::new("Duration", Vec::new, Next::Done).text_input(None))
+        });
+        let result = drive(first, move |keys| {
+            keys.press_until(RIGHT, on("Duration"));
+            assert_eq!(keys.footer(), "← back");
+            assert!(keys.snapshot().body.is_empty());
+            keys.type_text("2h");
+            keys.press(BACKSPACE);
+            keys.type_text("h");
+            assert_eq!(keys.footer(), "← back");
+            keys.press(submit);
+        });
+        assert_eq!(result, Outcome::Done("2h".into()));
     }
 }
 
@@ -221,18 +370,16 @@ fn test_right_selects_like_enter() {
 fn test_one_back_then_another_key_on_the_first_screen_does_not_quit() {
     for other in [DOWN, "e", ESC, "\x1b[H", "\t", "\x0c", "\x01"] {
         let result = drive(chain(), move |keys| {
-            assert!(keys.footer().contains("`/\u{2190} quit"));
-            keys.press_until(BACK, |s| {
-                s.footer.contains("Press `/\u{2190} again to quit")
-            });
+            assert!(keys.footer().contains("\u{2190} quit"));
+            keys.press_until(BACK, |s| s.footer.contains("Press \u{2190} again to quit"));
             keys.press_until(other, not_quit_pending);
             keys.press(BACKSPACE); // drops the typed letter, if any
             keys.press_until(BACK, quit_pending);
             keys.press_until(DOWN, not_quit_pending);
             keys.press_until(BACK, quit_pending);
             keys.press_until(RIGHT, on("Second"));
-            keys.press_until(ENTER, on("Third"));
-            keys.press(ENTER);
+            keys.press_until(RIGHT, on("Third"));
+            keys.press(RIGHT);
         });
         let Outcome::Done((_, second, third)) = result else {
             panic!("{other:?}: {result:?}")
@@ -242,7 +389,7 @@ fn test_one_back_then_another_key_on_the_first_screen_does_not_quit() {
 }
 
 #[test]
-fn test_backtick_then_left_quits_the_first_screen() {
+fn test_two_left_presses_quits_the_first_screen() {
     let result = drive(chain(), |keys| {
         keys.press_until(BACK, quit_pending);
         keys.press(LEFT);
@@ -281,7 +428,7 @@ fn test_special_keys_never_leak_into_the_filter_or_url_entry() {
 fn test_key_hints_leave_out_ctrl_c() {
     let result = drive(chain(), |keys| {
         assert!(!keys.footer().contains("Ctrl-C"));
-        keys.press_until(ENTER, on("Second"));
+        keys.press_until(RIGHT, on("Second"));
         assert!(!keys.footer().contains("Ctrl-C"));
         keys.press(CTRL_C);
     });
@@ -296,7 +443,7 @@ fn test_ctrl_c_and_ctrl_d_quit_at_once_even_with_a_quit_pending() {
                 if first_screen {
                     keys.press_until(BACK, quit_pending);
                 } else {
-                    keys.press_until(ENTER, on("Second"));
+                    keys.press_until(RIGHT, on("Second"));
                 }
                 keys.press(key);
             });
@@ -309,8 +456,8 @@ fn test_ctrl_c_and_ctrl_d_quit_at_once_even_with_a_quit_pending() {
 fn test_ctrl_c_and_ctrl_d_quit_from_a_deep_screen() {
     for (key, status) in [(CTRL_C, 130), (CTRL_D, 1)] {
         let result = drive(chain(), move |keys| {
-            keys.press_until(ENTER, on("Second"));
-            keys.press_until(ENTER, on("Third"));
+            keys.press_until(RIGHT, on("Second"));
+            keys.press_until(RIGHT, on("Third"));
             keys.press(key);
         });
         assert_eq!(result, Outcome::Cancelled(status));
@@ -320,15 +467,15 @@ fn test_ctrl_c_and_ctrl_d_quit_from_a_deep_screen() {
 #[test]
 fn test_escape_is_ignored_and_never_leaks_into_navigation() {
     let result = drive(chain(), |keys| {
-        keys.press_until(ENTER, on("Second"));
+        keys.press_until(RIGHT, on("Second"));
         keys.press(&format!("{ESC}{ESC}"));
         keys.press(ESC);
         assert_eq!(keys.title(), "Second");
         keys.press_until(BACK, on("First"));
         keys.press(DOWN);
-        keys.press_until(ENTER, on("Second"));
-        keys.press_until(ENTER, on("Third"));
-        keys.press(ENTER);
+        keys.press_until(RIGHT, on("Second"));
+        keys.press_until(RIGHT, on("Third"));
+        keys.press(RIGHT);
     });
     assert_eq!(result, three("b", "c", "e"));
 }
@@ -339,7 +486,7 @@ fn test_arrow_key_split_across_reads_still_moves() {
         keys.press("\x1b");
         keys.press("[");
         keys.press("B");
-        keys.press(ENTER);
+        keys.press(RIGHT);
     });
     assert_eq!(result, Outcome::Done("two".to_string()));
 }
@@ -370,24 +517,24 @@ fn test_loading_screen_stays_responsive_while_its_loader_blocks() {
     });
     let release = gate.clone();
     let result = drive(first, move |keys| {
-        let latency = keys.press_until(ENTER, on("Slow"));
+        let latency = keys.press_until(RIGHT, on("Slow"));
         assert!(latency < Duration::from_millis(500));
         keys.wait_for("the loader to run", || {
             observer.state() == JobState::Running
         });
-        keys.press(ENTER); // nothing to select yet
+        keys.press(RIGHT); // nothing to select yet
         assert_eq!(keys.title(), "Slow");
         keys.type_text("la");
         keys.press_until(BACK, |s| s.filter.is_empty());
         let latency = keys.press_until(BACK, on("First"));
         assert!(latency < Duration::from_millis(500) && observer.state() == JobState::Running);
-        keys.press_until(ENTER, on("Slow"));
+        keys.press_until(RIGHT, on("Slow"));
         release.set();
         keys.wait_for("the loader to finish", || {
             observer.state() == JobState::Done
         });
         keys.wait(|s| s.labels == ["late"]);
-        keys.press(ENTER);
+        keys.press(RIGHT);
     });
     gate.set();
     assert_eq!(result, Outcome::Done("late".to_string()));
@@ -409,7 +556,7 @@ fn test_failed_load_error_splits_like_python_splitlines() {
 }
 
 #[test]
-fn test_failed_load_shows_error_and_enter_retries() {
+fn test_failed_load_shows_error_and_right_retries() {
     let attempts = Arc::new(AtomicUsize::new(0));
     let counter = attempts.clone();
     let job = Job::new(move || {
@@ -437,22 +584,20 @@ fn test_failed_load_shows_error_and_enter_retries() {
     let result = drive(screen, move |keys| {
         keys.wait_for("the load to fail", || observer.state() == JobState::Failed);
         assert_eq!(observer.error(), "gh: not logged in");
-        keys.wait(|s| {
-            s.body == ["  gh: not logged in"] && s.footer.starts_with("Enter/\u{2192} retry")
-        });
+        keys.wait(|s| s.body == ["  gh: not logged in"] && s.footer.starts_with("\u{2192} retry"));
         let retried = observer.clone();
-        keys.send_until(ENTER, "the retry to finish", move || {
+        keys.send_until(RIGHT, "the retry to finish", move || {
             retried.state() == JobState::Done
         });
         keys.wait(|s| s.labels == ["repo"]);
-        keys.press(ENTER);
+        keys.press(RIGHT);
     });
     assert_eq!(result, Outcome::Done("repo".to_string()));
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
 }
 
 #[test]
-fn test_f2_loads_prices_in_the_background_once() {
+fn test_prices_start_in_the_background_once_without_f2() {
     let (gate, calls) = (Gate::default(), Arc::new(AtomicUsize::new(0)));
     let prices = gated(vec![("one".to_string(), "$1".to_string())], &gate, &calls);
     let observer = prices.observer();
@@ -487,7 +632,7 @@ fn test_f2_loads_prices_in_the_background_once() {
         keys.wait_for("prices to finish", || observer.state() == JobState::Done);
         keys.wait(|s| s.labels == ["one $1", "two"]);
         keys.press(F2);
-        keys.press(ENTER);
+        keys.press(RIGHT);
     });
     gate.set();
     assert_eq!(result, Outcome::Done("one".to_string()));
@@ -510,4 +655,48 @@ fn test_quitting_does_not_wait_for_a_running_loader() {
     gate.set();
     assert!(matches!(result, Outcome::Cancelled(_)));
     assert!(start.elapsed() < Duration::from_secs(2));
+}
+
+#[test]
+fn progress_jobs_redraw_partial_results_without_keys_or_completion() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let start = Gate::default();
+    let finish = Gate::default();
+    let began = start.clone();
+    let held = finish.clone();
+    let flag = std::sync::Arc::new(AtomicBool::new(false));
+    let changed = flag.clone();
+    let labels = flag.clone();
+    let job = crate::picker::Job::progress(move |wake| {
+        assert!(began.wait());
+        changed.store(true, Ordering::SeqCst);
+        wake.wake();
+        assert!(held.wait());
+        Ok(())
+    });
+    let observer = job.observer();
+    let screen = crate::picker::Screen::new(
+        "Progress",
+        move || {
+            vec![crate::picker::Opt::new(
+                "value".to_string(),
+                if labels.load(Ordering::SeqCst) {
+                    "partial"
+                } else {
+                    "loading"
+                },
+            )]
+        },
+        crate::picker::Next::Done,
+    )
+    .background(job);
+    let result = crate::picker::testing::drive(screen, move |keys| {
+        keys.wait(|s| s.labels == ["loading"]);
+        start.set();
+        keys.wait(|s| s.labels == ["partial"]);
+        assert_eq!(observer.state(), crate::picker::JobState::Running);
+        keys.press(crate::picker::testing::CTRL_C);
+    });
+    finish.set();
+    assert_eq!(result, crate::picker::Outcome::Cancelled(130));
 }

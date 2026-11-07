@@ -8,7 +8,7 @@ use crate::editors::{check_editor, editor_label, editor_screen, launch_editor, E
 use crate::error::{Error, Result};
 use crate::expiry::{expiry_summary, manage_expiry};
 use crate::history::{recent_picks, record_picks};
-use crate::instances::{format_uptime, repo_name, select_instance};
+use crate::instances::{repo_name, select_instance};
 use crate::offers::offer_dicts;
 use crate::picker::pick;
 use crate::process::{run, Cmd, RunError};
@@ -21,7 +21,7 @@ use crate::vast::{find_instance, list_instances};
 
 pub fn ls(ctx: &Ctx, json: bool) -> Result<()> {
     let raw = run(ctx, &["vastai", "show", "instances", "--raw"], None)?;
-    let value = pyjson::loads(&raw)?;
+    let value = crate::vast::parse_reply(&raw)?;
     if json {
         ctx.println(&pyjson::dumps(&redact(&value), Some(1)))
     } else {
@@ -33,52 +33,7 @@ pub fn render_instances(ctx: &Ctx, instances: &Value) -> Result<()> {
     if !truthy(instances) {
         return ctx.println("No instances. Launch one: gpu up");
     }
-    let items = offer_dicts(instances.clone())?;
-    let columns = [
-        ("ID", "id"),
-        ("Label", "label"),
-        ("GPU", "gpu_name"),
-        ("Status", "actual_status"),
-        ("$/hr", "dph_total"),
-        ("Uptime", "duration"),
-    ];
-    let rows: Vec<Vec<String>> = items
-        .iter()
-        .map(|item| {
-            columns
-                .iter()
-                .map(|(_, key)| match *key {
-                    "duration" => format_uptime(item.get(key)),
-                    _ => item.get(key).map(py_str).unwrap_or_else(|| "-".into()),
-                })
-                .collect()
-        })
-        .collect();
-    let widths: Vec<usize> = columns
-        .iter()
-        .enumerate()
-        .map(|(i, (title, _))| {
-            rows.iter()
-                .map(|r| r[i].chars().count())
-                .chain([title.chars().count()])
-                .max()
-                .unwrap_or(0)
-        })
-        .collect();
-    let line = |cells: Vec<String>| -> String {
-        cells
-            .iter()
-            .enumerate()
-            .map(|(i, c)| format!("{c:<w$}", w = widths[i]))
-            .collect::<Vec<_>>()
-            .join("  ")
-    };
-    ctx.println(&line(columns.iter().map(|(t, _)| t.to_string()).collect()))?;
-    ctx.println(&line(widths.iter().map(|w| "-".repeat(*w)).collect()))?;
-    for row in rows {
-        ctx.println(&line(row))?;
-    }
-    Ok(())
+    crate::instances::render_table(ctx, &offer_dicts(instances.clone())?, false)
 }
 
 /// The given ID, or one picked from the live instance list (`None` when
@@ -105,7 +60,7 @@ fn poll_instances(ctx: &Ctx, timeout: f64) -> std::result::Result<Vec<Dict>, (bo
         Some(timeout),
     )
     .map_err(|e| (true, e))?;
-    let value = pyjson::loads(&raw).map_err(|e| (false, Error::Msg(e)))?;
+    let value = crate::vast::parse_reply(&raw).map_err(|e| (false, e))?;
     offer_dicts(value).map_err(|e| (false, e))
 }
 
@@ -193,7 +148,7 @@ pub fn wait_for_ssh(ctx: &Ctx, instance_id: &str, timeout: f64) -> Result<(Strin
                             "true",
                         ])
                         .timeout(Some(remaining.min(6.0)));
-                        match ctx.runner.run(&probe) {
+                        match ctx.run(&probe) {
                             Ok(output) if output.code == 0 => {
                                 let repo = repo_name(instance);
                                 let directory = match &repo {
@@ -278,7 +233,7 @@ pub fn ssh(ctx: &Ctx, instance_id: &str, exec: bool) -> Result<()> {
         let words = shlex::split(&url).ok_or_else(|| Error::msg("No closing quotation"))?;
         let mut argv = vec!["ssh".to_string()];
         argv.extend(words);
-        return Err(Error::msg(ctx.runner.exec(&argv)));
+        return Err(Error::msg(ctx.exec(&argv)));
     }
     ctx.println(&redact_text(&url))
 }

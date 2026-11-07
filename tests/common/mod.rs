@@ -1,7 +1,7 @@
 //! Runs the real `gpu` binary under a temp HOME and XDG directories with
 //! stub executables first on PATH. Every stub logs its argv and fails on an
 //! unexpected call, so a missing fake can never fall through to a real
-//! `vastai`, `gh`, `ssh`, `rsync` or editor installed on the machine.
+//! `vastai`, `gcloud`, `gh`, `ssh`, `rsync` or editor installed on the machine.
 
 #![allow(dead_code)]
 
@@ -14,7 +14,8 @@ use std::process::Command;
 pub const FAKE_CLI: &str = r#"#!/bin/sh
 set -f
 tool=$(basename "$0")
-{ printf '%s' "$tool"; for arg in "$@"; do printf '\t%s' "$arg"; done; printf '\n'; } >> "$FAKE_CLI_LOG"
+entry=$tool; for arg in "$@"; do entry="$entry	$arg"; done
+printf '%s\n' "$entry" >> "$FAKE_CLI_LOG"
 sleep "${FAKE_CLI_DELAY:-0.3}"
 case "$tool $1 $2" in
     "gh repo list")
@@ -44,7 +45,8 @@ esac
 /// Logs the call and fails: for tools a test must never reach.
 pub const FORBIDDEN: &str = r#"#!/bin/sh
 tool=$(basename "$0")
-{ printf '%s' "$tool"; for arg in "$@"; do printf '\t%s' "$arg"; done; printf '\n'; } >> "$FAKE_CLI_LOG"
+entry=$tool; for arg in "$@"; do entry="$entry	$arg"; done
+printf '%s\n' "$entry" >> "$FAKE_CLI_LOG"
 echo "unexpected call: $tool $*" >&2
 exit 97
 "#;
@@ -76,7 +78,7 @@ impl Sandbox {
         for tool in ["gh", "vastai"] {
             sandbox.stub(tool, FAKE_CLI);
         }
-        for tool in ["ssh", "rsync", "cursor", "code", "zed", "curl"] {
+        for tool in ["ssh", "rsync", "cursor", "code", "zed", "curl", "gcloud"] {
             sandbox.stub(tool, FORBIDDEN);
         }
         sandbox
@@ -86,6 +88,77 @@ impl Sandbox {
         let path = self.bin.join(name);
         std::fs::write(&path, script).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    pub fn gcp_reads(&self, nodes: &str, prices: bool) {
+        std::fs::write(
+            self.root.join("gcp-nodes.json"),
+            format!("{{\"nodes\":{nodes}}}"),
+        )
+        .unwrap();
+        if prices {
+            std::fs::write(self.root.join("gcp-prices"), "").unwrap();
+        }
+        let data = gpu::pyjson::loads(include_str!("tpu_facts.json")).unwrap();
+        let cache = self.root.join("cache/gpu");
+        std::fs::create_dir_all(&cache).unwrap();
+        let mut facts = data.as_dict().unwrap().clone();
+        facts.insert(
+            "at",
+            gpu::pyjson::Value::Int(jiff::Timestamp::now().as_second()),
+        );
+        for file in ["tpu-catalog-test-project.json", "tpu-sku-facts.json"] {
+            std::fs::write(
+                cache.join(file),
+                gpu::pyjson::dumps(&gpu::pyjson::Value::Dict(facts.clone()), None),
+            )
+            .unwrap();
+        }
+        let spot=data.as_dict().unwrap().get("skus").unwrap().as_list().unwrap().iter().filter_map(gpu::pyjson::Value::as_dict).find(|d|matches!(d.get("description"),Some(gpu::pyjson::Value::Str(s)) if s=="TpuV6e attached to Spot Preemptible VMs running in Columbus")).unwrap();
+        let gpu::pyjson::Value::Str(id) = spot.get("id").unwrap() else {
+            panic!("SKU id")
+        };
+        self.stub(
+            "curl",
+            &include_str!("gcp_reads.sh").replace("@SPOT_ID@", id),
+        );
+    }
+
+    pub fn gcp_lifecycle(&self) {
+        let config = self.root.join("config/gpu");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(config.join("config.json"),r#"{"gcp":{"setup":{"version":1,"project":"test-project"},"project":"test-project","expiry":{"queue":"gpu-expiry","location":"us-central1","service_account":"reaper@test-project.iam.gserviceaccount.com"}}}"#).unwrap();
+        self.gcp_reads("[]", true);
+        self.stub("gcloud", include_str!("gcp_native.py"));
+        self.stub(
+            "vastai",
+            &FAKE_CLI.replace(
+                "case \"$tool $1 $2\" in",
+                "case \"$tool $1 $2\" in\n    \"vastai show instances\") echo '[]' ;;",
+            ),
+        );
+        for editor in ["cursor", "code", "zed"] {
+            self.stub(editor,r#"#!/bin/sh
+{ printf '%s' "$(basename "$0")"; for arg in "$@"; do printf '\t%s' "$arg"; done; printf '\n'; } >> "$FAKE_CLI_LOG"
+"#);
+        }
+    }
+
+    /// Representative mixed listing, including a local price snapshot. Every
+    /// request still goes to the existing forbidden-by-default PATH stubs.
+    pub fn mixed_listing(&self) {
+        self.gcp_lifecycle();
+        let now = jiff::Timestamp::now();
+        let created = now.checked_sub(jiff::Span::new().minutes(7)).unwrap();
+        self.gcp_reads(&format!(r#"[{{"name":"projects/test-project/locations/us-east5-b/nodes/gpu-1794014955-uwhcp7","acceleratorType":"v5litepod-1","state":"DELETING","createTime":"{created}","schedulingConfig":{{"spot":true}}}}]"#), true);
+        let cache = self.root.join("cache/gpu");
+        std::fs::create_dir_all(&cache).unwrap();
+        let at = now.as_second() - 1;
+        std::fs::write(cache.join("tpu-prices-test-project.json"), format!(r#"{{"at":{at},"entries":[{{"id":"test-v5e-spot","at":{at},"sku":{{"description":"TPU v5 Lite Pod chip Spot","category":{{"usageType":"Preemptible"}},"serviceRegions":["us-east5"],"pricingInfo":[{{"effectiveTime":"2026-01-01T00:00:00Z","pricingExpression":{{"usageUnit":"chip.h","tieredRates":[{{"unitPrice":{{"currencyCode":"USD","nanos":359000000}}}}]}}}}]}}}}]}}"#)).unwrap();
+        self.stub("vastai", &FAKE_CLI.replace(
+            "case \"$tool $1 $2\" in",
+            "case \"$tool $1 $2\" in\n    \"vastai show instances\") echo '[{\"id\":30306428,\"gpu_name\":\"RTX 4090\",\"actual_status\":\"created\",\"dph_total\":0.10188888888888889,\"duration\":300}]' ;;",
+        ));
     }
 
     pub fn env(&self) -> Vec<(String, String)> {

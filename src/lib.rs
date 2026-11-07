@@ -1,5 +1,5 @@
-//! `gpu`: launch Vast.ai GPU workspaces through the authenticated `vastai`
-//! and `gh` CLIs.
+//! `gpu`: launch Vast.ai GPU and Google Cloud TPU workspaces through
+//! authenticated provider CLIs. External work always crosses the Runner seam.
 
 pub mod cli;
 pub mod commands;
@@ -8,17 +8,33 @@ pub mod ctx;
 pub mod editors;
 pub mod error;
 pub mod expiry;
+pub mod gcp;
+pub mod gcp_catalog;
+pub mod gcp_expiry;
+mod gcp_facts;
+pub mod gcp_geo;
+mod gcp_http;
+mod gcp_preferences;
+pub mod gcp_prices;
+mod gcp_retry;
+pub mod gcp_ssh;
+mod gcp_types;
+pub mod gcp_wizard;
+mod gcp_zones;
 pub mod history;
 pub mod instances;
 pub mod launch;
 pub mod offers;
 pub mod picker;
 pub mod process;
+mod progress;
 pub mod prompt;
+pub mod provider;
 pub mod pyfmt;
 pub mod pyjson;
 pub mod redact;
 pub mod repos;
+pub mod setup;
 pub mod ssh_config;
 pub mod startup;
 pub mod vast;
@@ -38,7 +54,7 @@ use repos::Repo;
 /// Run the CLI with `argv` (program name first); the exit status.
 pub fn main_with(argv: &[String], ctx: &Ctx) -> i32 {
     let command = match cli::parse(argv) {
-        Parsed::Run(command) => command,
+        Parsed::Run(command) => *command,
         Parsed::Exit {
             code,
             text,
@@ -125,53 +141,108 @@ fn dispatch(ctx: &Ctx, command: Command) -> Result<()> {
     }
     let cfg = config::load_config(&ctx.env)?;
     match command {
-        Command::Up(flags) => launch::launch(ctx, &up_args(flags), &cfg, up_deadline),
-        Command::Ls { json } => commands::ls(ctx, json),
+        Command::Setup(flags) => setup::run(ctx, &cfg, &flags),
+        Command::Up(flags) => {
+            let tpu_flags = flags.tpu.is_some()
+                || flags.zone.is_some()
+                || flags.runtime.is_some()
+                || flags.spot
+                || flags.on_demand;
+            // TPU flags imply Google Cloud; only an explicit --provider vast rejects them.
+            if flags.provider.as_deref() == Some("gcp") || (flags.provider.is_none() && tpu_flags) {
+                return gcp::launch(ctx, &flags, &cfg, up_deadline);
+            }
+            if tpu_flags {
+                return Err(Error::msg(
+                    "TPU flags do not apply to Vast. Next: gpu up --provider gcp --help",
+                ));
+            }
+            launch::launch(ctx, &up_args(flags), &cfg, up_deadline)
+        }
+        Command::Ls {
+            json,
+            long,
+            provider,
+        } => provider::ls(ctx, &cfg, json, long, provider.as_deref()),
         Command::Expire { .. } => {
             let (id, action, deadline) = expire_plan.expect("parsed above");
-            let Some(id) = commands::selected_id(ctx, id.as_deref(), "expire")? else {
+            let Some(id) = provider::selected_id(ctx, &cfg, id.as_deref(), "expire")? else {
                 return Ok(());
             };
-            commands::expire_instance(ctx, &id, &action, deadline)
+            match provider::InstanceId::parse(&id)? {
+                provider::InstanceId::Vast(id) => {
+                    commands::expire_instance(ctx, &id, &action, deadline)
+                }
+                provider::InstanceId::Gcp(id) => {
+                    gcp_expiry::manage(ctx, &cfg, &id, &action, deadline)
+                }
+            }
         }
         Command::Edit {
             id,
             editor,
             nvim_config,
         } => {
-            let Some(id) = commands::selected_id(ctx, id.as_deref(), "edit")? else {
+            let Some(id) = provider::selected_id(ctx, &cfg, id.as_deref(), "edit")? else {
                 return Ok(());
             };
             let nvim_config = match nvim_config {
                 Some(config) => Some(pyjson::Value::Str(config)),
                 None => config::nvim_config(&cfg)?,
             };
-            commands::edit_instance(ctx, &id, editor.as_deref(), nvim_config.as_ref(), 120.0)
+            match provider::InstanceId::parse(&id)? {
+                provider::InstanceId::Vast(id) => commands::edit_instance(
+                    ctx,
+                    &id,
+                    editor.as_deref(),
+                    nvim_config.as_ref(),
+                    120.0,
+                ),
+                provider::InstanceId::Gcp(id) => {
+                    gcp_ssh::edit(ctx, &cfg, &id, editor.as_deref(), nvim_config.as_ref())
+                }
+            }
         }
         Command::Cursor { id } => {
-            let Some(id) = commands::selected_id(ctx, id.as_deref(), "cursor")? else {
+            let Some(id) = provider::selected_id(ctx, &cfg, id.as_deref(), "cursor")? else {
                 return Ok(());
             };
             // Compatibility alias for `gpu edit --editor cursor`.
-            commands::edit_instance(ctx, &id, Some("cursor"), None, 120.0)
+            match provider::InstanceId::parse(&id)? {
+                provider::InstanceId::Vast(id) => {
+                    commands::edit_instance(ctx, &id, Some("cursor"), None, 120.0)
+                }
+                provider::InstanceId::Gcp(id) => {
+                    gcp_ssh::edit(ctx, &cfg, &id, Some("cursor"), None)
+                }
+            }
         }
         Command::Ssh { id, exec } => {
-            let Some(id) = commands::selected_id(ctx, id.as_deref(), "ssh")? else {
+            let Some(id) = provider::selected_id(ctx, &cfg, id.as_deref(), "ssh")? else {
                 return Ok(());
             };
-            commands::ssh(ctx, &id, exec)
+            match provider::InstanceId::parse(&id)? {
+                provider::InstanceId::Vast(id) => commands::ssh(ctx, &id, exec),
+                provider::InstanceId::Gcp(id) => gcp_ssh::ssh(ctx, &id, exec),
+            }
         }
         Command::Stop { id } => {
-            let Some(id) = commands::selected_id(ctx, id.as_deref(), "stop")? else {
+            let Some(id) = provider::selected_id(ctx, &cfg, id.as_deref(), "stop")? else {
                 return Ok(());
             };
-            commands::lifecycle(ctx, &id, false, false)
+            match provider::InstanceId::parse(&id)? {
+                provider::InstanceId::Vast(id) => commands::lifecycle(ctx, &id, false, false),
+                provider::InstanceId::Gcp(id) => gcp::lifecycle(ctx, &id, &cfg, false, false),
+            }
         }
         Command::Down { id, yes } => {
-            let Some(id) = commands::selected_id(ctx, id.as_deref(), "down")? else {
+            let Some(id) = provider::selected_id(ctx, &cfg, id.as_deref(), "down")? else {
                 return Ok(());
             };
-            commands::lifecycle(ctx, &id, true, yes)
+            match provider::InstanceId::parse(&id)? {
+                provider::InstanceId::Vast(id) => commands::lifecycle(ctx, &id, true, yes),
+                provider::InstanceId::Gcp(id) => gcp::lifecycle(ctx, &id, &cfg, true, yes),
+            }
         }
     }
 }

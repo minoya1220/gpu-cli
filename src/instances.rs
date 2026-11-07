@@ -66,6 +66,103 @@ pub fn format_uptime(value: Option<&Value>) -> String {
     format!("{days}d {hours:02}h")
 }
 
+/// Only show a short TPU identifier if the live inventory proves that both its
+/// compact and literal-name interpretation point at exactly this node.
+pub(crate) fn display_ids(items: &[Dict], long: bool) -> Result<Vec<String>> {
+    let ids = items
+        .iter()
+        .map(|item| {
+            let full = item.get("id").map(py_str).unwrap_or_else(|| "-".into());
+            let tpu = full
+                .starts_with("gcp:")
+                .then(|| crate::gcp::TpuId::parse(&full))
+                .transpose()?;
+            Ok((full, tpu))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut counts = std::collections::BTreeMap::<String, usize>::new();
+    for (_, tpu) in &ids {
+        if let Some(tpu) = tpu {
+            for name in [tpu.short_name(), tpu.name.clone()]
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>()
+            {
+                *counts.entry(name).or_default() += 1;
+            }
+        }
+    }
+    Ok(ids
+        .into_iter()
+        .map(|(full, tpu)| {
+            let Some(tpu) = tpu.filter(|_| !long) else {
+                return full;
+            };
+            [tpu.short_name(), tpu.name]
+                .into_iter()
+                .find(|name| crate::provider::short_candidate(name) && counts.get(name) == Some(&1))
+                .unwrap_or(full)
+        })
+        .collect())
+}
+
+fn table_price(item: &Dict) -> String {
+    item.get("dph_total")
+        .or_else(|| item.get("dph"))
+        .filter(|v| !matches!(v, Value::Bool(_)))
+        .and_then(|v| py_float(v).ok())
+        .filter(|p| p.is_finite() && *p >= 0.0)
+        .map(|p| format!("${}/hr", fixed(p, 2)))
+        .unwrap_or_else(|| "-".into())
+}
+
+/// Human output only. JSON keeps full identifiers, original precision/case and
+/// provider-specific fields. One column measurement covers every provider.
+pub(crate) fn render_table(ctx: &Ctx, items: &[Dict], long: bool) -> Result<()> {
+    if items.is_empty() {
+        return ctx.println("No instances. Launch one: gpu up");
+    }
+    let ids = display_ids(items, long)?;
+    let mut cells = vec![["ID", "Provider", "Type", "Status", "Price", "Uptime"].map(String::from)];
+    for (item, id) in items.iter().zip(ids) {
+        let field = |key| {
+            item.get(key)
+                .filter(|v| truthy(v))
+                .map(py_str)
+                .unwrap_or_else(|| "-".into())
+        };
+        let provider = match item.get("provider").and_then(Value::as_str) {
+            Some("gcp") => "gcp",
+            _ => "vast",
+        };
+        let kind = field("gpu_name");
+        cells.push(
+            [
+                id,
+                provider.into(),
+                if provider == "gcp" {
+                    crate::gcp_types::public(kind)
+                } else {
+                    kind
+                },
+                field("actual_status").to_ascii_lowercase(),
+                table_price(item),
+                format_uptime(item.get("duration")),
+            ]
+            .map(|cell| {
+                crate::redact::redact_text(&cell)
+                    .chars()
+                    .map(|c| if c.is_control() { ' ' } else { c })
+                    .collect()
+            }),
+        );
+    }
+    use crate::offers::Column::{Left, Plain};
+    for line in crate::offers::aligned_rows(&cells, [Left, Left, Left, Left, Left, Plain]) {
+        ctx.println(line.trim_end())?;
+    }
+    Ok(())
+}
+
 pub fn instance_label(item: &Dict) -> Result<String> {
     let dash = Value::str("-");
     let price = item
@@ -100,7 +197,13 @@ pub fn select_instance(ctx: &Ctx, instances: &[Dict], action: &str) -> Result<Op
     let mut options = Vec::new();
     for item in instances {
         let id = py_str(item.get("id").ok_or_else(|| Error::key("id"))?);
-        options.push(Opt::new(id, instance_label(item)?));
+        let label = instance_label(item)?;
+        let label = match item.get("provider") {
+            Some(Value::Str(p)) if p == "vast" => format!("Vast.ai  {label}"),
+            Some(Value::Str(p)) if p == "gcp" => format!("Google Cloud  {label}"),
+            _ => label,
+        };
+        options.push(Opt::new(id, label));
     }
     // Even a single instance must be explicitly selected.
     let screen = Screen::new(

@@ -374,7 +374,11 @@ fn test_cli_dispatch() {
             _ => ssh_ready(cmd),
         });
         let picked = instance == "456";
-        let pickers: &[&str] = if picked { &["\r"] } else { &[] };
+        let pickers: &[&str] = if picked {
+            &[crate::picker::testing::RIGHT]
+        } else {
+            &[]
+        };
         let ctx = t.ctx().runner(&runner).pickers(pickers).build();
         let mut argv = vec!["expire"];
         argv.extend_from_slice(args);

@@ -10,7 +10,7 @@ use super::term::{run_loop, Abort, Io, LoopEnd, LoopOptions};
 use super::{Outcome, PickValue, Screen, Snapshot};
 
 pub const ENTER: &str = "\r";
-pub const BACK: &str = "`";
+pub const BACK: &str = LEFT;
 pub const UP: &str = "\x1b[A";
 pub const DOWN: &str = "\x1b[B";
 pub const RIGHT: &str = "\x1b[C";

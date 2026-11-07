@@ -195,6 +195,8 @@ pub fn prompt_for_picks(
             mode: Some(mode),
             gpu: Some(gpu),
             offer: None,
+            tpu: None,
+            cloud: None,
         },
         offers,
     ))
@@ -286,6 +288,96 @@ pub fn created_summary(output: &str) -> Result<String> {
     }
 }
 
+#[derive(Clone)]
+enum ApprovedLaunch {
+    Vast(Box<(Picks, Dict)>),
+    Gcp(Box<(crate::cli::UpFlags, crate::gcp::Prepared)>),
+}
+
+fn confirmation(
+    ctx: &Ctx,
+    args: &UpArgs,
+    cfg: &Dict,
+    picks: Picks,
+) -> crate::picker::Next<crate::wizard::Choice, ApprovedLaunch> {
+    use crate::picker::Next;
+    if picks.tpu.is_some() {
+        let flags = crate::gcp::picker_flags(args, &picks);
+        let selection = match picks.cloud.clone() {
+            Some(selection) => selection,
+            None => return Next::Notice("Choose a TPU type and zone".into()),
+        };
+        let prepared = crate::gcp::validate_tpu_flags(&flags).and_then(|_| {
+            crate::gcp_wizard::complete(
+                &flags,
+                cfg,
+                selection,
+                picks.repo.clone().unwrap_or(Repo::NoRepo),
+            )
+        });
+        return match prepared {
+            Ok(picks) => Next::Screen(
+                crate::gcp::confirmation::<crate::wizard::Choice>(ctx, cfg, picks).remap(
+                    std::rc::Rc::new(|v| v),
+                    std::rc::Rc::new(|v| v),
+                    std::rc::Rc::new(move |prepared| {
+                        Next::Done(ApprovedLaunch::Gcp(Box::new((flags.clone(), prepared))))
+                    }),
+                ),
+            ),
+            Err(e) => Next::Notice(e.text().into()),
+        };
+    }
+    let worker = ctx.clone();
+    let args = args.clone();
+    let cfg = cfg.clone();
+    let job = Job::new(move || {
+        let plan = || -> Result<_> {
+            let mode = picks.mode.as_deref().unwrap_or("");
+            let repo = picks.repo.clone().unwrap_or(Repo::NoRepo);
+            let offer = match &picks.offer {
+                Some(offer) => offer.clone(),
+                None if args.offer.is_some() => {
+                    let search = OfferSearch::new(Vast::new(&worker), &args, &cfg)?;
+                    select_offer(&worker, search.offers(mode, picks.gpu.as_deref())?, &args)?
+                }
+                None => return Err(Error::msg("Choose an offer before confirming")),
+            };
+            let request = Vast::new(&worker).request(
+                &offer,
+                &RequestArgs {
+                    repo: &repo,
+                    mode,
+                    interruptible: args.interruptible,
+                    disk: args.disk,
+                },
+                &cfg,
+            )?;
+            argv(&request)?;
+            let gpu = offer
+                .get("gpu_name")
+                .map(py_str)
+                .unwrap_or_else(|| picks.gpu.clone().unwrap_or_default());
+            let workspace = if repo == Repo::NoRepo {
+                String::new()
+            } else {
+                let owner = py_str(config::get(&cfg, "owner")?);
+                format!(" for {}", resolve_repo(repo.as_arg(), &owner)?.1)
+            };
+            let title = format!(
+                "Launch {gpu} {mode}{workspace} at ${}/hr?",
+                fixed(offer_price(&offer)?, 2)
+            );
+            Ok(crate::prompt::Confirmation {
+                title,
+                value: ApprovedLaunch::Vast(Box::new((picks.clone(), offer))),
+            })
+        };
+        plan().map_err(|e| e.text().to_string())
+    });
+    Next::Screen(crate::prompt::confirmation_screen(job))
+}
+
 pub fn launch(ctx: &Ctx, args: &UpArgs, cfg: &Dict, deadline: Option<Timestamp>) -> Result<()> {
     validate_launch_args(args)?;
     let owner = py_str(config::get(cfg, "owner")?);
@@ -299,7 +391,10 @@ pub fn launch(ctx: &Ctx, args: &UpArgs, cfg: &Dict, deadline: Option<Timestamp>)
         mode: args.mode.clone(),
         gpu: args.gpu.clone(),
         offer: None,
+        tpu: None,
+        cloud: None,
     };
+    let mut tty_confirmed = false;
     let (picks, offer) = if ctx.interactive() {
         let repo_ctx = ctx.clone();
         let repo_owner = owner.clone();
@@ -316,18 +411,55 @@ pub fn launch(ctx: &Ctx, args: &UpArgs, cfg: &Dict, deadline: Option<Timestamp>)
                 models: known_gpu_models(&ctx.env),
                 recent_gpus: recent,
                 choose_offer: !args.yes && args.offer.is_none(),
+                tpu_prices: Some(crate::gcp_prices::job(ctx, cfg)),
+                tpu_cached_prices: crate::gcp_prices::cached_default(ctx, cfg),
+                tpu_types: crate::gcp_facts::known_types(
+                    ctx,
+                    cfg.get("gcp")
+                        .and_then(crate::pyjson::Value::as_dict)
+                        .and_then(|d| crate::gcp::text(d, "project"))
+                        .unwrap_or(""),
+                    None,
+                ),
+                tpu_catalog: Some(crate::gcp_catalog::types_job(ctx, cfg)),
+                tpu_transition: Some(crate::gcp_wizard::transition(ctx, args, cfg, deadline)),
+                tpu_setup_error: crate::gcp::launch_setup(ctx, cfg)
+                    .err()
+                    .map(|e| e.text().to_string()),
                 owner: owner.clone(),
             },
         );
-        let picks = wizard.run(ctx, picks)?;
-        let offer = match &picks.offer {
-            Some(offer) => offer.clone(),
-            None => {
-                let mode = picks.mode.clone().unwrap_or_default();
-                select_offer(ctx, search.offers(&mode, picks.gpu.as_deref())?, args)?
+        if !args.yes && !args.dry_run {
+            let worker = ctx.clone();
+            let config = cfg.clone();
+            let flags = args.clone();
+            let step = crate::picker::then(wizard.next(picks), move |picks| {
+                confirmation(&worker, &flags, &config, picks)
+            });
+            match crate::picker::resolve(ctx, step)? {
+                ApprovedLaunch::Vast(plan) => {
+                    tty_confirmed = true;
+                    *plan
+                }
+                ApprovedLaunch::Gcp(plan) => {
+                    let (flags, prepared) = *plan;
+                    return crate::gcp::launch_prepared(ctx, &flags, cfg, prepared);
+                }
             }
-        };
-        (picks, offer)
+        } else {
+            let picks = wizard.run(ctx, picks)?;
+            if picks.tpu.is_some() {
+                return crate::gcp::launch_from_picker(ctx, args, &picks, cfg, deadline);
+            }
+            let offer = match &picks.offer {
+                Some(offer) => offer.clone(),
+                None => {
+                    let mode = picks.mode.clone().unwrap_or_default();
+                    select_offer(ctx, search.offers(&mode, picks.gpu.as_deref())?, args)?
+                }
+            };
+            (picks, offer)
+        }
     } else {
         let (picks, offers) = prompt_for_picks(ctx, picks, &search, &owner)?;
         let offer = select_offer(ctx, offers, args)?;
@@ -353,15 +485,17 @@ pub fn launch(ctx: &Ctx, args: &UpArgs, cfg: &Dict, deadline: Option<Timestamp>)
         }
         return Ok(());
     }
-    ctx.println(&format!(
-        "Launch {mode} for {} on offer {} at ${}/hr?",
-        repo.label(),
-        py_str(crate::offers::field(&offer, "id")?),
-        fixed(offer_price(&offer)?, 3)
-    ))?;
-    if !args.yes && !confirm(ctx, "Type 'yes' to create this paid instance: ")? {
-        ctx.println("Cancelled.")?;
-        return Ok(());
+    if !tty_confirmed {
+        ctx.println(&format!(
+            "Launch {mode} for {} on offer {} at ${}/hr?",
+            repo.label(),
+            py_str(crate::offers::field(&offer, "id")?),
+            fixed(offer_price(&offer)?, 3)
+        ))?;
+        if !args.yes && !confirm(ctx, "Type 'yes' to create this paid instance: ")? {
+            ctx.println("Cancelled.")?;
+            return Ok(());
+        }
     }
     let response = run(ctx, &argv(&request)?, None)?;
     ctx.println(&created_summary(&response)?)?;

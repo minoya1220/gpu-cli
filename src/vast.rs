@@ -33,7 +33,7 @@ impl Vast {
         let mut argv = vec!["vastai"];
         argv.extend_from_slice(args);
         argv.push("--raw");
-        Ok(pyjson::loads(&run(&self.ctx, &argv, None)?)?)
+        parse_reply(&run(&self.ctx, &argv, None)?)
     }
 
     pub fn offers(&self, query: &str, bid: bool) -> Result<Value> {
@@ -121,7 +121,7 @@ pub fn argv(request: &[Value]) -> Result<Vec<String>> {
 
 /// `vastai show instances --raw` as instance dicts.
 pub fn list_instances(ctx: &Ctx, timeout: Option<f64>) -> Result<Vec<Dict>> {
-    let value = pyjson::loads(&run(
+    let value = parse_reply(&run(
         ctx,
         &["vastai", "show", "instances", "--raw"],
         timeout,
@@ -129,9 +129,51 @@ pub fn list_instances(ctx: &Ctx, timeout: Option<f64>) -> Result<Vec<Dict>> {
     crate::offers::offer_dicts(value)
 }
 
+/// Decode provider data without exposing raw output or decoder diagnostics.
+pub(crate) fn parse_reply(output: &str) -> Result<Value> {
+    pyjson::loads(output).map_err(|_| {
+        Error::msg("Vast returned no readable data. Log in with: vastai set api-key <api-key>")
+    })
+}
+
 /// The listed instance whose `str(id)` equals `instance_id`.
 pub fn find_instance<'a>(instances: &'a [Dict], instance_id: &str) -> Option<&'a Dict> {
     instances
         .iter()
         .find(|item| py_str(item.get("id").unwrap_or(&Value::Null)) == instance_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::{self, FakeRunner, TestEnv};
+
+    #[test]
+    fn unreadable_instances_reply_has_login_hint_without_raw_output() {
+        for output in ["", "Please log in: secret-token", "{broken secret-token"] {
+            let env = TestEnv::new();
+            let runner = FakeRunner::new(move |cmd| {
+                assert_eq!(cmd.argv, ["vastai", "show", "instances", "--raw"]);
+                testing::ok(output)
+            });
+            let ctx = env.ctx().runner(&runner).build();
+            let expected =
+                "Vast returned no readable data. Log in with: vastai set api-key <api-key>";
+            assert_eq!(list_instances(&ctx, None).unwrap_err().text(), expected);
+            for json in [false, true] {
+                assert_eq!(
+                    crate::commands::ls(&ctx, json).unwrap_err().text(),
+                    expected
+                );
+                assert!(testing::out(&ctx).is_empty());
+            }
+            assert_eq!(
+                Vast::new(&ctx)
+                    .json(&["show", "instances"])
+                    .unwrap_err()
+                    .text(),
+                expected
+            );
+        }
+    }
 }

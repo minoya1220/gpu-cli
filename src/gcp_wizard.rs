@@ -4,7 +4,7 @@ use crate::cli::UpFlags;
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use crate::gcp::{self, Settings};
-use crate::picker::{pick, AnyJob, Job, JobState, Next, Opt, Screen};
+use crate::picker::{AnyJob, Job, JobState, Next, Opt, Screen};
 use crate::pyjson::Dict;
 use crate::repos::{resolve_repo, Repo};
 
@@ -621,17 +621,13 @@ pub(crate) fn runtime_for(tpu: &str) -> Result<&'static str> {
     }
 }
 
-pub fn choose(
+pub(crate) fn initial_selection(
     ctx: &Ctx,
     flags: &UpFlags,
     settings: &Settings,
-    cfg: &Dict,
     deadline: Option<jiff::Timestamp>,
-) -> Result<Picks> {
-    let missing = || {
-        Error::msg("Specify --tpu, --zone and --repo or --no-repo (zone may come from config). Next: gpu up --provider gcp --help")
-    };
-    let selected = Selection {
+) -> Selection {
+    Selection {
         expiry_at: deadline,
         zone: flags.zone.clone().or_else(|| {
             if ctx.interactive() {
@@ -654,15 +650,19 @@ pub fn choose(
         } else {
             Some(flags.spot)
         },
-    };
-    let selected = if ctx.interactive() {
-        match next_with(ctx.clone(), settings.clone(), cfg.clone(), selected, None) {
-            Next::Screen(first) => pick(ctx, first)?,
-            Next::Notice(message) => return Err(Error::msg(message)),
-            Next::Done(done) => done,
-        }
-    } else {
-        selected
+    }
+}
+
+/// Resolve complete selections without a picker or dependency call. Launch
+/// preflight Jobs use this after the repository/zone screens have completed.
+pub(crate) fn complete(
+    flags: &UpFlags,
+    cfg: &Dict,
+    selected: Selection,
+    repo: Repo,
+) -> Result<Picks> {
+    let missing = || {
+        Error::msg("Specify --tpu, --zone and --repo or --no-repo (zone may come from config). Next: gpu up --provider gcp --help")
     };
     let deadline = selected.expiry_at.ok_or_else(|| {
         Error::msg(
@@ -692,42 +692,6 @@ pub fn choose(
         ));
     }
     let owner = crate::pyfmt::py_str(crate::config::get(cfg, "owner")?);
-    let repo = if flags.no_repo {
-        Repo::NoRepo
-    } else if let Some(repo) = &flags.repo {
-        Repo::from_arg(repo)
-    } else if ctx.interactive() {
-        let worker = ctx.clone();
-        let repo_owner = owner.clone();
-        let wizard = crate::wizard::LaunchWizard::new(
-            &ctx.env,
-            crate::wizard::WizardOptions {
-                repos: Job::new(move || {
-                    crate::launch::sync_repos(&worker, &repo_owner).map_err(|e| e.text().into())
-                }),
-                search: None,
-                models: Vec::new(),
-                recent_gpus: Vec::new(),
-                choose_offer: false,
-                tpu_setup_error: None,
-                tpu_transition: None,
-                tpu_prices: None,
-                tpu_cached_prices: None,
-                tpu_types: Vec::new(),
-                tpu_catalog: None,
-                owner: owner.clone(),
-            },
-        );
-        wizard
-            .run(
-                ctx,
-                crate::wizard::Picks::new(None, Some("tpu"), Some(&tpu)),
-            )?
-            .repo
-            .unwrap_or(Repo::NoRepo)
-    } else {
-        return Err(missing());
-    };
     let (_, name) = resolve_repo(repo.as_arg(), &owner)?;
     let directory = if repo == Repo::NoRepo {
         "/workspace".into()
@@ -743,4 +707,121 @@ pub fn choose(
         directory,
         deadline,
     })
+}
+
+fn flag_repo(flags: &UpFlags) -> Option<Repo> {
+    if flags.no_repo {
+        Some(Repo::NoRepo)
+    } else {
+        flags.repo.as_deref().map(Repo::from_arg)
+    }
+}
+
+fn repository_wizard(ctx: &Ctx, cfg: &Dict) -> Result<crate::wizard::LaunchWizard> {
+    let owner = crate::pyfmt::py_str(crate::config::get(cfg, "owner")?);
+    let worker = ctx.clone();
+    let repo_owner = owner.clone();
+    Ok(crate::wizard::LaunchWizard::new(
+        &ctx.env,
+        crate::wizard::WizardOptions {
+            repos: Job::new(move || {
+                crate::launch::sync_repos(&worker, &repo_owner).map_err(|e| e.text().into())
+            }),
+            search: None,
+            models: Vec::new(),
+            recent_gpus: Vec::new(),
+            choose_offer: false,
+            tpu_setup_error: None,
+            tpu_transition: None,
+            tpu_prices: None,
+            tpu_cached_prices: None,
+            tpu_types: Vec::new(),
+            tpu_catalog: None,
+            owner,
+        },
+    ))
+}
+
+pub fn choose(
+    ctx: &Ctx,
+    flags: &UpFlags,
+    settings: &Settings,
+    cfg: &Dict,
+    deadline: Option<jiff::Timestamp>,
+) -> Result<Picks> {
+    let selected = initial_selection(ctx, flags, settings, deadline);
+    let selected = if ctx.interactive() {
+        crate::picker::resolve(
+            ctx,
+            next_with(ctx.clone(), settings.clone(), cfg.clone(), selected, None),
+        )?
+    } else {
+        selected
+    };
+    // Preserve validation order before the optional repository picker.
+    let draft = complete(flags, cfg, selected.clone(), Repo::NoRepo)?;
+    let repo = match flag_repo(flags) {
+        Some(repo) => repo,
+        None if ctx.interactive() => repository_wizard(ctx, cfg)?.run(ctx,
+            crate::wizard::Picks::new(None, Some("tpu"), Some(&draft.tpu)))?.repo.unwrap_or(Repo::NoRepo),
+        None => return Err(Error::msg("Specify --tpu, --zone and --repo or --no-repo (zone may come from config). Next: gpu up --provider gcp --help")),
+    };
+    complete(flags, cfg, selected, repo)
+}
+
+/// Append repository selection and paid approval to the same TPU screen stack.
+/// Left from approval therefore restores the actual zone/duration/repo page.
+pub(crate) fn choose_confirmed(
+    ctx: &Ctx,
+    flags: &UpFlags,
+    settings: &Settings,
+    cfg: &Dict,
+    deadline: Option<jiff::Timestamp>,
+) -> Result<crate::gcp::Prepared> {
+    use crate::wizard::Choice;
+    use std::rc::Rc;
+    let first = next_with(
+        ctx.clone(),
+        settings.clone(),
+        cfg.clone(),
+        initial_selection(ctx, flags, settings, deadline),
+        None,
+    );
+    let worker = ctx.clone();
+    let flags = flags.clone();
+    let cfg = cfg.clone();
+    let step = crate::picker::map_next(
+        first,
+        Rc::new(Choice::Cloud),
+        Rc::new(|choice| match choice {
+            Choice::Cloud(value) | Choice::Text(value) => value,
+            _ => unreachable!("mapped TPU value"),
+        }),
+        Rc::new(move |selection: Selection| {
+            let wizard = match repository_wizard(&worker, &cfg) {
+                Ok(wizard) => wizard,
+                Err(e) => return Next::Notice(e.text().into()),
+            };
+            let repo_step = wizard.next(crate::wizard::Picks::new(
+                flag_repo(&flags),
+                Some("tpu"),
+                Some("tpu"),
+            ));
+            let worker = worker.clone();
+            let flags = flags.clone();
+            let cfg = cfg.clone();
+            crate::picker::then(repo_step, move |picks| {
+                match complete(
+                    &flags,
+                    &cfg,
+                    selection.clone(),
+                    picks.repo.unwrap_or(Repo::NoRepo),
+                ) {
+                    Ok(picks) => Next::Screen(crate::gcp::confirmation(&worker, &cfg, picks)),
+                    Err(e) => Next::Notice(e.text().into()),
+                }
+            })
+        }),
+    );
+    crate::picker::resolve(ctx, step)
 }

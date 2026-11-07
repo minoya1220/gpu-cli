@@ -324,7 +324,14 @@ impl Renderer {
         let header: Vec<_> = frame
             .header
             .iter()
-            .map(|l| truncate(&shown(l), width))
+            .enumerate()
+            .flat_map(|(index, line)| {
+                if index == 0 && frame.wrap_title {
+                    wrap(&shown(line), width)
+                } else {
+                    vec![truncate(&shown(line), width)]
+                }
+            })
             .collect();
         let wrapped: Vec<Vec<Vec<(Style, String)>>> = frame
             .body
@@ -542,6 +549,7 @@ mod tests {
             .collect();
         Frame {
             header: vec![plain("Title")],
+            wrap_title: false,
             body,
             cursor_line: Some(cursor),
             footer: "hints".into(),
@@ -573,6 +581,7 @@ mod tests {
         let mut renderer = Renderer::default();
         let frame = Frame {
             header: vec![plain("A very long title")],
+            wrap_title: false,
             body: vec![plain("0123456789abcde")],
             cursor_line: None,
             footer: "footer hints that are long".into(),
@@ -585,11 +594,39 @@ mod tests {
     }
 
     #[test]
+    fn paid_prompt_titles_wrap_without_hiding_the_deadline_or_reply() {
+        let mut screen = Screen::new(20, 10);
+        let mut renderer = Renderer::default();
+        let frame = Frame {
+            header: vec![
+                plain("Launch GPU for $1.00/hr, delete at 18:30?"),
+                plain("Type yes:"),
+            ],
+            wrap_title: true,
+            body: Vec::new(),
+            cursor_line: None,
+            footer: "Enter confirm".into(),
+        };
+        renderer.draw(&mut screen, &frame);
+        assert_eq!(
+            screen.rows()[..5],
+            [
+                "Launch GPU for $1.00",
+                "/hr, delete at 18:30",
+                "?",
+                "Type yes:",
+                "Enter confirm"
+            ]
+        );
+    }
+
+    #[test]
     fn control_characters_show_as_prompt_toolkit_draws_them() {
         let mut screen = Screen::new(40, 10);
         let mut renderer = Renderer::default();
         let frame = Frame {
             header: vec![plain("T\x1b[2Jitle")],
+            wrap_title: false,
             body: vec![plain("a\tb\x7fc\u{85}d\x00")],
             cursor_line: None,
             footer: "x\ry".into(),
@@ -600,6 +637,7 @@ mod tests {
         let mut renderer = Renderer::default();
         let frame = Frame {
             header: vec![],
+            wrap_title: false,
             body: vec![plain("\t\t\t")],
             cursor_line: None,
             footer: String::new(),

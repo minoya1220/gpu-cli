@@ -532,6 +532,139 @@ pub(crate) fn validate_tpu_flags(flags: &UpFlags) -> Result<()> {
     Ok(())
 }
 
+#[derive(Clone)]
+pub(crate) struct Prepared {
+    pub(crate) picks: crate::gcp_wizard::Picks,
+    title: String,
+    price: String,
+    rate: Option<f64>,
+}
+
+fn quote(ctx: &Ctx, cfg: &Dict, picks: &crate::gcp_wizard::Picks) -> (String, Option<f64>) {
+    match crate::gcp_prices::load_for(ctx, cfg, &picks.zone, Some((&picks.tpu, picks.spot))) {
+        Ok(prices) => (
+            prices.quote(&picks.tpu, picks.spot),
+            prices.hourly(&picks.tpu, picks.spot),
+        ),
+        Err(e) => (
+            format!(
+                "price unavailable ({})",
+                e.text().split(". Next:").next().unwrap_or("read failed")
+            ),
+            None,
+        ),
+    }
+}
+
+fn launch_title(ctx: &Ctx, picks: &crate::gcp_wizard::Picks, price: &str) -> String {
+    format!(
+        "Launch {} {} in {} for {price}, deletes at {}? (storage and networking charges apply)",
+        crate::gcp_types::public(picks.tpu.clone()),
+        if picks.spot { "Spot" } else { "on-demand" },
+        picks.zone,
+        deadline_label(ctx, picks.deadline)
+    )
+}
+
+fn prepare(ctx: &Ctx, cfg: &Dict, picks: crate::gcp_wizard::Picks) -> Result<Prepared> {
+    let (settings, queue) = launch_setup(ctx, cfg)?;
+    crate::gcp_expiry::validate_deadline(ctx, picks.deadline)?;
+    startup(&picks.repo, cfg)?;
+    queue.reconcile(ctx)?;
+    crate::gcp_catalog::verify(ctx, &settings.project, &picks.zone, &picks.tpu)?;
+    let (price, rate) = quote(ctx, cfg, &picks);
+    let title = launch_title(ctx, &picks, &price);
+    Ok(Prepared {
+        picks,
+        title,
+        price,
+        rate,
+    })
+}
+
+fn preparation_job(
+    ctx: &Ctx,
+    cfg: &Dict,
+    picks: crate::gcp_wizard::Picks,
+) -> crate::picker::Job<crate::prompt::Confirmation<Prepared>> {
+    let worker = ctx.clone();
+    let cfg = cfg.clone();
+    crate::picker::Job::new(move || {
+        let prepared = prepare(&worker, &cfg, picks.clone()).map_err(|e| e.text().to_string())?;
+        Ok(crate::prompt::Confirmation {
+            title: prepared.title.clone(),
+            value: prepared,
+        })
+    })
+}
+
+pub(crate) fn confirmation<V: crate::picker::PickValue>(
+    ctx: &Ctx,
+    cfg: &Dict,
+    picks: crate::gcp_wizard::Picks,
+) -> crate::picker::Screen<V, Prepared> {
+    crate::prompt::confirmation_screen(preparation_job(ctx, cfg, picks))
+}
+
+fn retry_confirmation(
+    ctx: &Ctx,
+    cfg: &Dict,
+    picks: &crate::gcp_wizard::Picks,
+    screen: crate::picker::Screen<String, Option<crate::gcp_retry::Choice>>,
+    approved: std::rc::Rc<std::cell::RefCell<Option<Prepared>>>,
+) -> crate::picker::Screen<String, Option<crate::gcp_retry::Choice>> {
+    use crate::picker::Next;
+    use std::rc::Rc;
+    let worker = ctx.clone();
+    let cfg = cfg.clone();
+    let picks = picks.clone();
+    screen.remap(
+        Rc::new(|v| v),
+        Rc::new(|v| v),
+        Rc::new(move |choice| {
+            let Some(choice) = choice else {
+                return Next::Done(None);
+            };
+            let mut picks = picks.clone();
+            picks.zone = choice.zone.clone();
+            let job = preparation_job(&worker, &cfg, picks);
+            let estimate = choice.rate;
+            let already_approved = choice.approved;
+            let watched = job.clone();
+            let approved = approved.clone();
+            let screen =
+                crate::prompt::confirmation_screen::<String, _>(job).on_settled(move || {
+                    let prepared = watched.result()?.value;
+                    (already_approved && prepared.rate == estimate).then_some(Next::Done(prepared))
+                });
+            Next::Screen(screen.remap(
+                Rc::new(|v| v),
+                Rc::new(|v| v),
+                Rc::new(move |prepared| {
+                    *approved.borrow_mut() = Some(prepared);
+                    Next::Done(Some(choice.clone()))
+                }),
+            ))
+        }),
+    )
+}
+
+pub(crate) fn launch_prepared(
+    ctx: &Ctx,
+    flags: &UpFlags,
+    cfg: &Dict,
+    prepared: Prepared,
+) -> Result<()> {
+    launch_loop(
+        ctx,
+        flags,
+        cfg,
+        Some(prepared.picks.deadline),
+        Some(prepared),
+        |screen| crate::picker::pick(ctx, screen),
+    )
+}
+
 pub fn launch(ctx: &Ctx, flags: &UpFlags, cfg: &Dict, deadline: Option<Timestamp>) -> Result<()> {
     launch_with_retry(ctx, flags, cfg, deadline, |screen| {
         crate::picker::pick(ctx, screen)
@@ -542,13 +675,34 @@ pub(crate) fn launch_with_retry(
     flags: &UpFlags,
     cfg: &Dict,
     deadline: Option<Timestamp>,
+    retry: impl FnMut(
+        crate::picker::Screen<String, Option<crate::gcp_retry::Choice>>,
+    ) -> Result<Option<crate::gcp_retry::Choice>>,
+) -> Result<()> {
+    launch_loop(ctx, flags, cfg, deadline, None, retry)
+}
+
+fn launch_loop(
+    ctx: &Ctx,
+    flags: &UpFlags,
+    cfg: &Dict,
+    deadline: Option<Timestamp>,
+    mut prepared: Option<Prepared>,
     mut retry: impl FnMut(
         crate::picker::Screen<String, Option<crate::gcp_retry::Choice>>,
     ) -> Result<Option<crate::gcp_retry::Choice>>,
 ) -> Result<()> {
     let (settings, queue) = launch_setup(ctx, cfg)?;
     validate_tpu_flags(flags)?;
-    let mut picks = crate::gcp_wizard::choose(ctx, flags, &settings, cfg, deadline)?;
+    if prepared.is_none() && ctx.interactive() && !flags.yes && !flags.dry_run {
+        prepared = Some(crate::gcp_wizard::choose_confirmed(
+            ctx, flags, &settings, cfg, deadline,
+        )?);
+    }
+    let mut picks = match &prepared {
+        Some(prepared) => prepared.picks.clone(),
+        None => crate::gcp_wizard::choose(ctx, flags, &settings, cfg, deadline)?,
+    };
     let deadline = picks.deadline;
     let mut confirm = !flags.yes;
     let mut approved_rate = None;
@@ -557,9 +711,12 @@ pub(crate) fn launch_with_retry(
     loop {
         attempted.insert(picks.zone.clone());
         crate::gcp_expiry::validate_deadline(ctx, deadline)?;
+        let approved = prepared.take();
         if !flags.dry_run {
-            queue.reconcile(ctx)?;
-            crate::gcp_catalog::verify(ctx, &settings.project, &picks.zone, &picks.tpu)?;
+            if approved.is_none() {
+                queue.reconcile(ctx)?;
+                crate::gcp_catalog::verify(ctx, &settings.project, &picks.zone, &picks.tpu)?;
+            }
             crate::gcp_preferences::remember(ctx, &settings.project, &picks.zone);
             crate::gcp_preferences::remember_type(ctx, &settings.project, &picks.tpu);
         }
@@ -602,35 +759,18 @@ pub(crate) fn launch_with_retry(
             ))?;
             return Ok(());
         }
-        let (price, rate) = match crate::gcp_prices::load_for(
-            ctx,
-            cfg,
-            &picks.zone,
-            Some((&picks.tpu, picks.spot)),
-        ) {
-            Ok(prices) => (
-                prices.quote(&picks.tpu, picks.spot),
-                prices.hourly(&picks.tpu, picks.spot),
-            ),
-            Err(e) => (
-                format!(
-                    "price unavailable ({})",
-                    e.text().split(". Next:").next().unwrap_or("read failed")
-                ),
-                None,
-            ),
-        };
+        let (price, rate) = approved
+            .as_ref()
+            .map(|p| (p.price.clone(), p.rate))
+            .unwrap_or_else(|| quote(ctx, cfg, &picks));
         let local = deadline_label(ctx, deadline);
-        ctx.println(&format!(
-            "Launch {} {} in {} for {price}, deletes at {local}? (storage and networking charges apply)",
-            crate::gcp_types::public(picks.tpu.clone()),
-            if picks.spot { "Spot" } else { "on-demand" },
-            picks.zone
-        ))?;
+        if approved.is_none() {
+            ctx.println(&launch_title(ctx, &picks, &price))?;
+        }
         if check_rate && rate != approved_rate {
             confirm = true;
         }
-        if confirm && !crate::prompt::confirm(ctx, "Type yes: ")? {
+        if approved.is_none() && confirm && !crate::prompt::confirm(ctx, "Type yes: ")? {
             return ctx.println("Cancelled.");
         }
         if deadline.as_second() <= ctx.clock.now().as_second() {
@@ -667,9 +807,16 @@ pub(crate) fn launch_with_retry(
                     );
                     if ctx.interactive() {
                         ctx.println(&failure)?;
-                        if let Some(choice) = retry(crate::gcp_retry::screen(
-                            ctx, &settings, cfg, &picks, &attempted,
-                        ))? {
+                        let approved_retry = std::rc::Rc::new(std::cell::RefCell::new(None));
+                        let screen =
+                            crate::gcp_retry::screen(ctx, &settings, cfg, &picks, &attempted);
+                        let screen = if !flags.yes {
+                            retry_confirmation(ctx, cfg, &picks, screen, approved_retry.clone())
+                        } else {
+                            screen
+                        };
+                        if let Some(choice) = retry(screen)? {
+                            prepared = approved_retry.borrow_mut().take();
                             picks.zone = choice.zone;
 
                             confirm = !choice.approved;

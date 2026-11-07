@@ -437,9 +437,12 @@ esac
     assert!(!term.output_text().contains("TPU zone (test-project)"));
     assert!(!term.output_text().contains("TPU runtime (Enter ="));
     // Not a single mutation was even attempted; the existing queue is reused.
+    term.press(UP);
+    term.press(DOWN);
     term.press("test-project");
     term.press(ENTER);
     assert_eq!(term.exit_status(), 0, "{}", term.output_text());
+    assert!(!term.output_text().contains("^[["));
     let path = sandbox.root.join("config/gpu/config.json");
     let config = std::fs::read_to_string(&path).unwrap();
     assert!(config.contains("123456-compute@developer.gserviceaccount.com"));
@@ -454,6 +457,8 @@ esac
         .all(|call| call[0] == "vastai"));
     term.press_until("2", on("Google Cloud setup"));
     term.press_until("2", shows("Type project ID 'test-project' to confirm:"));
+    term.press(UP);
+    term.press(DOWN);
     term.press("test-project");
     term.press(ENTER);
     assert_eq!(term.exit_status(), 0, "{}", term.output_text());
@@ -668,7 +673,7 @@ fn test_arrow_keys_navigate_and_special_keys_never_reach_the_filter() {
         term.press(key);
     }
     term.wait(|t| t.line(1) == "Repository: o/r");
-    term.press_until(LEFT, |t| !t.line(1).starts_with("Repository:"));
+    term.press_until(LEFT, |t| t.line(1) == "Repository:");
     term.press_until(LEFT, on("Repository"));
 
     term.press_until(LEFT, |t| t.last_line().contains("again to quit"));
@@ -801,6 +806,137 @@ printf 'test-token\n'
     assert_aligned(&term, "$");
     term.press("\x03");
     assert_eq!(term.exit_status(), 130);
+}
+
+#[test]
+fn test_vast_confirmation_left_restores_offer_and_only_yes_enter_creates() {
+    let sandbox = Sandbox::new();
+    sandbox.stub("vastai", &common::FAKE_CLI.replace(
+        "case \"$tool $1 $2\" in",
+        "case \"$tool $1 $2\" in\n    \"vastai create instance\") echo '{\"success\":true,\"new_contract\":123,\"instance_api_key\":\"private-test-key\"}' ;;",
+    ));
+    let mut term = Terminal::start(
+        &sandbox,
+        &[
+            "up",
+            "--repo",
+            "example/gpu-cli",
+            "--mode",
+            "container",
+            "--gpu",
+            "RTX 4090",
+        ],
+    );
+    term.wait(on("Offer: RTX 4090"));
+    term.wait(shows("id=100"));
+    term.press_until(RIGHT, shows("Type yes:"));
+    assert_eq!(
+        term.title(),
+        "Launch RTX 4090 container for gpu-cli at $0.30/hr?"
+    );
+    assert!(term.last_line().contains("← back"));
+    let reads = sandbox.calls().len();
+    term.press("ye");
+    term.press_until(LEFT, on("Offer: RTX 4090"));
+    assert!(shows("id=100")(&term));
+    assert_eq!(
+        sandbox.calls().len(),
+        reads,
+        "Back restores the loaded offer page"
+    );
+    assert!(!sandbox
+        .calls()
+        .iter()
+        .any(|a| a.iter().any(|s| s == "create")));
+    term.press_until(ENTER, shows("Type yes:"));
+    assert!(!shows("Type yes: ye")(&term));
+    term.press("yes");
+    term.press(RIGHT);
+    term.pump(Duration::from_millis(100));
+    assert!(!sandbox
+        .calls()
+        .iter()
+        .any(|a| a.iter().any(|s| s == "create")));
+    term.press_until(ENTER, shows("Open workspace"));
+    term.press("2");
+    assert_eq!(term.exit_status(), 0, "{}", term.output_text());
+    assert_eq!(
+        sandbox
+            .calls()
+            .iter()
+            .filter(|a| a.iter().any(|s| s == "create"))
+            .count(),
+        1
+    );
+    let output = term.output_text();
+    assert!(
+        !output.contains("^[[")
+            && !output.contains("this paid instance")
+            && !output.contains("private-test-key"),
+        "{output:?}"
+    );
+}
+
+#[test]
+fn test_tpu_confirmation_left_restores_filtered_zone_in_direct_and_shared_flows() {
+    for direct in [false, true] {
+        let sandbox = Sandbox::new();
+        sandbox.gcp_lifecycle();
+        let args = if direct {
+            vec![
+                "up",
+                "--tpu",
+                "v6e-1",
+                "--no-repo",
+                "--spot",
+                "--expire",
+                "2h",
+            ]
+        } else {
+            vec!["up", "--no-repo", "--expire", "2h"]
+        };
+        let mut term = Terminal::start(&sandbox, &args);
+        if !direct {
+            term.wait(on("Mode"));
+            term.press_until(RIGHT, on("GPU"));
+            term.press_until("v6e-1", shows("Filter: v6e-1"));
+            term.press_until(RIGHT, on("TPU capacity"));
+            term.press_until("2", on("TPU zone"));
+        } else {
+            term.wait(on("TPU zone"));
+        }
+        term.press_until("us-east5-b", shows("Filter: us-east5-b"));
+        term.press_until(ENTER, shows("Type yes:"));
+        assert!(term
+            .title()
+            .starts_with("Launch v6e-1 Spot in us-east5-b for $"));
+        term.press("ye");
+        term.press_until(LEFT, on("TPU zone"));
+        assert!(shows("Filter: us-east5-b")(&term));
+        assert!(!sandbox
+            .calls()
+            .iter()
+            .any(|a| a.iter().any(|s| s == "create" || s == "create-http-task")));
+        term.press_until(RIGHT, shows("Type yes:"));
+        assert!(!shows("Type yes: ye")(&term));
+        term.press_until("yes\r", shows("Open workspace"));
+        term.press("2");
+        assert_eq!(term.exit_status(), 0, "{}", term.output_text());
+        assert_eq!(
+            sandbox
+                .calls()
+                .iter()
+                .filter(|a| a.get(4).is_some_and(|s| s == "create"))
+                .count(),
+            1
+        );
+        assert!(sandbox.root.join("gcp-task.json").exists());
+        assert!(
+            !term.output_text().contains("^[["),
+            "{}",
+            term.output_text()
+        );
+    }
 }
 
 #[test]
@@ -1012,6 +1148,65 @@ fn test_tpu_capacity_keeps_moving_while_prices_load_then_redraws_without_keys() 
 }
 
 #[test]
+fn test_tpu_retry_manual_zone_confirmation_keeps_back_navigation() {
+    let sandbox = Sandbox::new();
+    sandbox.gcp_lifecycle();
+    std::fs::write(
+        sandbox.root.join("gcp-reject-zones.json"),
+        r#"["us-east5-b"]"#,
+    )
+    .unwrap();
+    let mut term = Terminal::start(
+        &sandbox,
+        &[
+            "up",
+            "--tpu",
+            "v5e-1",
+            "--zone",
+            "us-east5-b",
+            "--spot",
+            "--no-repo",
+            "--expire",
+            "2h",
+        ],
+    );
+    term.wait(shows("Type yes:"));
+    term.press("yes\r");
+    term.wait(shows("Retry v5e-1 Spot"));
+    term.press_until("2", shows("TPU zone"));
+    term.press_until("us-central1-a", shows("Filter: us-central1-a"));
+    term.press_until(ENTER, shows("Type yes:"));
+    term.press("ye");
+    term.press_until(LEFT, shows("TPU zone"));
+    assert!(shows("Filter: us-central1-a")(&term));
+    assert_eq!(
+        sandbox
+            .calls()
+            .iter()
+            .filter(|a| a.get(4).is_some_and(|s| s == "create"))
+            .count(),
+        1
+    );
+    assert!(
+        !sandbox.root.join("gcp-task.json").exists(),
+        "back must not arm another paid attempt"
+    );
+    term.press_until(ENTER, shows("Type yes:"));
+    term.press_until("yes\r", shows("Open workspace"));
+    term.press("2");
+    assert_eq!(term.exit_status(), 0, "{}", term.output_text());
+    assert_eq!(
+        sandbox
+            .calls()
+            .iter()
+            .filter(|a| a.get(4).is_some_and(|s| s == "create"))
+            .count(),
+        2
+    );
+    assert!(!term.output_text().contains("^[["));
+}
+
+#[test]
 fn test_tpu_wait_timer_counts_in_place_and_clears_for_retry_and_results() {
     let sandbox = Sandbox::new();
     sandbox.gcp_lifecycle();
@@ -1047,9 +1242,14 @@ fn test_tpu_wait_timer_counts_in_place_and_clears_for_retry_and_results() {
     );
     assert!(!term.output_text().contains("cached"));
     assert!(!term.output_text().contains("Paid;"));
-    assert!(term
-        .output_text()
-        .contains("(storage and networking charges apply)"));
+    let plain = regex::Regex::new(r"\x1b\[[0-9;?]*[A-Za-z]")
+        .unwrap()
+        .replace_all(&term.output_text(), "")
+        .replace(['\r', '\n'], "");
+    assert!(
+        plain.contains("(storage and networking charges apply)"),
+        "{plain}"
+    );
     term.press("yes\r");
     for attempt in 0..2 {
         term.wait(shows("Waiting for Google Cloud to create the TPU... 0:00"));
@@ -1232,8 +1432,11 @@ fn test_tpu_post_launch_editor_then_edit_and_cursor_use_instance_picker() {
         let mut down = Terminal::start(&sandbox, &["down"]);
         down.wait(shows("Google Cloud"));
         down.press_until(RIGHT, shows("Destroy TPU"));
+        down.press(UP);
+        down.press(DOWN);
         down.press(if approve { "yes\r" } else { "\r" });
         assert_eq!(down.exit_status(), 0, "{}", down.output_text());
+        assert!(!down.output_text().contains("^[["));
         assert!(down.output_text().contains(if approve {
             "Destroyed TPU"
         } else {
@@ -1292,10 +1495,15 @@ fn test_enter_submits_repository_url_and_tpu_duration_text_boxes() {
     repo.wait(shows("Clone from URL..."));
     repo.press_until("9", on("Clone from URL"));
     assert!(repo.last_line().contains("Enter/→ continue"));
+    repo.press_until(LEFT, on("Repository"));
+    repo.press_until("9", on("Clone from URL"));
+    repo.press(UP);
+    repo.press(DOWN);
     repo.press("https://github.com/owner/demo");
     repo.press_until(ENTER, on("Mode"));
     repo.press("\x03");
     assert_eq!(repo.exit_status(), 130);
+    assert!(!repo.output_text().contains("^[["));
     let sandbox = Sandbox::new();
     sandbox.gcp_lifecycle();
     let mut duration = Terminal::start(
@@ -1316,11 +1524,14 @@ fn test_enter_submits_repository_url_and_tpu_duration_text_boxes() {
     duration.wait(on("Destroy after (e.g. 2h)"));
     assert!(duration.last_line().contains("Enter/→ continue"));
     duration.press("2h");
+    duration.press(UP);
+    duration.press(DOWN);
     duration.press(ENTER);
     assert_eq!(duration.exit_status(), 0, "{}", duration.output_text());
     assert!(duration
         .output_text()
         .contains("DRY RUN: no TPU or expiry task created"));
+    assert!(!duration.output_text().contains("^[["));
     assert!(sandbox.calls().is_empty());
 }
 

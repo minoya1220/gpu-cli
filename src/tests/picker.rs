@@ -253,6 +253,96 @@ fn test_list_enter_selects_backtick_is_ignored_and_footer_orders_back_before_dig
 }
 
 #[test]
+fn paid_confirmation_waits_for_checks_and_left_restores_parent_with_filter() {
+    let gate = Gate::default();
+    let blocked = gate.clone();
+    let quote = Job::new(move || {
+        assert!(blocked.wait());
+        Ok(crate::prompt::Confirmation {
+            title: "Launch GPU container for repo at $0.10/hr?".into(),
+            value: "approved".to_string(),
+        })
+    });
+    let parent = menu("Offers", &["CPU", "GPU"], Next::Done);
+    let Next::Screen(first) = crate::picker::then(Next::Screen(parent), move |_| {
+        Next::Screen(crate::prompt::confirmation_screen::<String, _>(
+            quote.clone(),
+        ))
+    }) else {
+        panic!("missing flow")
+    };
+    let result = drive(first, move |keys| {
+        keys.type_text("gpu");
+        keys.press_until(RIGHT, on("Checking launch..."));
+        keys.type_text("yes");
+        keys.press(ENTER);
+        assert!(!keys.snapshot().done, "a pending quote cannot be approved");
+        keys.press_until(LEFT, on("Offers"));
+        assert_eq!(keys.filter(), "gpu", "back preserves the previous page");
+        gate.set();
+        keys.press_until(RIGHT, on("Launch GPU container for repo at $0.10/hr?"));
+        assert_eq!(
+            keys.filter(),
+            "",
+            "approval text must not leak across visits"
+        );
+        assert!(keys.footer().contains("← back"));
+        keys.type_text("no");
+        keys.press(ENTER);
+        assert!(!keys.snapshot().done);
+        keys.press(BACKSPACE);
+        keys.press(BACKSPACE);
+        keys.type_text("yes");
+        keys.press(RIGHT);
+        assert!(
+            !keys.snapshot().done,
+            "Right cannot authorize a paid launch"
+        );
+        keys.press(ENTER);
+    });
+    assert_eq!(result, Outcome::Done("approved".into()));
+}
+
+#[test]
+fn leaving_a_pending_retry_approval_prevents_its_late_auto_completion() {
+    let gate = Gate::default();
+    let blocked = gate.clone();
+    let job = Job::new(move || {
+        assert!(blocked.wait());
+        Ok(crate::prompt::Confirmation {
+            title: "Retry?".into(),
+            value: "approved".to_string(),
+        })
+    });
+    let observed = job.observer();
+    let parent = menu("Zones", &["zone-a", "zone-b"], move |_| {
+        let watched = job.clone();
+        Next::Screen(
+            crate::prompt::confirmation_screen::<String, _>(job.clone()).on_settled(move || {
+                watched
+                    .result()
+                    .map(|confirmation| Next::Done(confirmation.value))
+            }),
+        )
+    });
+    let result = drive(parent, move |keys| {
+        keys.press_until(RIGHT, on("Checking launch..."));
+        keys.press_until(LEFT, on("Zones"));
+        gate.set();
+        keys.wait_for("cancelled page's read-only preflight", || {
+            observed.state() == JobState::Done
+        });
+        assert_eq!(keys.title(), "Zones");
+        assert!(
+            !keys.snapshot().done,
+            "a popped approval page cannot authorize a retry"
+        );
+        keys.press(CTRL_C);
+    });
+    assert_eq!(result, Outcome::Cancelled(130));
+}
+
+#[test]
 fn test_enter_still_submits_text_entry_screens() {
     for submit in [ENTER, RIGHT] {
         let first = menu("First", &["text"], |_| {

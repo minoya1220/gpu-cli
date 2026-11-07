@@ -433,9 +433,9 @@ impl Plan {
                 self.project
             )));
         }
-        let reply = ctx.input_or(
+        let reply = crate::prompt::read_text(
+            ctx,
             &format!("Type project ID '{}' to confirm: ", self.project),
-            Error::Cancelled(1),
         )?;
         if reply.trim() == self.project {
             Ok(true)

@@ -1686,7 +1686,7 @@ fn changed_retry_estimate_requires_a_new_confirmation() {
         .runner(&runner)
         .clock(&FakeClock::at("2026-11-03T00:00:00Z".parse().unwrap()))
         .interactive(true)
-        .input(&["no"])
+        .pickers(&["no\r"])
         .build();
     restrict_retry_zones(&ctx);
     super::gcp_prices::cache(&env);
@@ -1706,7 +1706,11 @@ fn changed_retry_estimate_requires_a_new_confirmation() {
         },
     )
     .unwrap();
-    assert!(out(&ctx).contains("Type yes:"));
+    assert_eq!(
+        ctx.ui.remaining(),
+        0,
+        "changed price must require a new approval"
+    );
     assert!(state.lock().unwrap().tasks.is_empty());
     assert_eq!(
         runner

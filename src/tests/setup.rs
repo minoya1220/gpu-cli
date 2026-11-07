@@ -403,7 +403,7 @@ fn dry_run_missing_confirmation_and_decline_have_zero_mutations() {
                 env.ctx()
                     .runner(&runner)
                     .interactive(true)
-                    .input(&["no"])
+                    .pickers(&["no\r"])
                     .build(),
             ),
             _ => (APPLY[..5].to_vec(), ctx),
@@ -600,7 +600,7 @@ fn removal_dry_run_and_decline_never_change_cloud_or_config() {
             env.ctx()
                 .runner(&runner)
                 .interactive(true)
-                .input(&["no"])
+                .pickers(&["no\r"])
                 .build()
         } else {
             ctx

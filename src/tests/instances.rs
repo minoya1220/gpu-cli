@@ -342,7 +342,6 @@ fn test_up_offers_editor_on_success() {
             .runner(&runner)
             .interactive(true)
             .pickers(&[&keys])
-            .input(&["yes"])
             .build();
         let args = UpArgs {
             repo: Some(Repo::from_arg("ThunderKittens")),
@@ -350,6 +349,7 @@ fn test_up_offers_editor_on_success() {
             gpu: Some("H100".into()),
             num_gpus: 1,
             offer: Some(9),
+            yes: true,
             ..UpArgs::default()
         };
         launch(&ctx, &args, &defaults(), None).unwrap();

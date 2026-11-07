@@ -103,7 +103,7 @@ pub struct SetupFlags {
     pub dry_run: bool,
 }
 
-#[derive(clap::Args, Debug)]
+#[derive(clap::Args, Clone, Debug)]
 pub struct UpFlags {
     /// Provider (optional; TPU flags or a TPU picked on the GPU screen use gcp)
     #[arg(long, value_parser = ["vast", "gcp"])]

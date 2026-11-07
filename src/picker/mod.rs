@@ -80,6 +80,7 @@ type SelectionNote<V> = Box<dyn Fn(&V) -> String>;
 
 pub struct Screen<V, R> {
     pub title: String,
+    pub title_source: Option<Box<dyn Fn() -> String>>,
     pub options: Options<V>,
     pub select: Box<dyn Fn(V) -> Next<V, R>>,
     /// Options searched instead of `options` while a filter is typed.
@@ -97,11 +98,13 @@ pub struct Screen<V, R> {
     pub load_required: bool,
     /// Text entry shares the same loop and stack; validation gives an inline error.
     pub text_input: bool,
+    pub submit_on_right: bool,
     pub input_label: String,
     pub input_hint: String,
     pub back_clears_input: bool,
     pub validate: Option<Validate>,
     pub on_settled: Option<Settled<V, R>>,
+    pub settle_active_only: bool,
     pub notice: String,
     pub wait_initial: bool,
     pub initial_cursor: Option<Box<dyn Fn() -> usize>>,
@@ -115,6 +118,7 @@ impl<V: PickValue, R: 'static> Screen<V, R> {
     ) -> Screen<V, R> {
         Screen {
             title: title.into(),
+            title_source: None,
             options: Box::new(options),
             select: Box::new(select),
             search: None,
@@ -126,11 +130,13 @@ impl<V: PickValue, R: 'static> Screen<V, R> {
             quick_select: true,
             load_required: true,
             text_input: false,
+            submit_on_right: true,
             input_label: "Input".into(),
             input_hint: "Type a value, then Enter/→".into(),
             back_clears_input: true,
             validate: None,
             on_settled: None,
+            settle_active_only: false,
             notice: String::new(),
             wait_initial: false,
             initial_cursor: None,
@@ -178,11 +184,13 @@ impl<V: PickValue, R: 'static> Screen<V, R> {
         });
         Screen {
             title: self.title,
+            title_source: self.title_source,
             options: Box::new(move || map_options(options(), &output)),
             select: Box::new(move |v| map_next(select(u(v)), w.clone(), unwrap.clone(), d.clone())),
             search,
             selection_note: note,
             on_settled: settled,
+            settle_active_only: self.settle_active_only,
             load: self.load,
             loading: self.loading,
             empty: self.empty,
@@ -190,6 +198,7 @@ impl<V: PickValue, R: 'static> Screen<V, R> {
             quick_select: self.quick_select,
             load_required: self.load_required,
             text_input: self.text_input,
+            submit_on_right: self.submit_on_right,
             input_label: self.input_label,
             input_hint: self.input_hint,
             back_clears_input: self.back_clears_input,
@@ -243,6 +252,16 @@ impl<V: PickValue, R: 'static> Screen<V, R> {
         self
     }
 
+    pub(crate) fn title_with(mut self, title: impl Fn() -> String + 'static) -> Self {
+        self.title_source = Some(Box::new(title));
+        self
+    }
+
+    pub(crate) fn submit_on_right(mut self, on: bool) -> Self {
+        self.submit_on_right = on;
+        self
+    }
+
     pub fn input_hint(mut self, hint: impl Into<String>) -> Self {
         self.input_hint = hint.into();
         self
@@ -260,6 +279,13 @@ impl<V: PickValue, R: 'static> Screen<V, R> {
 
     pub fn on_settled(mut self, f: impl Fn() -> Option<Next<V, R>> + 'static) -> Self {
         self.on_settled = Some(Box::new(f));
+        self
+    }
+
+    /// Approval continuations must not complete after Back removed their page.
+    /// Repository invalidation intentionally retains its global callback policy.
+    pub(crate) fn settle_active_only(mut self) -> Self {
+        self.settle_active_only = true;
         self
     }
 
@@ -289,7 +315,7 @@ fn map_options<V, W>(options: Vec<Opt<V>>, wrap: &Rc<dyn Fn(V) -> W>) -> Vec<Opt
         })
         .collect()
 }
-fn map_next<V: PickValue, R: 'static, W: PickValue, S: 'static>(
+pub(crate) fn map_next<V: PickValue, R: 'static, W: PickValue, S: 'static>(
     next: Next<V, R>,
     wrap: Rc<dyn Fn(V) -> W>,
     unwrap: Rc<dyn Fn(W) -> V>,
@@ -299,6 +325,22 @@ fn map_next<V: PickValue, R: 'static, W: PickValue, S: 'static>(
         Next::Screen(s) => Next::Screen(s.remap(wrap, unwrap, done)),
         Next::Notice(m) => Next::Notice(m),
         Next::Done(r) => done(r),
+    }
+}
+
+/// Append a flow without ending its loop or discarding its navigation stack.
+pub(crate) fn then<V: PickValue, R: 'static, S: 'static>(
+    step: Next<V, R>,
+    done: impl Fn(R) -> Next<V, S> + 'static,
+) -> Next<V, S> {
+    map_next(step, Rc::new(|v| v), Rc::new(|v| v), Rc::new(done))
+}
+
+pub(crate) fn resolve<V: PickValue, R: 'static>(ctx: &Ctx, step: Next<V, R>) -> Result<R> {
+    match step {
+        Next::Screen(screen) => pick(ctx, screen),
+        Next::Notice(message) => Err(Error::msg(message)),
+        Next::Done(done) => Ok(done),
     }
 }
 
@@ -405,9 +447,11 @@ pub enum Style {
 /// One logical line of styled text.
 pub type Line = Vec<(Style, String)>;
 
-/// What to draw: header and footer are cut at the width, the body wraps.
+/// Body lines wrap. Long typed-prompt titles also wrap so paid quotes cannot
+/// lose their price/deadline on narrow terminals; other header lines are cut.
 pub struct Frame {
     pub header: Vec<Line>,
+    pub wrap_title: bool,
     pub body: Vec<Line>,
     /// The body line holding the selection, kept visible when scrolling.
     pub cursor_line: Option<usize>,
@@ -495,6 +539,12 @@ impl<V: PickValue, R: 'static> Core<V, R> {
     }
 
     fn settled(core: &Rc<RefCell<Core<V, R>>>, screen: &Rc<Screen<V, R>>) {
+        if screen.settle_active_only {
+            let state = core.borrow();
+            if state.finished() || !Rc::ptr_eq(&state.view().screen, screen) {
+                return;
+            }
+        }
         let Some(on_settled) = &screen.on_settled else {
             return;
         };
@@ -553,7 +603,8 @@ impl<V: PickValue, R: 'static> Core<V, R> {
         match key {
             Key::Up => self.move_cursor(-1),
             Key::Down => self.move_cursor(1),
-            Key::Right | Key::Enter => self.enter(),
+            Key::Right if self.view().screen.submit_on_right => self.enter(),
+            Key::Enter => self.enter(),
             Key::Left => {
                 if self.view().selection_notice.is_some() {
                     self.view_mut().selection_notice = None;
@@ -582,13 +633,20 @@ impl<V: PickValue, R: 'static> Core<V, R> {
                     self.view_mut().set_filter(filter);
                 }
             }
-            Key::Char('`') | Key::Escape | Key::Ignored | Key::F2 => {}
+            Key::Right | Key::Char('`') | Key::Escape | Key::Ignored | Key::F2 => {}
             Key::Char(c) => self.type_char(c),
         }
     }
 
     fn enter(&mut self) {
         let view = self.view();
+        if view.load_failed_required() {
+            self.open(true);
+            return;
+        }
+        if !view.ready() {
+            return;
+        }
         if view.screen.text_input {
             if let Some(validate) = &view.screen.validate {
                 if let Err(error) = validate(&view.filter) {
@@ -598,10 +656,6 @@ impl<V: PickValue, R: 'static> Core<V, R> {
             }
             let text = view.filter.clone();
             self.choose(V::from_text(text));
-            return;
-        }
-        if view.load_failed_required() {
-            self.open(true);
             return;
         }
         let entries = view.entries();
@@ -634,7 +688,12 @@ impl<V: PickValue, R: 'static> Core<V, R> {
     }
 
     pub fn title(&self) -> String {
-        self.view().screen.title.clone()
+        let screen = &self.view().screen;
+        screen
+            .title_source
+            .as_ref()
+            .map(|f| f())
+            .unwrap_or_else(|| screen.title.clone())
     }
 
     pub fn filter(&self) -> String {
@@ -648,8 +707,8 @@ impl<V: PickValue, R: 'static> Core<V, R> {
 
     pub fn header(&self) -> Vec<Line> {
         let view = self.view();
-        let mut header = vec![vec![(Style::Title, view.screen.title.clone())]];
-        if !view.filter.is_empty() {
+        let mut header = vec![vec![(Style::Title, self.title())]];
+        if (view.screen.text_input && view.ready()) || !view.filter.is_empty() {
             let prefix = if view.screen.text_input {
                 &view.screen.input_label
             } else {
@@ -673,13 +732,6 @@ impl<V: PickValue, R: 'static> Core<V, R> {
         if let Some(message) = &view.selection_notice {
             return (one(Style::Error, message.clone()), None);
         }
-        if screen.text_input {
-            return if view.error.is_empty() {
-                (one(Style::Note, format!("  {}", screen.input_hint)), None)
-            } else {
-                (one(Style::Error, view.error.clone()), None)
-            };
-        }
         if view.load_failed_required() {
             let error = load.map(|l| l.error()).unwrap_or_default();
             let lines: Vec<String> = crate::pyfmt::splitlines(&error)
@@ -690,6 +742,13 @@ impl<V: PickValue, R: 'static> Core<V, R> {
         }
         if !view.ready() {
             return (one(Style::Note, format!("  {}", screen.loading)), None);
+        }
+        if screen.text_input {
+            return if view.error.is_empty() {
+                (one(Style::Note, format!("  {}", screen.input_hint)), None)
+            } else {
+                (one(Style::Error, view.error.clone()), None)
+            };
         }
         let entries = view.entries();
         if entries.is_empty() {
@@ -761,10 +820,23 @@ impl<V: PickValue, R: 'static> Core<V, R> {
         }
         let screen = &view.screen;
         let load = screen.load.as_deref();
-        let mut hints: Vec<String> = if screen.text_input {
-            vec!["Enter/\u{2192} continue".into(), "Backspace edit".into()]
-        } else if view.load_failed_required() {
-            vec!["\u{2192} retry".into()]
+        let mut hints: Vec<String> = if view.load_failed_required() {
+            vec![if screen.submit_on_right {
+                "\u{2192} retry"
+            } else {
+                "Enter retry"
+            }
+            .into()]
+        } else if screen.text_input {
+            vec![
+                if screen.submit_on_right {
+                    "Enter/\u{2192} continue"
+                } else {
+                    "Enter confirm"
+                }
+                .into(),
+                "Backspace edit".into(),
+            ]
         } else {
             vec![
                 "\u{2191}/\u{2193} move".to_string(),
@@ -808,6 +880,7 @@ impl<V: PickValue, R: 'static> Core<V, R> {
         let (body, cursor_line) = self.body();
         Frame {
             header: self.header(),
+            wrap_title: self.view().screen.text_input,
             body,
             cursor_line,
             footer: self.footer(),

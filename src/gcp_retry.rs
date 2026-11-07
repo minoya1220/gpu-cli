@@ -9,7 +9,7 @@ use crate::{
     pyjson::Dict,
 };
 use std::collections::BTreeSet;
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Choice {
     pub zone: String,
     pub approved: bool,

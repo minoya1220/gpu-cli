@@ -69,22 +69,16 @@ pub fn known_types(ctx: &Ctx, project: &str, zone: Option<&str>) -> Vec<String> 
     types.dedup();
     types
 }
-pub fn region_coordinates(region: &str) -> Option<(f64, f64)> {
-    let r = bundled()
-        .get("regions")?
-        .as_list()?
-        .iter()
-        .filter_map(Value::as_dict)
-        .find(|d| gcp::text(d, "name") == Some(region))?;
-    let lat = crate::pyfmt::py_float(r.get("latitude")?).ok()?;
-    let lon = crate::pyfmt::py_float(r.get("longitude")?).ok()?;
-    (lat.is_finite() && lon.is_finite() && lat.abs() <= 90.0 && lon.abs() <= 180.0)
-        .then_some((lat, lon))
-}
 pub fn skus(ctx: &Ctx) -> Vec<Dict> {
     let mut skus = rows(bundled(), "skus")
         .into_iter()
-        .filter_map(|s| Some((gcp::text(&s, "id")?.to_string(), s)))
+        .filter_map(|mut s| {
+            let id = gcp::text(&s, "id")?.to_string();
+            // Only bundled rows omit generation; runtime cache values remain authoritative.
+            let generation = sku_generation(&s).map(Value::str).unwrap_or(Value::Null);
+            s.insert("generation", generation);
+            Some((id, s))
+        })
         .collect::<BTreeMap<_, _>>();
     if let Some(data) = gcp_http::read_cache(ctx, "tpu-sku-facts.json", i64::MAX) {
         for sku in rows(&data, "skus") {
@@ -116,6 +110,14 @@ pub fn generation(text: &str) -> Option<&'static str> {
     } else {
         None
     }
+}
+pub fn sku_generation(meta: &Dict) -> Option<&'static str> {
+    let desc = gcp::text(meta, "description")?;
+    let category = meta.get("category")?.as_dict()?;
+    generation(&format!(
+        "{desc} {}",
+        gcp::text(category, "resourceGroup").unwrap_or("")
+    ))
 }
 pub fn capacity(meta: &Dict) -> Option<bool> {
     let desc = gcp::text(meta, "description")?.to_ascii_lowercase();
@@ -169,12 +171,7 @@ fn sku_fact(service: &str, sku: &Dict) -> Option<Dict> {
     );
     d.insert(
         "generation",
-        generation(&format!(
-            "{desc} {}",
-            gcp::text(category, "resourceGroup").unwrap_or("")
-        ))
-        .map(Value::str)
-        .unwrap_or(Value::Null),
+        sku_generation(sku).map(Value::str).unwrap_or(Value::Null),
     );
     Some(d)
 }
@@ -247,6 +244,30 @@ pub fn refresh_skus(ctx: &Ctx, project: &str) -> Result<()> {
 mod tests {
     use super::*;
     use crate::testing::*;
+    #[test]
+    fn bundled_generation_is_derived_but_cached_generation_is_preserved() {
+        let env = TestEnv::new();
+        let ctx = env.ctx().build();
+        let bundled = skus(&ctx);
+        for sku in &bundled {
+            assert_eq!(
+                sku.get("generation"),
+                Some(&sku_generation(sku).map(Value::str).unwrap_or(Value::Null))
+            );
+        }
+        let mut cached = bundled[0].clone();
+        cached.insert("generation", Value::str("hand-edited-generation"));
+        let id = gcp::text(&cached, "id").unwrap().to_string();
+        let mut data = Dict::new();
+        data.insert("skus", Value::List(vec![Value::Dict(cached.clone())]));
+        gcp_http::write_cache(&ctx, "tpu-sku-facts.json", data);
+        assert_eq!(
+            skus(&ctx)
+                .into_iter()
+                .find(|s| gcp::text(s, "id") == Some(&id)),
+            Some(cached)
+        );
+    }
     #[test]
     fn generated_snapshot_has_facts_not_prices_and_cache_overrides_known_zones() {
         let text = include_str!("data/tpu_facts.json");

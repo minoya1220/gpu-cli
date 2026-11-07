@@ -5,8 +5,17 @@ use crate::ctx::Env;
 pub fn region(zone: &str) -> Option<&str> {
     zone.rsplit_once('-').map(|(region, _)| region)
 }
-fn region_coordinates(region: &str) -> Option<(f64, f64)> {
-    crate::gcp_facts::region_coordinates(region)
+const REGIONS: &str = include_str!("data/gcp_region_locations.csv");
+pub(crate) fn region_coordinates(region: &str) -> Option<(f64, f64)> {
+    let row = REGIONS
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .skip(1)
+        .find(|line| line.split(',').next() == Some(region))?;
+    let mut fields = row.split(',').skip(1).map(str::parse::<f64>);
+    let (lat, lon) = (fields.next()?.ok()?, fields.next()?.ok()?);
+    (lat.is_finite() && lon.is_finite() && lat.abs() <= 90.0 && lon.abs() <= 180.0)
+        .then_some((lat, lon))
 }
 // Public-domain IANA tzdb data, embedded so the mapping does not depend on an
 // OS-specific zoneinfo installation. Source: https://data.iana.org/time-zones/tzdb/zone1970.tab

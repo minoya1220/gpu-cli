@@ -318,8 +318,9 @@ Vast and TPU prices load **automatically in background Jobs**. Choices accept
 input immediately; `…` becomes a price or `price unavailable`. Ctrl-R retries
 failures; revisiting a screen reuses its Job/cache. There is no F2 step.
 
-`src/data/tpu_facts.json` bundles **no dollar amounts**: known types/generations,
-zone/type mappings, regions/coordinates, catalog service IDs and SKU metadata.
+`src/data/tpu_facts.json` bundles **no dollar amounts**: zone/type mappings and
+SKU metadata for on-demand/Spot usage. Generations are derived from SKU metadata;
+reviewed region coordinates live in `src/data/gcp_region_locations.csv`.
 Live caches extend types and override known zones. Project catalogs refresh
 in the background after setup (15-minute cache); SKU metadata lasts 30 days.
 A stale snapshot can never bypass live paid-launch preflight.
@@ -345,8 +346,8 @@ To regenerate facts (read-only; requires completed setup and Python 3):
 python3 tools/update_tpu_facts.py --project PROJECT
 ```
 
-The script queries TPU/Billing metadata, strips prices/account details, and uses
-`tools/gcp_region_locations.csv` for reviewed region coordinates. Offline input
+The script queries TPU/Billing metadata, strips prices/account details and unused
+fields, and writes one compact record per line. Offline input
 is supported with `--input FILE`. It uses v1 location discovery (matching gcloud;
 v2 omits the v4-only zone), then v2 accelerator types. Review the diff before
 committing. A refresh failure leaves the existing snapshot usable.

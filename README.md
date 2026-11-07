@@ -30,10 +30,10 @@ gpu up --expire 2h               # destroy after 2 hours, including boot time
 
 In the terminal picker:
 
-- Type to filter, use ↑/↓ to move, and → to select. Enter and backtick do nothing on lists, including filtered lists.
+- Type to filter, use ↑/↓ to move, and → or Enter to select. Backtick does nothing.
 - Press ← to clear the filter, then go back. On the first screen, press twice to quit. Ctrl-C or Ctrl-D quits from any screen; Esc does nothing.
 - The GPU screen shows at most **three Recent** rows, GPU categories, and **TPU (Google Cloud)**. Type `tpu` to find the TPU category, `v5e` for a generation, or `v6e-1` for a full TPU type. TPU discovery is visible even before Google Cloud is configured. Before Google Cloud setup, selecting it keeps a notice pointing to `gpu setup` on screen, including the exact config file path; no Google Cloud command runs and no TPU is created. Press ← to return to the GPU choices, or Ctrl-C to quit.
-- GPU/TPU price and TPU catalog reads start when the launch picker opens, while you choose Repository/Mode, without blocking input. TPU rows need `gpu setup`; cached estimates show their age. Choose a TPU generation and size, then its area and priced zone. Digits filter names; on short, unfiltered lists, 1-9 select directly.
+- GPU/TPU price and TPU catalog reads start when the launch picker opens, while you choose Repository/Mode, without blocking input. TPU rows need `gpu setup`; cached estimates show their age. Choose a TPU generation, size and priced capacity, then its area and priced zone. Digits filter names; on short, unfiltered lists, 1-9 select directly.
 - On the Repository screen, **1–7** select the first seven repos, **8** opens **All repositories...** (when there are more than seven), **9** opens **Clone from URL...**, and **0** selects **No repository** at the bottom. Type to filter across all repos, including those not initially shown.
 - Choose **No repository** or **Clone from URL...** without waiting for GitHub. Paste a URL or `owner/name`, then Enter. Backspace edits; arrows select or go back, not move the text cursor.
 - Press → to retry a failed offer load; Ctrl-R retries repositories. Enter still submits the **Clone from URL** repository text box and TPU destruction-duration text box; line-based prompts/confirmations also keep Enter. With piped input, the CLI uses numbered line prompts instead.

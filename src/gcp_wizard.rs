@@ -98,35 +98,22 @@ pub(crate) struct Selection {
 #[cfg(test)]
 pub(crate) fn next(ctx: Ctx, settings: Settings, picks: Selection) -> Next<String, Selection> {
     match crate::config::load_config(&ctx.env) {
-        Ok(cfg) => next_with(ctx, settings, cfg, picks),
+        Ok(cfg) => next_with(ctx, settings, cfg, picks, None),
         Err(e) => Next::Notice(e.text().into()),
     }
 }
-fn next_with(ctx: Ctx, settings: Settings, cfg: Dict, picks: Selection) -> Next<String, Selection> {
+fn next_with(
+    ctx: Ctx,
+    settings: Settings,
+    cfg: Dict,
+    picks: Selection,
+    data: Option<Types>,
+) -> Next<String, Selection> {
     if picks.tpu.is_none() {
-        return Next::Screen(type_screen(ctx, settings, cfg, picks, None));
+        return Next::Screen(type_screen(ctx, settings, cfg, picks, data));
     }
     if picks.spot.is_none() {
-        return Next::Screen(Screen::new(
-            "TPU capacity",
-            || {
-                vec![
-                    Opt::new("on-demand".to_string(), "On-demand"),
-                    Opt::new("spot".to_string(), "Spot (may be interrupted)"),
-                ]
-            },
-            move |value| {
-                next_with(
-                    ctx.clone(),
-                    settings.clone(),
-                    cfg.clone(),
-                    Selection {
-                        spot: Some(value == "spot"),
-                        ..picks.clone()
-                    },
-                )
-            },
-        ));
+        return Next::Screen(capacity_screen(ctx, settings, cfg, picks, data));
     }
     if picks.zone.is_none() {
         let tpu = picks.tpu.clone().expect("type chosen first");
@@ -151,6 +138,7 @@ fn next_with(ctx: Ctx, settings: Settings, cfg: Dict, picks: Selection) -> Next<
                             zone: Some(zone),
                             ..picks.clone()
                         },
+                        None,
                     )
                 }
             },
@@ -174,6 +162,7 @@ fn next_with(ctx: Ctx, settings: Settings, cfg: Dict, picks: Selection) -> Next<
                             expiry_at: Some(at),
                             ..picks.clone()
                         },
+                        None,
                     ),
                     Err(message) => Next::Notice(message),
                 },
@@ -191,6 +180,82 @@ fn next_with(ctx: Ctx, settings: Settings, cfg: Dict, picks: Selection) -> Next<
         );
     }
     Next::Done(picks)
+}
+
+pub(crate) fn capacity_screen(
+    ctx: Ctx,
+    settings: Settings,
+    cfg: Dict,
+    picks: Selection,
+    data: Option<Types>,
+) -> Screen<String, Selection> {
+    // Carry the size screen's in-flight price job forward instead of starting
+    // another read. Explicit --tpu launches enter here without that screen.
+    let (rates, cached) = match data {
+        Some(data) => (data.rates, data.cached),
+        None => (
+            crate::gcp_prices::job_at(&ctx, &cfg, picks.zone.as_deref()),
+            picks
+                .zone
+                .as_deref()
+                .and_then(|z| crate::gcp_prices::cached(&ctx, &cfg, z))
+                .or_else(|| crate::gcp_prices::cached_default(&ctx, &cfg)),
+        ),
+    };
+    let rows = rates.clone();
+    let tpu = picks.tpu.clone().expect("type chosen first");
+    let context = rates.clone();
+    let context_cache = cached.clone();
+    Screen::new(
+        "TPU capacity",
+        move || {
+            let price = rows.result().or_else(|| cached.clone());
+            let cells = [
+                [
+                    "On-demand".into(),
+                    crate::gcp_prices::money(price.as_ref().and_then(|p| p.hourly(&tpu, false))),
+                    String::new(),
+                ],
+                [
+                    "Spot".into(),
+                    crate::gcp_prices::money(price.as_ref().and_then(|p| p.hourly(&tpu, true))),
+                    "(may be interrupted)".into(),
+                ],
+            ];
+            crate::offers::aligned_rows(
+                &cells,
+                [
+                    crate::offers::Column::Left,
+                    crate::offers::Column::Left,
+                    crate::offers::Column::Plain,
+                ],
+            )
+            .into_iter()
+            .zip(["on-demand", "spot"])
+            .map(|(label, value)| Opt::new(value.into(), label.trim_end().to_string()))
+            .collect()
+        },
+        move |value| {
+            next_with(
+                ctx.clone(),
+                settings.clone(),
+                cfg.clone(),
+                Selection {
+                    spot: Some(value == "spot"),
+                    ..picks.clone()
+                },
+                None,
+            )
+        },
+    )
+    .prices(rates)
+    .selection_note(move |_| {
+        context
+            .result()
+            .or_else(|| context_cache.clone())
+            .map(|p| format!("Estimates: {}  USD list {}", p.region, p.cache_note()))
+            .unwrap_or_default()
+    })
 }
 
 #[derive(Clone)]
@@ -326,6 +391,7 @@ fn type_screen(
                         tpu: Some(value),
                         ..picks.clone()
                     },
+                    Some(follow.clone()),
                 )
             } else {
                 Next::Screen(type_screen(
@@ -343,7 +409,6 @@ fn type_screen(
     )
     .background(data.catalog)
     .prices(data.rates)
-    .quick_select(false)
     .highlight(move || {
         let names = highlight.names();
         let values = selected_group
@@ -534,17 +599,7 @@ pub(crate) fn transition(
                 finish.clone(),
             )
         };
-        let step = if selection.tpu.is_none() {
-            Next::Screen(type_screen(
-                ctx.clone(),
-                settings,
-                cfg.clone(),
-                selection,
-                Some(data),
-            ))
-        } else {
-            next_with(ctx.clone(), settings, cfg.clone(), selection)
-        };
+        let step = next_with(ctx.clone(), settings, cfg.clone(), selection, Some(data));
         match step {
             Next::Screen(s) => Next::Screen(map(s)),
             Next::Notice(m) => Next::Notice(m),
@@ -601,7 +656,7 @@ pub fn choose(
         },
     };
     let selected = if ctx.interactive() {
-        match next_with(ctx.clone(), settings.clone(), cfg.clone(), selected) {
+        match next_with(ctx.clone(), settings.clone(), cfg.clone(), selected, None) {
             Next::Screen(first) => pick(ctx, first)?,
             Next::Notice(message) => return Err(Error::msg(message)),
             Next::Done(done) => done,

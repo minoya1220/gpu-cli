@@ -231,25 +231,23 @@ fn test_going_back_restores_the_previous_screen_as_it_was_left() {
 }
 
 #[test]
-fn test_list_enter_and_backtick_are_ignored_and_footer_orders_back_before_digits() {
+fn test_list_enter_selects_backtick_is_ignored_and_footer_orders_back_before_digits() {
     let result = drive(chain(), |keys| {
         assert!(!keys.footer().contains("Enter") && !keys.footer().contains('`'));
-        keys.press(ENTER);
         keys.press("`");
         keys.press(DOWN);
         keys.wait(|s| {
             s.title == "First" && s.body.iter().any(|l| l.starts_with('›') && l.contains("b"))
         });
         assert_eq!(keys.filter(), "");
-        keys.press_until(RIGHT, on("Second"));
+        keys.press_until(ENTER, on("Second"));
         assert_eq!(keys.footer(), "↑/↓ move  → select  ← back  1-9 select");
         keys.type_text("d");
-        keys.press(ENTER);
         keys.press("`");
         keys.press(UP);
         keys.wait(|s| s.title == "Second" && s.filter == "d");
-        keys.press_until(RIGHT, on("Third"));
-        keys.press(RIGHT);
+        keys.press_until(ENTER, on("Third"));
+        keys.press(ENTER);
     });
     assert_eq!(result, three("b", "d", "e"));
 }

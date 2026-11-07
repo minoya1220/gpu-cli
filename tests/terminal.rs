@@ -804,6 +804,122 @@ printf 'test-token\n'
 }
 
 #[test]
+fn test_tpu_size_and_capacity_prices_numbers_and_enter_in_real_terminal() {
+    for size_key in [ENTER, "2"] {
+        let sandbox = Sandbox::new();
+        sandbox.gcp_lifecycle();
+        let curl = std::fs::read_to_string(sandbox.bin.join("curl")).unwrap();
+        sandbox.stub(
+            "curl",
+            &curl.replace(
+                r#"{"type":"v6e-1"}"#,
+                r#"{"type":"v6e-1"},{"type":"v6e-4"}"#,
+            ),
+        );
+        let history = sandbox.history_path();
+        std::fs::create_dir_all(history.parent().unwrap()).unwrap();
+        std::fs::write(&history, r#"{"gcp_zone:test-project":["us-east5-b"]}"#).unwrap();
+        let mut term = Terminal::start(
+            &sandbox,
+            &[
+                "up",
+                "--provider",
+                "gcp",
+                "--tpu",
+                "v6e",
+                "--no-repo",
+                "--expire",
+                "2h",
+                "--dry-run",
+            ],
+        );
+        term.wait(on("v6e size"));
+        term.wait(shows("Spot $3.000/hr"));
+        assert!(
+            term.last_line().contains("1-9 select"),
+            "{}",
+            term.last_line()
+        );
+        assert!(!term.last_line().contains("Enter") && !term.last_line().contains('`'));
+        if size_key == ENTER {
+            term.press(DOWN);
+        }
+        term.press_until(size_key, on("TPU capacity"));
+        term.wait(shows("On-demand  $11.000/hr"));
+        term.wait(shows("Spot       $3.000/hr"));
+        assert_aligned(&term, "$");
+        assert!(shows("(may be interrupted)")(&term));
+        assert_eq!(term.last_line(), "↑/↓ move  → select  ← back  1-9 select");
+        term.press("`");
+        term.press_until(DOWN, |t| {
+            t.lines()
+                .iter()
+                .any(|l| l.starts_with('›') && l.contains("Spot"))
+        });
+        term.press_until(ENTER, on("TPU zone"));
+        term.press_until("us-east5-b", shows("Filter: us-east5-b"));
+        term.press(ENTER);
+        assert_eq!(term.exit_status(), 0, "{}", term.output_text());
+        assert!(term.output_text().contains("--accelerator-type=v6e-4"));
+        assert!(term.output_text().contains("--spot"));
+        assert!(!sandbox
+            .calls()
+            .iter()
+            .any(|a| a.iter().any(|v| v == "create" || v == "create-http-task")));
+    }
+}
+
+#[test]
+fn test_tpu_capacity_keeps_moving_while_prices_load_then_redraws_without_keys() {
+    let sandbox = Sandbox::new();
+    sandbox.gcp_lifecycle();
+    let hold = sandbox.root.join("hold-prices");
+    std::fs::write(&hold, "").unwrap();
+    let curl = std::fs::read_to_string(sandbox.bin.join("curl")).unwrap();
+    sandbox.stub(
+        "curl",
+        &curl.replace(
+            "    status=200",
+            "    while [ -f \"$root/hold-prices\" ]; do sleep 0.05; done\n    status=200",
+        ),
+    );
+    let mut term = Terminal::start(
+        &sandbox,
+        &[
+            "up",
+            "--tpu",
+            "v6e-4",
+            "--zone",
+            "us-east5-b",
+            "--no-repo",
+            "--expire",
+            "2h",
+            "--dry-run",
+        ],
+    );
+    term.wait(on("TPU capacity"));
+    assert!(shows("On-demand  -")(&term));
+    assert!(shows("Spot       -")(&term));
+    let latency = term.press_until(DOWN, |t| {
+        t.lines()
+            .iter()
+            .any(|l| l.starts_with('›') && l.contains("Spot"))
+    });
+    assert!(
+        latency < Duration::from_millis(250),
+        "blocked on prices: {latency:?}"
+    );
+    std::fs::remove_file(hold).unwrap();
+    term.wait(shows("On-demand  $11.000/hr"));
+    term.wait(shows("Spot       $3.000/hr"));
+    assert_aligned(&term, "$");
+    term.press(ENTER);
+    assert_eq!(term.exit_status(), 0, "{}", term.output_text());
+    assert!(term.output_text().contains("--accelerator-type=v6e-4"));
+    assert!(term.output_text().contains("--spot"));
+}
+
+#[test]
 fn test_tpu_wait_timer_counts_in_place_and_clears_for_retry_and_results() {
     let sandbox = Sandbox::new();
     sandbox.gcp_lifecycle();
@@ -1048,12 +1164,11 @@ fn test_tpu_post_launch_editor_then_edit_and_cursor_use_instance_picker() {
 }
 
 #[test]
-fn test_list_enter_and_backtick_do_nothing_in_real_terminal() {
+fn test_list_enter_selects_and_backtick_does_nothing_in_real_terminal() {
     let sandbox = Sandbox::new();
     let mut term = Terminal::start(&sandbox, &["up", "--no-repo", "--dry-run"]);
     term.wait(on("Mode"));
     assert!(!term.last_line().contains("Enter") && !term.last_line().contains('`'));
-    term.press(ENTER);
     term.press("`");
     term.press_until(DOWN, |t| {
         t.lines()
@@ -1062,13 +1177,12 @@ fn test_list_enter_and_backtick_do_nothing_in_real_terminal() {
     });
     assert_eq!(term.title(), "Mode");
     assert!(!shows("Filter:")(&term));
-    term.press_until(RIGHT, on("GPU"));
+    term.press_until(ENTER, on("GPU"));
     term.press_until("t4", shows("Filter: t4"));
-    term.press(ENTER);
     term.press("`");
     term.press(UP);
     term.wait(|t| t.title() == "GPU" && t.line(1) == "Filter: t4");
-    term.press_until(RIGHT, on("Offer: Tesla T4"));
+    term.press_until(ENTER, on("Offer: Tesla T4"));
     term.wait(shows("id=100"));
     assert_eq!(term.last_line(), "↑/↓ move  → select  ← back  1-9 select");
     term.press_until(LEFT, on("GPU"));

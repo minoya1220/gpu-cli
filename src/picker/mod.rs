@@ -553,8 +553,7 @@ impl<V: PickValue, R: 'static> Core<V, R> {
         match key {
             Key::Up => self.move_cursor(-1),
             Key::Down => self.move_cursor(1),
-            Key::Right => self.enter(),
-            Key::Enter if self.view().screen.text_input => self.enter(),
+            Key::Right | Key::Enter => self.enter(),
             Key::Left => {
                 if self.view().selection_notice.is_some() {
                     self.view_mut().selection_notice = None;
@@ -583,7 +582,7 @@ impl<V: PickValue, R: 'static> Core<V, R> {
                     self.view_mut().set_filter(filter);
                 }
             }
-            Key::Char('`') | Key::Enter | Key::Escape | Key::Ignored | Key::F2 => {}
+            Key::Char('`') | Key::Escape | Key::Ignored | Key::F2 => {}
             Key::Char(c) => self.type_char(c),
         }
     }

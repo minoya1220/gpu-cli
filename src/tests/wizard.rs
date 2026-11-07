@@ -116,7 +116,7 @@ pub fn run(
 }
 
 #[test]
-fn metadata_jobs_are_running_on_repository_and_reused_through_mode_gpu_and_tpu_size() {
+fn metadata_jobs_are_running_on_repository_and_reused_through_tpu_capacity() {
     use crate::picker::JobState;
     use crate::testing::{dict, FakeRunner};
     for (last, preset, warm, mode_key) in [
@@ -223,6 +223,17 @@ fn metadata_jobs_are_running_on_repository_and_reused_through_mode_gpu_and_tpu_s
                     .iter()
                     .any(|l| l.contains("$2.750/hr") && l.contains("Spot $0.750/hr"))
             });
+            keys.press_until(ENTER, on("TPU capacity"));
+            keys.wait(|s| {
+                s.labels
+                    == [
+                        "On-demand  $2.750/hr",
+                        "Spot       $0.750/hr  (may be interrupted)",
+                    ]
+            });
+            assert_eq!(keys.footer(), "↑/↓ move  → select  ← back  1-9 select");
+            keys.press_until(BACK, on("v6e size"));
+            keys.press_until(ENTER, on("TPU capacity"));
             assert_eq!(watched.stats_calls(), [warm]);
             assert_eq!(counted_prices.load(Ordering::SeqCst), 1);
             assert_eq!(counted_catalog.load(Ordering::SeqCst), 1);
@@ -231,7 +242,7 @@ fn metadata_jobs_are_running_on_repository_and_reused_through_mode_gpu_and_tpu_s
         assert_eq!(result, Outcome::Cancelled(130));
         assert!(
             runner.calls().is_empty(),
-            "generation/size must reuse the original Jobs, not create new cloud requests"
+            "generation/size/capacity must reuse the original Jobs, not create new cloud requests"
         );
         assert_eq!(search.stats_calls(), [warm]);
         assert_eq!(price_calls.load(Ordering::SeqCst), 1);

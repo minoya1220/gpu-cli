@@ -794,6 +794,9 @@ fn expiry_entry_has_duration_help_validation_and_back_to_capacity() {
         panic!("missing capacity screen")
     };
     let result = drive(first, |keys| {
+        // This direct capacity entry has no prefetched job. Wait for its one
+        // price job to finish so the call-count assertion is deterministic.
+        keys.wait(|s| s.footer.contains("Ctrl-R retry"));
         keys.press_until(RIGHT, on("Destroy after (e.g. 2h)"));
         assert!(keys
             .snapshot()
@@ -822,7 +825,73 @@ fn expiry_entry_has_duration_help_validation_and_back_to_capacity() {
         selection.expiry_at.unwrap().to_string(),
         "2026-11-04T00:00:00Z"
     );
-    assert!(runner.calls().is_empty());
+    // Exactly one read-only job, not another fetch when returning to capacity.
+    // The fixture allows token auth but denies the two Billing reads.
+    let calls = runner.calls();
+    assert_eq!(calls.len(), 3, "actual calls: {:?}", runner.argvs());
+    assert_eq!(
+        strs(&calls[0].argv),
+        [
+            "gcloud",
+            "auth",
+            "print-access-token",
+            "--project=test-project",
+            "--quiet"
+        ]
+    );
+    let curl = [
+        "curl",
+        "--disable",
+        "--silent",
+        "--show-error",
+        "--noproxy",
+        "*",
+        "--proto",
+        "=https",
+        "--max-time",
+        "15",
+    ];
+    assert_eq!(
+        strs(&calls[1].argv),
+        [
+            curl.as_slice(),
+            &[
+                "--config",
+                "-",
+                "--write-out",
+                "\n%{http_code}",
+                "https://cloudbilling.googleapis.com/v1/services?pageSize=5000&pageToken="
+            ]
+        ]
+        .concat()
+    );
+    assert_eq!(
+        strs(&calls[2].argv),
+        [
+            curl.as_slice(),
+            &[
+                "--parallel",
+                "--parallel-max",
+                "8",
+                "--config",
+                "-",
+                "--write-out",
+                "%{filename_effective}\t%{http_code}\t%{time_total}\n"
+            ]
+        ]
+        .concat()
+    );
+    let crate::process::Input::Text(config) = &calls[2].stdin else {
+        panic!("missing batch price URLs")
+    };
+    let urls = config
+        .lines()
+        .filter_map(|l| l.strip_prefix("url = \""))
+        .collect::<Vec<_>>();
+    assert!(!urls.is_empty());
+    assert!(urls.iter().all(|url| url
+        .starts_with("https://cloudbilling.googleapis.com/v1beta/skus/")
+        && url.ends_with("/price?currencyCode=USD\"")));
 }
 
 #[test]
@@ -934,6 +1003,130 @@ fn ambiguous_create_keeps_timer_and_next_command_reconciles_a_verified_orphan() 
     ctx.clock.sleep(61.0);
     assert_eq!(main(&ctx, &["ls", "--provider", "gcp"]), 0, "{}", err(&ctx));
     assert!(state.lock().unwrap().tasks.is_empty());
+}
+
+#[test]
+fn capacity_prices_reuse_the_size_job_without_blocking_input() {
+    use crate::picker::{testing::*, Job, Outcome};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let (_env, ctx, runner, _) = fixture();
+    let (release, held) = std::sync::mpsc::channel();
+    let held = Mutex::new(held);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let count = calls.clone();
+    let rates = Job::new(move || {
+        count.fetch_add(1, Ordering::SeqCst);
+        held.lock().unwrap().recv().unwrap();
+        Ok(Arc::new(super::gcp_prices::prices()))
+    });
+    let settings = crate::gcp::Settings::load(&dict(CONFIG)).unwrap();
+    let selected = crate::gcp_wizard::Selection {
+        tpu: Some("v6e-4".into()),
+        zone: Some("us-east5-b".into()),
+        expiry_at: Some("2026-11-03T02:00:00Z".parse().unwrap()),
+        ..Default::default()
+    };
+    let screen = crate::gcp_wizard::capacity_screen(
+        ctx,
+        settings,
+        dict(CONFIG),
+        selected.clone(),
+        Some(crate::gcp_wizard::Types {
+            initial: Vec::new(),
+            catalog: Job::new(|| panic!("capacity must not reload the type catalog")),
+            rates: rates.clone(),
+            cached: None,
+        }),
+    );
+    let result = drive(screen, move |keys| {
+        assert_eq!(
+            keys.labels(),
+            ["On-demand  -", "Spot       -  (may be interrupted)"]
+        );
+        keys.press_until(DOWN, |s| {
+            s.body
+                .iter()
+                .any(|l| l.starts_with('›') && l.contains("Spot"))
+        });
+        assert_eq!(keys.title(), "TPU capacity");
+        assert!(keys.footer().contains("1-9 select"));
+        release.send(()).unwrap();
+        keys.wait(|s| {
+            s.labels
+                == [
+                    "On-demand  $11.000/hr",
+                    "Spot       $3.000/hr   (may be interrupted)",
+                ]
+        });
+        assert!(!keys
+            .snapshot()
+            .body
+            .iter()
+            .any(|l| l.starts_with('›') && l.contains("On-demand")));
+        keys.press(ENTER);
+    });
+    assert_eq!(
+        result,
+        Outcome::Done(crate::gcp_wizard::Selection {
+            spot: Some(true),
+            ..selected
+        })
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(runner.calls().is_empty());
+}
+
+#[test]
+fn failed_or_missing_capacity_prices_still_allow_number_selection() {
+    use crate::picker::{testing::*, Job, Outcome};
+    for failed in [false, true] {
+        let (_env, ctx, runner, _) = fixture();
+        let settings = crate::gcp::Settings::load(&dict(CONFIG)).unwrap();
+        let selected = crate::gcp_wizard::Selection {
+            tpu: Some("v5e-1".into()),
+            zone: Some("us-east5-b".into()),
+            expiry_at: Some("2026-11-03T02:00:00Z".parse().unwrap()),
+            ..Default::default()
+        };
+        let screen = crate::gcp_wizard::capacity_screen(
+            ctx,
+            settings,
+            dict(CONFIG),
+            selected.clone(),
+            Some(crate::gcp_wizard::Types {
+                initial: Vec::new(),
+                catalog: Job::new(|| panic!("no catalog read expected")),
+                rates: Job::new(move || {
+                    if failed {
+                        Err("price unavailable".into())
+                    } else {
+                        Ok(Arc::new(super::gcp_prices::prices()))
+                    }
+                }),
+                cached: None,
+            }),
+        );
+        let result = drive(screen, move |keys| {
+            keys.wait(|s| {
+                if failed {
+                    s.footer.contains("Ctrl-R retry")
+                } else {
+                    s.labels[0].contains("$1.000/hr")
+                }
+            });
+            assert!(keys.labels()[1].contains("-"));
+            assert!(!keys.labels()[1].contains("/hr"));
+            keys.press("2");
+        });
+        assert_eq!(
+            result,
+            Outcome::Done(crate::gcp_wizard::Selection {
+                spot: Some(true),
+                ..selected
+            })
+        );
+        assert!(runner.calls().is_empty());
+    }
 }
 
 #[test]

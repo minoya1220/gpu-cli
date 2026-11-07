@@ -42,6 +42,7 @@ struct Terminal {
     parser: vt100::Parser,
     output: Vec<u8>,
     slave_path: std::path::PathBuf,
+    read_chunk_size: usize,
 }
 
 impl Terminal {
@@ -86,7 +87,16 @@ impl Terminal {
             ),
             output: Vec::new(),
             slave_path,
+            read_chunk_size: 65536,
         }
+    }
+
+    /// Exercise partial redraws deterministically instead of depending on the
+    /// scheduler to split a frame between its title, body and footer.
+    fn read_in_chunks(mut self, bytes: usize) -> Self {
+        assert!((1..=65536).contains(&bytes));
+        self.read_chunk_size = bytes;
+        self
     }
 
     fn lines(&self) -> Vec<String> {
@@ -110,7 +120,7 @@ impl Terminal {
         self.lines().last().cloned().unwrap_or_default()
     }
 
-    fn pump(&mut self, timeout: Duration) {
+    fn pump(&mut self, timeout: Duration) -> bool {
         let wait = Timespec {
             tv_sec: 0,
             tv_nsec: timeout.as_nanos() as _,
@@ -118,14 +128,20 @@ impl Terminal {
         let mut fds = [PollFd::new(&self.master, PollFlags::IN)];
         if poll(&mut fds, Some(&wait)).unwrap_or(0) > 0 {
             let mut buffer = [0u8; 65536];
-            match rustix::io::read(&self.master, &mut buffer) {
+            match rustix::io::read(&self.master, &mut buffer[..self.read_chunk_size]) {
                 Ok(n) if n > 0 => {
                     self.output.extend_from_slice(&buffer[..n]);
                     self.parser.process(&buffer[..n]);
+                    true
                 }
                 // The child closed the terminal.
-                _ => std::thread::sleep(timeout),
+                _ => {
+                    std::thread::sleep(timeout);
+                    false
+                }
             }
+        } else {
+            false
         }
     }
 
@@ -162,7 +178,8 @@ impl Terminal {
         let start = Instant::now();
         loop {
             if let Some(status) = self.child.try_wait().unwrap() {
-                self.pump(Duration::from_millis(50));
+                // A final redraw/result may span several PTY reads too.
+                while self.pump(Duration::from_millis(50)) {}
                 return status.code().unwrap_or(-1);
             }
             assert!(
@@ -194,6 +211,15 @@ fn on(title: &'static str) -> impl Fn(&Terminal) -> bool {
 
 fn shows(text: &'static str) -> impl Fn(&Terminal) -> bool {
     move |t| t.lines().iter().any(|line| line.contains(text))
+}
+
+/// A title or input row can arrive before the rest of its redraw. When
+/// asserting the whole page, wait for its expected footer as well.
+fn with_footer(
+    condition: impl Fn(&Terminal) -> bool,
+    footer: &'static str,
+) -> impl Fn(&Terminal) -> bool {
+    move |t| condition(t) && t.last_line() == footer
 }
 
 fn assert_aligned(term: &Terminal, token: &str) {
@@ -529,13 +555,15 @@ fn test_tpu_without_config_keeps_setup_visible_and_returns_to_gpu_choices() {
         let mut term = Terminal::start(&sandbox, &["up"]);
         term.wait(shows("gpu-kernels"));
         term.press_until(repo_key, on("Mode"));
-        term.press_until("1", on("GPU"));
+        term.press_until("1", |t| on("GPU")(t) && shows("needs gpu setup")(t));
         assert!(shows("needs gpu setup")(&term));
         // No types or prices are offered before setup, even with type filtering.
         term.press_until("v5e", shows("Filter: v5e"));
         term.wait(shows("No matches"));
         term.press_until(BACK, |t| !t.line(1).starts_with("Filter:"));
-        term.press_until(query, |t| t.line(1) == format!("Filter: {query}"));
+        term.press_until(query, |t| {
+            t.line(1) == format!("Filter: {query}") && shows(". TPU")(t)
+        });
         let rows = term
             .lines()
             .into_iter()
@@ -544,7 +572,13 @@ fn test_tpu_without_config_keeps_setup_visible_and_returns_to_gpu_choices() {
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert!(!rows[0].contains('$'));
         assert!(!rows[0].contains("TPU v"));
-        term.press_until(RIGHT, shows("Google Cloud is not set up"));
+        term.press_until(
+            RIGHT,
+            with_footer(
+                shows("Google Cloud is not set up"),
+                "← return to choices  Ctrl-C quit",
+            ),
+        );
         assert!(term.running(), "setup must remain visible until dismissed");
         let screen = term.lines().join("\n");
         assert!(screen.contains("No TPU created."), "{screen}");
@@ -561,7 +595,11 @@ fn test_tpu_without_config_keeps_setup_visible_and_returns_to_gpu_choices() {
             .iter()
             .all(|tool| ["gh", "vastai"].contains(&tool.as_str())));
         // Dismiss the notice without losing the previous filter/selection.
-        term.press_until(BACK, |t| t.title() == "GPU" && !shows("No TPU created.")(t));
+        term.press_until(BACK, |t| {
+            t.title() == "GPU"
+                && t.line(1) == format!("Filter: {query}")
+                && !shows("No TPU created.")(t)
+        });
         assert_eq!(term.line(1), format!("Filter: {query}"));
         term.press_until(BACK, |t| !t.line(1).starts_with("Filter:"));
         term.press("4090");
@@ -605,7 +643,7 @@ esac
         }
         let mut term = Terminal::start(&sandbox, &args);
         term.wait(on("Mode")); // no provider picker, even with GCP configured
-        term.press_until("1", on("GPU"));
+        term.press_until("1", |t| on("GPU")(t) && shows("TPU")(t));
         assert!(shows("TPU")(&term));
         term.press_until(query, |t| t.line(1) == format!("Filter: {query}"));
         if query == "tpu" {
@@ -621,7 +659,7 @@ esac
         term.press_until("us-central1-a", shows("Filter: us-central1-a"));
         term.press(RIGHT);
         if query == "v5e" {
-            term.wait(on("Destroy after (e.g. 2h)"));
+            term.wait(with_footer(on("Destroy after (e.g. 2h)"), "← back"));
             assert!(shows("30m, 2h or 1d")(&term));
             term.press("30s");
             term.press_until(RIGHT, shows("Choose 1 minute to 29 days"));
@@ -840,10 +878,11 @@ fn test_vast_confirmation_left_restores_offer_and_only_yes_enter_creates() {
             "--gpu",
             "RTX 4090",
         ],
-    );
+    )
+    .read_in_chunks(16);
     term.wait(on("Offer: RTX 4090"));
     term.wait(shows("id=100"));
-    term.press_until(RIGHT, shows("Type yes:"));
+    term.press_until(RIGHT, with_footer(shows("Type yes:"), "← back"));
     assert_eq!(
         term.title(),
         "Launch RTX 4090 container for gpu-cli at $0.30/hr?"
@@ -860,7 +899,7 @@ fn test_vast_confirmation_left_restores_offer_and_only_yes_enter_creates() {
     );
     let reads = sandbox.calls().len();
     term.press("ye");
-    term.press_until(LEFT, on("Offer: RTX 4090"));
+    term.press_until(LEFT, |t| on("Offer: RTX 4090")(t) && shows("id=100")(t));
     assert!(shows("id=100")(&term));
     assert_eq!(
         sandbox.calls().len(),
@@ -871,7 +910,7 @@ fn test_vast_confirmation_left_restores_offer_and_only_yes_enter_creates() {
         .calls()
         .iter()
         .any(|a| a.iter().any(|s| s == "create")));
-    term.press_until(ENTER, shows("Type yes:"));
+    term.press_until(ENTER, with_footer(shows("Type yes:"), "← back"));
     assert!(!shows("Type yes: ye")(&term));
     term.press("yes");
     term.press(RIGHT);
@@ -918,7 +957,7 @@ fn test_tpu_confirmation_left_restores_filtered_zone_in_direct_and_shared_flows(
         } else {
             vec!["up", "--no-repo", "--expire", "2h"]
         };
-        let mut term = Terminal::start(&sandbox, &args);
+        let mut term = Terminal::start(&sandbox, &args).read_in_chunks(16);
         if !direct {
             term.wait(on("Mode"));
             term.press_until(RIGHT, on("GPU"));
@@ -929,7 +968,7 @@ fn test_tpu_confirmation_left_restores_filtered_zone_in_direct_and_shared_flows(
             term.wait(on("TPU zone"));
         }
         term.press_until("us-east5-b", shows("Filter: us-east5-b"));
-        term.press_until(ENTER, shows("Type yes:"));
+        term.press_until(ENTER, with_footer(shows("Type yes:"), "← back"));
         assert!(term
             .title()
             .starts_with("Launch v6e-1 Spot in us-east5-b for $"));
@@ -939,13 +978,15 @@ fn test_tpu_confirmation_left_restores_filtered_zone_in_direct_and_shared_flows(
             .iter()
             .any(|line| line.contains("Enter confirms") || line.contains("Backspace edit")));
         term.press("ye");
-        term.press_until(LEFT, on("TPU zone"));
+        term.press_until(LEFT, |t| {
+            on("TPU zone")(t) && shows("Filter: us-east5-b")(t)
+        });
         assert!(shows("Filter: us-east5-b")(&term));
         assert!(!sandbox
             .calls()
             .iter()
             .any(|a| a.iter().any(|s| s == "create" || s == "create-http-task")));
-        term.press_until(RIGHT, shows("Type yes:"));
+        term.press_until(RIGHT, with_footer(shows("Type yes:"), "← back"));
         assert!(!shows("Type yes: ye")(&term));
         term.press_until("yes\r", shows("Open workspace"));
         term.press("2");
@@ -1102,7 +1143,10 @@ fn test_tpu_size_and_capacity_prices_numbers_and_enter_in_real_terminal() {
         }
         term.press_until(size_key, on("TPU capacity"));
         term.wait(shows("On-demand  $11.000/hr"));
-        term.wait(shows("Spot       $3.000/hr"));
+        term.wait(with_footer(
+            shows("Spot       $3.000/hr"),
+            "↑/↓ move  → select  ← back  1-9 select",
+        ));
         assert_aligned(&term, "$");
         assert!(shows("(may be interrupted)")(&term));
         assert_eq!(term.last_line(), "↑/↓ move  → select  ← back  1-9 select");
@@ -1153,7 +1197,7 @@ fn test_tpu_capacity_keeps_moving_while_prices_load_then_redraws_without_keys() 
             "--dry-run",
         ],
     );
-    term.wait(on("TPU capacity"));
+    term.wait(|t| on("TPU capacity")(t) && shows("On-demand  -")(t) && shows("Spot       -")(t));
     assert!(shows("On-demand  -")(&term));
     assert!(shows("Spot       -")(&term));
     let latency = term.press_until(DOWN, |t| {
@@ -1418,7 +1462,9 @@ fn test_tpu_post_launch_editor_then_edit_and_cursor_use_instance_picker() {
     term.press_until("2", on("TPU zone"));
     term.press_until("us-east5-b", shows("Filter: us-east5-b"));
     term.press_until(RIGHT, shows("Type yes:"));
-    term.press_until("yes\r", shows("Open workspace"));
+    term.press_until("yes\r", |t| {
+        shows("Open workspace")(t) && shows("Don't open")(t)
+    });
     assert!(shows("Open in Cursor")(&term));
     assert!(shows("Select editor...")(&term));
     assert!(shows("Don't open")(&term));
@@ -1437,7 +1483,7 @@ fn test_tpu_post_launch_editor_then_edit_and_cursor_use_instance_picker() {
             std::fs::write(sandbox.root.join("gcp-creating-reads.json"), "1").unwrap();
         }
         let mut edit = Terminal::start(&sandbox, &[command]);
-        edit.wait(shows("Google Cloud"));
+        edit.wait(|t| shows("Google Cloud")(t) && shows("v6e-1")(t));
         assert!(shows("v6e-1")(&edit));
         edit.press(RIGHT);
         assert_eq!(edit.exit_status(), 0, "{}", edit.output_text());
@@ -1506,7 +1552,10 @@ fn test_list_enter_selects_and_backtick_does_nothing_in_real_terminal() {
     term.press(UP);
     term.wait(|t| t.title() == "GPU" && t.line(1) == "Filter: t4");
     term.press_until(ENTER, on("Offer: Tesla T4"));
-    term.wait(shows("id=100"));
+    term.wait(with_footer(
+        shows("id=100"),
+        "↑/↓ move  → select  ← back  1-9 select",
+    ));
     assert_eq!(term.last_line(), "↑/↓ move  → select  ← back  1-9 select");
     term.press_until(LEFT, on("GPU"));
     term.press_until(LEFT, |t| !t.line(1).starts_with("Filter:"));
@@ -1519,16 +1568,16 @@ fn test_list_enter_selects_and_backtick_does_nothing_in_real_terminal() {
 #[test]
 fn test_enter_submits_repository_url_and_tpu_duration_text_boxes() {
     let sandbox = Sandbox::new();
-    let mut repo = Terminal::start(&sandbox, &["up", "--dry-run"]);
+    let mut repo = Terminal::start(&sandbox, &["up", "--dry-run"]).read_in_chunks(16);
     repo.wait(shows("Clone from URL..."));
-    repo.press_until("9", on("Clone from URL"));
+    repo.press_until("9", with_footer(on("Clone from URL"), "← back"));
     assert_eq!(repo.last_line(), "← back");
     assert!(!repo
         .lines()
         .iter()
         .any(|line| line.contains("Backspace edit") || line.contains("then Enter")));
     repo.press_until(LEFT, on("Repository"));
-    repo.press_until("9", on("Clone from URL"));
+    repo.press_until("9", with_footer(on("Clone from URL"), "← back"));
     repo.press(UP);
     repo.press(DOWN);
     repo.press("https://github.com/owner/demo");
@@ -1552,8 +1601,9 @@ fn test_enter_submits_repository_url_and_tpu_duration_text_boxes() {
             "--spot",
             "--dry-run",
         ],
-    );
-    duration.wait(|t| on("Destroy after (e.g. 2h)")(t) && t.last_line() == "← back");
+    )
+    .read_in_chunks(16);
+    duration.wait(with_footer(on("Destroy after (e.g. 2h)"), "← back"));
     assert!(shows("30m, 2h or 1d")(&duration));
     assert!(!duration
         .lines()
@@ -1604,11 +1654,11 @@ printf 'test-token\n'
         );
         term.press_until(RIGHT, on("TPU generation"));
         assert!(!term.last_line().contains("quit (twice)"));
-        term.press_until(RIGHT, on("v5e size"));
+        term.press_until(RIGHT, |t| on("v5e size")(t) && shows("chip")(t));
         assert!(shows("chip")(&term));
         assert!(!term.last_line().contains("quit (twice)"));
         term.press_until(back, on("TPU generation"));
-        term.press_until(back, on("GPU"));
+        term.press_until(back, |t| on("GPU")(t) && t.line(1) == "Filter: tpu");
         assert_eq!(term.line(1), "Filter: tpu");
         term.press("\x03");
         assert_eq!(term.exit_status(), 130);

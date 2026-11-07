@@ -175,7 +175,7 @@ fn next_with(
                 Ok(())
             })))
             .input_label("Duration")
-            .input_hint("30m, 2h or 1d  Enter/→ continue")
+            .input_hint("30m, 2h or 1d")
             .back_clears_input(false),
         );
     }

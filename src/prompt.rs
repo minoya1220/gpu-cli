@@ -268,7 +268,6 @@ pub(crate) fn read_text(ctx: &Ctx, prompt: &str) -> Result<String> {
         crate::picker::Screen::new(prompt.trim_end(), Vec::new, crate::picker::Next::Done)
             .text_input(None)
             .input_label("Reply")
-            .input_hint("Type a reply, then Enter")
             .submit_on_right(false)
             .back_clears_input(false),
     )
@@ -316,7 +315,6 @@ pub(crate) fn confirmation_screen<V: crate::picker::PickValue, T: Clone + Send +
         }
     })))
     .input_label("Type yes")
-    .input_hint("Enter confirms")
     .submit_on_right(false)
     .back_clears_input(false)
     .settle_active_only()

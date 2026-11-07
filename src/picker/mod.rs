@@ -132,7 +132,7 @@ impl<V: PickValue, R: 'static> Screen<V, R> {
             text_input: false,
             submit_on_right: true,
             input_label: "Input".into(),
-            input_hint: "Type a value, then Enter/→".into(),
+            input_hint: String::new(),
             back_clears_input: true,
             validate: None,
             on_settled: None,
@@ -744,10 +744,12 @@ impl<V: PickValue, R: 'static> Core<V, R> {
             return (one(Style::Note, format!("  {}", screen.loading)), None);
         }
         if screen.text_input {
-            return if view.error.is_empty() {
-                (one(Style::Note, format!("  {}", screen.input_hint)), None)
-            } else {
+            return if !view.error.is_empty() {
                 (one(Style::Error, view.error.clone()), None)
+            } else if screen.input_hint.is_empty() {
+                (Vec::new(), None)
+            } else {
+                (one(Style::Note, format!("  {}", screen.input_hint)), None)
             };
         }
         let entries = view.entries();
@@ -815,6 +817,9 @@ impl<V: PickValue, R: 'static> Core<V, R> {
 
     pub fn footer(&self) -> String {
         let view = self.view();
+        if view.screen.text_input {
+            return "\u{2190} back".into();
+        }
         if view.selection_notice.is_some() {
             return "\u{2190} return to choices  Ctrl-C quit".into();
         }
@@ -827,16 +832,6 @@ impl<V: PickValue, R: 'static> Core<V, R> {
                 "Enter retry"
             }
             .into()]
-        } else if screen.text_input {
-            vec![
-                if screen.submit_on_right {
-                    "Enter/\u{2192} continue"
-                } else {
-                    "Enter confirm"
-                }
-                .into(),
-                "Backspace edit".into(),
-            ]
         } else {
             vec![
                 "\u{2191}/\u{2193} move".to_string(),
@@ -852,7 +847,7 @@ impl<V: PickValue, R: 'static> Core<V, R> {
         } else {
             hints.push("\u{2190} quit (twice)".into());
         }
-        if !screen.text_input && !view.load_failed_required() {
+        if !view.load_failed_required() {
             let entries = view.entries();
             if view.quick_select(&entries) {
                 hints.push(

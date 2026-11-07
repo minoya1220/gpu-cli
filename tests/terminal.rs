@@ -834,7 +834,16 @@ fn test_vast_confirmation_left_restores_offer_and_only_yes_enter_creates() {
         term.title(),
         "Launch RTX 4090 container for gpu-cli at $0.30/hr?"
     );
-    assert!(term.last_line().contains("← back"));
+    assert_eq!(term.last_line(), "← back");
+    assert_eq!(
+        term.lines().len(),
+        3,
+        "question, input and back footer only"
+    );
+    assert!(
+        !term.output_text().contains("Enter confirms")
+            && !term.output_text().contains("Backspace edit")
+    );
     let reads = sandbox.calls().len();
     term.press("ye");
     term.press_until(LEFT, on("Offer: RTX 4090"));
@@ -910,6 +919,11 @@ fn test_tpu_confirmation_left_restores_filtered_zone_in_direct_and_shared_flows(
         assert!(term
             .title()
             .starts_with("Launch v6e-1 Spot in us-east5-b for $"));
+        assert_eq!(term.last_line(), "← back");
+        assert!(!term
+            .lines()
+            .iter()
+            .any(|line| line.contains("Enter confirms") || line.contains("Backspace edit")));
         term.press("ye");
         term.press_until(LEFT, on("TPU zone"));
         assert!(shows("Filter: us-east5-b")(&term));
@@ -1494,7 +1508,11 @@ fn test_enter_submits_repository_url_and_tpu_duration_text_boxes() {
     let mut repo = Terminal::start(&sandbox, &["up", "--dry-run"]);
     repo.wait(shows("Clone from URL..."));
     repo.press_until("9", on("Clone from URL"));
-    assert!(repo.last_line().contains("Enter/→ continue"));
+    assert_eq!(repo.last_line(), "← back");
+    assert!(!repo
+        .lines()
+        .iter()
+        .any(|line| line.contains("Backspace edit") || line.contains("then Enter")));
     repo.press_until(LEFT, on("Repository"));
     repo.press_until("9", on("Clone from URL"));
     repo.press(UP);
@@ -1522,7 +1540,12 @@ fn test_enter_submits_repository_url_and_tpu_duration_text_boxes() {
         ],
     );
     duration.wait(on("Destroy after (e.g. 2h)"));
-    assert!(duration.last_line().contains("Enter/→ continue"));
+    assert_eq!(duration.last_line(), "← back");
+    assert!(shows("30m, 2h or 1d")(&duration));
+    assert!(!duration
+        .lines()
+        .iter()
+        .any(|line| line.contains("Enter/→") || line.contains("Backspace edit")));
     duration.press("2h");
     duration.press(UP);
     duration.press(DOWN);

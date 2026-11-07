@@ -605,7 +605,7 @@ mod tests {
             wrap_title: true,
             body: Vec::new(),
             cursor_line: None,
-            footer: "Enter confirm".into(),
+            footer: "← back".into(),
         };
         renderer.draw(&mut screen, &frame);
         assert_eq!(
@@ -615,7 +615,7 @@ mod tests {
                 "/hr, delete at 18:30",
                 "?",
                 "Type yes:",
-                "Enter confirm"
+                "← back"
             ]
         );
     }

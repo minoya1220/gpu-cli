@@ -286,7 +286,11 @@ fn paid_confirmation_waits_for_checks_and_left_restores_parent_with_filter() {
             "",
             "approval text must not leak across visits"
         );
-        assert!(keys.footer().contains("← back"));
+        assert_eq!(keys.footer(), "← back");
+        assert!(
+            keys.snapshot().body.is_empty(),
+            "no instructional or blank note line"
+        );
         keys.type_text("no");
         keys.press(ENTER);
         assert!(!keys.snapshot().done);
@@ -350,9 +354,12 @@ fn test_enter_still_submits_text_entry_screens() {
         });
         let result = drive(first, move |keys| {
             keys.press_until(RIGHT, on("Duration"));
-            assert!(keys.footer().starts_with("Enter/→ continue"));
-            assert!(!keys.footer().contains('`'));
+            assert_eq!(keys.footer(), "← back");
+            assert!(keys.snapshot().body.is_empty());
             keys.type_text("2h");
+            keys.press(BACKSPACE);
+            keys.type_text("h");
+            assert_eq!(keys.footer(), "← back");
             keys.press(submit);
         });
         assert_eq!(result, Outcome::Done("2h".into()));

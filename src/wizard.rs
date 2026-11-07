@@ -17,7 +17,7 @@ use crate::repos::{load_cached_repos, resolve_repo, Repo};
 
 pub const MODES: [&str; 2] = ["container", "vm"];
 
-pub const TPU_CATEGORY: &str = "TPU";
+pub const TPU_CATEGORY: &str = "TPU (Google Cloud)";
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum TpuChoice {

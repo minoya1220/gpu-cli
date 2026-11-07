@@ -234,6 +234,27 @@ fn bounded_wait_reports_a_reason_and_post_create_timeout_keeps_id() {
     }
 }
 
+#[test]
+fn up_reports_no_ssh_alias_until_its_stanza_is_written() {
+    let t = TestEnv::new();
+    let runner = FakeRunner::new(|cmd| match strs(&cmd.argv)[..] {
+        ["vastai", "search", ..] => ok(OFFER),
+        ["vastai", "create", ..] => ok(r#"{"success":true,"new_contract":123}"#),
+        ["vastai", "show", ..] => ok(r#"[{"id":123,"actual_status":"running"}]"#),
+        _ => panic!("unexpected command: {:?}", cmd.argv),
+    });
+    let clock = FakeClock::now_real();
+    let ctx = t.ctx().runner(&runner).clock(&clock).build();
+    let mut args = UP.to_vec();
+    args.extend(["--timeout", "1", "--json"]);
+    assert_eq!(main(&ctx, &args), 14, "{}", err(&ctx));
+    let object = dict(&out(&ctx));
+    let result = object.get("result").unwrap().as_dict().unwrap();
+    assert_eq!(result.get("id"), Some(&Value::str("123")));
+    assert_eq!(result.get("ssh_alias"), Some(&Value::Null));
+    assert!(!crate::ssh_config::has_host(&t.env(), "123").unwrap());
+}
+
 fn transient_then(states: &'static [&'static str]) -> Arc<FakeRunner> {
     let polls = Arc::new(Mutex::new(0usize));
     FakeRunner::new(move |cmd| match strs(&cmd.argv)[..] {

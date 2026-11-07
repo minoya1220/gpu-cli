@@ -427,9 +427,9 @@ With `--json`, every command except `ls` emits exactly one object, without progr
 `{"command":"wait","ok":true,"result":{"id":"12345678","ready":true,"ssh_alias":"vast-12345678"}}`.
 Failures set `ok:false` and add `error:{code,message,exit_code}`; `result` retains known partial results, including the created ID if expiry/readiness fails. Parse failures use command `"parse"`. Help/version remain text; `gpu ls --json` keeps its bare JSON array of credential-redacted instance records (no envelope, errors stay text); interactive SSH/Neovim sessions reject JSON (use `exec` instead). Result fields:
 
-- `up`: `provider`, `id`, `ssh_alias`, `price_per_hour` (USD), `expires_at` (UTC), `created`, `expiry_armed`, `ready`, `dry_run`; dry runs also include `request`. Unknown values are null; a TPU `ssh_alias` stays null until `--wait` (or `gpu wait`) configures it. Check `created` and `expiry_armed` before assuming success.
+- `up`: `provider`, `id`, `ssh_alias`, `price_per_hour` (USD), `expires_at` (UTC), `created`, `expiry_armed`, `ready`, `dry_run`; dry runs also include `request`. Unknown values are null; `ssh_alias` stays null until its SSH alias is configured (Vast: by `--expire` or `--wait`; TPU: by `--wait`), or use `gpu wait`. Check `created` and `expiry_armed` before assuming success.
 - `wait`: `id`, `ssh_alias`, `ready`; `exec`/`cp` add `exit_code`, `stdout`, `stderr`; `cp` also returns `source`, `destination`. Captured streams are UTF-8 text (invalid bytes replaced); plain execution preserves bytes.
-- `stop`/`down`: `id`, `state` (`stopped`/`destroyed`); unknown IDs fail before mutation rather than claiming billing stopped. `expire`: `id`, `action`, `expiry:{status,deadlines}` (UTC list).
+- `stop`/`down`: `id`, `state` (`stopped`/`destroyed`/`already_absent`); unknown IDs fail before mutation rather than claiming billing stopped. `down` of an ID gpu recorded (SSH alias or pending TPU expiry task) whose instance is already gone cleans those up and reports `already_absent`. `expire`: `id`, `action`, `expiry:{status,deadlines}` (UTC list).
 - `setup`: `provider`, `project`, `action`, `dry_run`, plus `ready` for a selected provider or `vast_ready`/`gcp_ready` for status. GCP plans also report `queue` and `enable_apis` when applicable.
 - `ssh`: `id`, `ssh_command`; `edit`/`cursor`: `id`, `ssh_alias`, `directory`, `editor`.
 

@@ -976,11 +976,35 @@ fn startup(repo: &crate::repos::Repo, cfg: &Dict) -> Result<String> {
     Ok(script)
 }
 
+/// Clean up local records of a TPU gpu recorded but that is already gone.
+fn forget_absent(ctx: &Ctx, id: &TpuId, cfg: &Dict) -> Result<()> {
+    let queue = crate::gcp_expiry::queue_for_node(cfg, id, &Dict::new()).ok();
+    let tasks = match &queue {
+        Some(queue) => queue.has_tasks(ctx, id)?,
+        None => false,
+    };
+    if !tasks && !crate::gcp_ssh::has(ctx, id)? {
+        return Err(Error::not_found(&id.cli()));
+    }
+    if let (Some(queue), true) = (&queue, tasks) {
+        queue.cancel(ctx, id)?;
+    }
+    crate::gcp_ssh::remove(ctx, id)?;
+    ctx.result("state", Value::str("already_absent"));
+    ctx.println(&format!("TPU {} is already absent.", id.cli()))
+}
+
 pub fn lifecycle(ctx: &Ctx, id: &TpuId, cfg: &Dict, destroy: bool, yes: bool) -> Result<()> {
-    let node = nodes(ctx, &id.project, &id.zone)?
+    let Some(node) = nodes(ctx, &id.project, &id.zone)?
         .into_iter()
         .find(|d| text(d, "name").is_some_and(|n| n.rsplit('/').next() == Some(&id.name)))
-        .ok_or_else(|| Error::not_found(&id.cli()))?;
+    else {
+        return if destroy {
+            forget_absent(ctx, id, cfg)
+        } else {
+            Err(Error::not_found(&id.cli()))
+        };
+    };
     if destroy
         && !yes
         && !crate::prompt::confirm(

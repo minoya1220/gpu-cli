@@ -150,6 +150,16 @@ fn save(ctx: &Ctx, id: &TpuId, stanza: &str) -> Result<()> {
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     Ok(())
 }
+pub fn has(ctx: &Ctx, id: &TpuId) -> Result<bool> {
+    let path = ctx.env.home().join(".ssh/gpu_gcp_config");
+    if !path.exists() {
+        return Ok(false);
+    }
+    let wanted = format!("Host {}", alias(id));
+    Ok(std::fs::read_to_string(&path)?
+        .lines()
+        .any(|line| line == wanted))
+}
 pub fn remove(ctx: &Ctx, id: &TpuId) -> Result<()> {
     let path = ctx.env.home().join(".ssh/gpu_gcp_config");
     if path.exists() {

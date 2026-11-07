@@ -18,11 +18,13 @@ fn unknown_vast_ids_fail_consistently_without_mutating_or_connecting() {
         ] {
             let t = TestEnv::new();
             // A cached alias must not bypass the fresh account lookup.
-            crate::ssh_config::update_host(
-                &t.env(),
-                &dict(r#"{"id":99999999,"ssh_host":"ssh1.vast.ai","ssh_port":22}"#),
-            )
-            .unwrap();
+            if args[0] != "down" {
+                crate::ssh_config::update_host(
+                    &t.env(),
+                    &dict(r#"{"id":99999999,"ssh_host":"ssh1.vast.ai","ssh_port":22}"#),
+                )
+                .unwrap();
+            }
             let runner = FakeRunner::new(move |cmd| {
                 assert_eq!(strs(&cmd.argv), ["vastai", "show", "instances", "--raw"]);
                 ok(inventory)
@@ -47,7 +49,7 @@ fn unknown_vast_ids_fail_consistently_without_mutating_or_connecting() {
             let error = err(&ctx);
             assert!(error.contains("not found in the account") && error.contains("Next: gpu ls"));
             assert_eq!(runner.calls().len(), 2);
-            assert!(t.home.join(".ssh/vst_config").exists());
+            assert_eq!(t.home.join(".ssh/vst_config").exists(), args[0] != "down");
         }
     }
 }
@@ -77,4 +79,38 @@ fn failed_or_unreadable_inventory_is_not_proof_of_absence() {
         );
         assert_eq!(runner.calls().len(), 1);
     }
+}
+
+#[test]
+fn down_of_a_recorded_but_absent_vast_instance_cleans_up_idempotently() {
+    let t = TestEnv::new();
+    crate::ssh_config::update_host(
+        &t.env(),
+        &dict(r#"{"id":99999999,"ssh_host":"ssh1.vast.ai","ssh_port":22}"#),
+    )
+    .unwrap();
+    crate::ssh_config::update_host(
+        &t.env(),
+        &dict(r#"{"id":123,"ssh_host":"ssh1.vast.ai","ssh_port":22}"#),
+    )
+    .unwrap();
+    let runner = FakeRunner::new(|cmd| {
+        assert_eq!(strs(&cmd.argv), ["vastai", "show", "instances", "--raw"]);
+        ok(r#"[{"id":123,"actual_status":"running"}]"#)
+    });
+    let ctx = t.ctx().runner(&runner).build();
+    assert_eq!(
+        main(&ctx, &["--json", "down", "99999999", "--yes"]),
+        0,
+        "{}",
+        err(&ctx)
+    );
+    let object = dict(&out(&ctx));
+    assert_eq!(object.get("ok"), Some(&Value::Bool(true)));
+    let result = object.get("result").unwrap().as_dict().unwrap();
+    assert_eq!(result.get("state"), Some(&Value::str("already_absent")));
+    assert!(!crate::ssh_config::has_host(&t.env(), "99999999").unwrap());
+    assert!(crate::ssh_config::has_host(&t.env(), "123").unwrap());
+    assert_eq!(main(&ctx, &["down", "99999999", "--yes"]), 16);
+    assert_eq!(runner.calls().len(), 2);
 }

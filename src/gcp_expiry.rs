@@ -282,6 +282,10 @@ impl Queue {
         self.reconcile_inventory(ctx, &nodes?, tasks?)
     }
 
+    pub fn has_tasks(&self, ctx: &Ctx, id: &TpuId) -> Result<bool> {
+        Ok(!self.tasks(ctx, id)?.is_empty())
+    }
+
     pub fn cancel(&self, ctx: &Ctx, id: &TpuId) -> Result<()> {
         self.delete_tasks(ctx, id, &self.tasks(ctx, id)?)?;
         if !self.tasks(ctx, id)?.is_empty() {

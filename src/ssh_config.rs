@@ -170,6 +170,18 @@ pub fn update_host(env: &Env, instance: &Dict) -> std::result::Result<String, Ho
     Ok(format!("vast-{instance_id}"))
 }
 
+/// Whether gpu has written a managed stanza for this instance.
+pub fn has_host(env: &Env, instance_id: &str) -> Result<bool> {
+    let path = managed_path(env);
+    if !path.exists() {
+        return Ok(false);
+    }
+    let content = read_text(&path)?;
+    Ok(HOST_BLOCK
+        .captures_iter(&content)
+        .any(|caps| &caps[1] == instance_id))
+}
+
 /// Remove only this instance's managed stanza; never edit user SSH config.
 pub fn remove_host(env: &Env, instance_id: &str) -> Result<()> {
     let path = managed_path(env);

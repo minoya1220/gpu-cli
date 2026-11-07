@@ -550,7 +550,6 @@ pub fn launch(ctx: &Ctx, args: &UpArgs, cfg: &Dict, deadline: Option<Timestamp>)
         .and_then(created_id);
     if let Some(id) = &instance_id {
         ctx.result("id", Value::str(id));
-        ctx.result("ssh_alias", Value::str(format!("vast-{id}")));
     }
     // Preserve the created ID and attempt expiry before propagating a failed announcement.
     let announced = ctx.println(&summary);
@@ -581,7 +580,8 @@ pub fn launch(ctx: &Ctx, args: &UpArgs, cfg: &Dict, deadline: Option<Timestamp>)
                     _ => Error::msg(message),
                 });
             }
-            Ok(()) => {
+            Ok(alias) => {
+                ctx.result("ssh_alias", Value::str(alias));
                 ctx.result("expiry_armed", Value::Bool(true));
                 ctx.result("ready", Value::Bool(true));
             }

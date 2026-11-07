@@ -16,7 +16,7 @@ use crate::prompt::confirm;
 use crate::pyfmt::{general, py_str, truthy};
 use crate::pyjson::{self, Dict, Value};
 use crate::redact::{redact, redact_text};
-use crate::ssh_config::{remove_host, update_host, HostError};
+use crate::ssh_config::{has_host, remove_host, update_host, HostError};
 use crate::vast::{find_instance, list_instances};
 
 pub fn ls(ctx: &Ctx, json: bool) -> Result<()> {
@@ -244,7 +244,7 @@ pub fn expire_instance(
     instance_id: &str,
     action: &str,
     deadline: Option<Timestamp>,
-) -> Result<()> {
+) -> Result<String> {
     let (alias, _) = wait_for_ssh(ctx, instance_id, ctx.ssh_timeout())?;
     let result = manage_expiry(ctx, &alias, instance_id, action, deadline)?;
     let deadlines = match result.get("deadline") {
@@ -270,7 +270,7 @@ pub fn expire_instance(
             "Timer is NOT running; re-arm with gpu expire {instance_id} 2h."
         )));
     }
-    Ok(())
+    Ok(alias)
 }
 
 pub fn ssh(ctx: &Ctx, instance_id: &str, exec: bool) -> Result<()> {
@@ -290,8 +290,14 @@ pub fn lifecycle(ctx: &Ctx, instance_id: &str, destroy: bool, yes: bool) -> Resu
     // Prove the requested ID belongs to this account before authorizing a
     // mutation. Disappearance only verifies a destroy after this preflight.
     let live = list_instances(ctx, Some(60.0))?;
-    let instance =
-        find_instance(&live, instance_id).ok_or_else(|| Error::not_found(instance_id))?;
+    let Some(instance) = find_instance(&live, instance_id) else {
+        if destroy && has_host(&ctx.env, instance_id)? {
+            remove_host(&ctx.env, instance_id)?;
+            ctx.result("state", Value::str("already_absent"));
+            return ctx.println(&format!("Instance {instance_id} is already absent."));
+        }
+        return Err(Error::not_found(instance_id));
+    };
     let gpu = instance
         .get("gpu_name")
         .filter(|name| truthy(name))

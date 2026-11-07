@@ -240,7 +240,7 @@ fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
             };
             match provider::InstanceId::parse(&id)? {
                 provider::InstanceId::Vast(id) => {
-                    commands::expire_instance(ctx, &id, &action, deadline)
+                    commands::expire_instance(ctx, &id, &action, deadline).map(drop)
                 }
                 provider::InstanceId::Gcp(id) => {
                     gcp_expiry::manage(ctx, &cfg, &id, &action, deadline)

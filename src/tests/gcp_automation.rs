@@ -120,6 +120,47 @@ fn a_known_orphan_expiry_task_can_still_be_cancelled() {
 }
 
 #[test]
+fn down_of_a_recorded_but_absent_tpu_cancels_expiry_and_removes_its_alias() {
+    let tpu = crate::gcp::TpuId::parse(ID).unwrap();
+    for record in ["task", "stanza"] {
+        let (env, ctx, runner, state) = fixture();
+        if record == "task" {
+            state.lock().unwrap().nodes.push(node(false));
+            assert_eq!(main(&ctx, &["expire", ID, "2h"]), 0, "{}", err(&ctx));
+            state.lock().unwrap().nodes.clear();
+            assert!(!state.lock().unwrap().tasks.is_empty());
+            out(&ctx);
+        } else {
+            std::fs::create_dir_all(env.home.join(".ssh")).unwrap();
+            std::fs::write(
+                env.home.join(".ssh/gpu_gcp_config"),
+                format!(
+                    "Host {}\n  HostName example\nHost other\n  HostName other\n",
+                    crate::gcp_ssh::alias(&tpu)
+                ),
+            )
+            .unwrap();
+        }
+        let destroyed = result(&ctx, &["down", ID, "--yes"]);
+        assert_eq!(destroyed.get("state"), Some(&Value::str("already_absent")));
+        assert!(state.lock().unwrap().tasks.is_empty(), "{record}");
+        assert!(!crate::gcp_ssh::has(&ctx, &tpu).unwrap(), "{record}");
+        if record == "stanza" {
+            assert!(
+                std::fs::read_to_string(env.home.join(".ssh/gpu_gcp_config"))
+                    .unwrap()
+                    .contains("Host other")
+            );
+        }
+        assert!(runner
+            .argvs()
+            .iter()
+            .all(|a| !a.iter().any(|s| s == "delete") || a.iter().any(|s| s == "tasks")));
+        assert_eq!(main(&ctx, &["down", ID, "--yes"]), 16, "{record}");
+    }
+}
+
+#[test]
 fn tpu_wait_timeout_and_auth_and_setup_have_distinct_json_codes() {
     let (_env, ctx, runner, state) = fixture();
     let mut n = node(false);

@@ -759,7 +759,10 @@ fn down_verifies_disappearance_before_cancelling_tasks_and_rejects_absent_ids() 
     assert!(state.lock().unwrap().tasks.is_empty());
     let before = runner.calls().len();
     assert_eq!(main(&ctx, &["down", ID, "--yes"]), 16);
-    assert_eq!(runner.calls().len(), before + 1);
+    assert_eq!(runner.calls().len(), before + 2);
+    assert!(runner.argvs()[before..]
+        .iter()
+        .all(|a| !a.iter().any(|s| s == "delete")));
 }
 
 #[test]

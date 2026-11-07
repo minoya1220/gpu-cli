@@ -402,6 +402,7 @@ fn prefetch_without_google_setup_never_calls_cloud_even_after_opening_gpu() {
         keys.wait(on("Repository"));
         assert_eq!(price_state.state(), crate::picker::JobState::Idle);
         assert_eq!(catalog_state.state(), crate::picker::JobState::Idle);
+        keys.wait(|s| s.labels == ["Clone from URL...", "No repository"]);
         keys.press_until("0", on("Mode"));
         keys.press_until("1", on("GPU"));
         keys.type_text("tpu");

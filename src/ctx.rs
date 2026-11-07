@@ -274,7 +274,7 @@ pub struct Ctx {
     pub(crate) gcp_tokens: Arc<Mutex<BTreeMap<String, String>>>,
     pub(crate) gcp_price_lock: Arc<Mutex<()>>,
     pub(crate) gcp_catalog_lock: Arc<Mutex<()>>,
-    pub(crate) gcp_sku_lock: Arc<Mutex<()>>,
+    pub(crate) gcp_sku_refreshed: Arc<Mutex<bool>>,
     pub clock: Arc<dyn Clock>,
     pub console: Arc<Console>,
     pub ui: Arc<Ui>,
@@ -289,7 +289,7 @@ impl Ctx {
             gcp_tokens: Arc::default(),
             gcp_price_lock: Arc::default(),
             gcp_catalog_lock: Arc::default(),
-            gcp_sku_lock: Arc::default(),
+            gcp_sku_refreshed: Arc::default(),
             clock: Arc::new(RealClock {
                 start: Instant::now(),
             }),
@@ -315,7 +315,7 @@ impl Ctx {
             gcp_tokens: Arc::default(),
             gcp_price_lock: Arc::default(),
             gcp_catalog_lock: Arc::default(),
-            gcp_sku_lock: Arc::default(),
+            gcp_sku_refreshed: Arc::default(),
         }
     }
 

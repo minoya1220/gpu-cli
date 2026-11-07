@@ -115,6 +115,7 @@ struct Inner<T> {
     error: RefCell<String>,
     listeners: RefCell<Vec<Box<dyn FnOnce()>>>,
     observed: Arc<Mutex<(JobState, String)>>,
+    interim: Arc<Mutex<Option<T>>>,
 }
 
 /// A blocking call run in the background; cheap to clone, shared by screens.
@@ -158,20 +159,46 @@ impl<T: Clone + Send + 'static> Job<T> {
     pub fn progress(
         work: impl Fn(Arc<Waker>) -> Result<T, String> + Send + Sync + 'static,
     ) -> Job<T> {
+        Self::build(Arc::new(work), Arc::default())
+    }
+    /// Show each published value as the result until the work settles.
+    pub fn publishing(
+        work: impl Fn(&dyn Fn(T)) -> Result<T, String> + Send + Sync + 'static,
+    ) -> Job<T> {
+        let interim: Arc<Mutex<Option<T>>> = Arc::default();
+        let slot = interim.clone();
+        Self::build(
+            Arc::new(move |wake: Arc<Waker>| {
+                work(&|value| {
+                    *slot.lock().unwrap_or_else(|p| p.into_inner()) = Some(value);
+                    wake.wake();
+                })
+            }),
+            interim,
+        )
+    }
+    fn build(work: Work<T>, interim: Arc<Mutex<Option<T>>>) -> Job<T> {
         Job {
             inner: Rc::new(Inner {
-                work: Arc::new(work),
+                work,
                 state: Cell::new(JobState::Idle),
                 result: RefCell::new(None),
                 error: RefCell::new(String::new()),
                 listeners: RefCell::new(Vec::new()),
                 observed: Arc::new(Mutex::new((JobState::Idle, String::new()))),
+                interim,
             }),
         }
     }
 
     pub fn result(&self) -> Option<T> {
-        self.inner.result.borrow().clone()
+        self.inner.result.borrow().clone().or_else(|| {
+            self.inner
+                .interim
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone()
+        })
     }
 
     pub fn observer(&self) -> JobObserver {
@@ -191,6 +218,7 @@ impl<T: Clone + Send + 'static> Job<T> {
     }
 
     fn settle(&self, outcome: Result<T, String>) {
+        *self.inner.interim.lock().unwrap_or_else(|p| p.into_inner()) = None;
         match outcome {
             Ok(value) => {
                 *self.inner.result.borrow_mut() = Some(value);

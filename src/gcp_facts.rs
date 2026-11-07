@@ -144,11 +144,25 @@ fn sku_fact(service: &str, sku: &Dict) -> Option<Dict> {
     Some(d)
 }
 pub fn refresh_skus(ctx: &Ctx, project: &str) -> Result<()> {
-    ctx.require_gcloud()?;
-    let _lock = ctx
-        .gcp_sku_lock
+    let mut refreshed = ctx
+        .gcp_sku_refreshed
         .lock()
         .map_err(|_| Error::msg("Catalog refresh unavailable."))?;
+    *refreshed = true;
+    fetch_skus(ctx, project)
+}
+/// Refresh at most once per process; concurrent callers wait for that one.
+pub fn refresh_skus_once(ctx: &Ctx, project: &str) {
+    let Ok(mut refreshed) = ctx.gcp_sku_refreshed.lock() else {
+        return;
+    };
+    if !*refreshed {
+        *refreshed = true;
+        let _ = fetch_skus(ctx, project);
+    }
+}
+fn fetch_skus(ctx: &Ctx, project: &str) -> Result<()> {
+    ctx.require_gcloud()?;
     let listed = gcp_http::pages(
         ctx,
         project,

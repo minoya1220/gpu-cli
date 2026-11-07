@@ -313,3 +313,69 @@ fn compute_engine_hours_are_chip_hours_and_regions_share_sku_cache() {
     assert_eq!(runner.calls().len(), count);
     assert_eq!(cached.cache_age, Some(0));
 }
+#[test]
+fn live_prices_use_cached_skus_during_refresh_and_reprice_only_on_change() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    for changed in [false, true] {
+        let env = TestEnv::new();
+        std::fs::create_dir(env.config.join("gpu")).unwrap();
+        std::fs::write(env.config.join("gpu/config.json"), CFG).unwrap();
+        cache(&env);
+        let release = super::picker::Gate::default();
+        let held = release.clone();
+        let listings = Arc::new(AtomicUsize::new(0));
+        let counted = listings.clone();
+        let runner = FakeRunner::new(move |cmd| {
+            if cmd.program() == "gcloud" {
+                return ok("test-token\n");
+            }
+            super::gcp_transport::curl(cmd, |url| {
+                if url.contains("/skus?") {
+                    let demand = if changed { "test-new-demand" } else { "test-demand" };
+                    return (200, format!(r#"{{"skus":[{{"skuId":"{demand}","description":"TPU v6e chip","category":{{"usageType":"OnDemand","resourceGroup":"TPU"}},"serviceRegions":["us-east5"]}},{{"skuId":"test-spot","description":"TPU v6e chip Spot","category":{{"usageType":"Preemptible","resourceGroup":"TPU"}},"serviceRegions":["us-east5"]}}]}}"#));
+                }
+                if url.contains("/price?") {
+                    let units = if url.contains("/skus/test-new-demand/") { 9 } else { 1 };
+                    return (200, format!(r#"{{"currencyCode":"USD","rate":{{"unitInfo":{{"unit":"h","unitDescription":"hour","unitQuantity":{{"value":"1"}}}},"tiers":[{{"startAmount":{{"value":"0"}},"listPrice":{{"currencyCode":"USD","units":"{units}"}}}}]}}}}"#));
+                }
+                assert!(url.contains("/v1/services?"), "unexpected {url}");
+                counted.fetch_add(1, Ordering::SeqCst);
+                assert!(held.wait());
+                (200, r#"{"services":[{"name":"services/test-service","displayName":"Cloud TPU"}]}"#.into())
+            })
+            .unwrap()
+        });
+        let ctx = env
+            .ctx()
+            .runner(&runner)
+            .clock(&FakeClock::at(prices().at))
+            .build();
+        let cfg = dict(CFG);
+        let job = gcp_prices::job(&ctx, &cfg);
+        let again = gcp_prices::job_at(&ctx, &cfg, Some("us-east5-a"));
+        let (rows, observer) = (job.clone(), job.observer());
+        let screen = crate::picker::Screen::new(
+            "Prices",
+            move || {
+                let rate = rows.result().and_then(|p| p.hourly("v6e-1", false));
+                vec![crate::picker::Opt::new(String::new(), format!("{rate:?}"))]
+            },
+            Next::Done,
+        )
+        .prices(job)
+        .prices(again.clone());
+        let result = drive(screen, move |keys| {
+            keys.wait(|s| s.labels == ["Some(2.75)"]);
+            assert_eq!(observer.state(), crate::picker::JobState::Running);
+            release.set();
+            let expected = if changed { "Some(2.25)" } else { "Some(2.75)" };
+            keys.wait(|s| s.labels == [expected]);
+            keys.wait_for("refresh settles", || {
+                observer.state() == crate::picker::JobState::Done
+            });
+            keys.press(CTRL_C);
+        });
+        assert_eq!(result, Outcome::Cancelled(130));
+        assert_eq!(listings.load(Ordering::SeqCst), 1, "one refresh per launch");
+    }
+}

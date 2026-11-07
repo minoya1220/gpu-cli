@@ -473,6 +473,25 @@ fn normalize(meta: &Dict, data: Dict, at: Timestamp) -> Result<Dict> {
     sku.insert("pricingInfo", Value::List(vec![Value::Dict(info)]));
     Ok(sku)
 }
+fn metas(ctx: &Ctx, region: &str, spot: Option<bool>, gen: Option<&str>) -> Vec<Dict> {
+    crate::gcp_facts::skus(ctx)
+        .into_iter()
+        .filter(|m| {
+            gcp::text(m, "id").is_some_and(gcp::component)
+                && has_region(m, "regions", region)
+                && crate::gcp_facts::capacity(m).is_some_and(|s| spot.is_none_or(|w| s == w))
+                && gen.is_none_or(|g| gcp::text(m, "generation") == Some(g))
+        })
+        .collect()
+}
+fn relevant_skus(ctx: &Ctx, zone: &str) -> Vec<String> {
+    crate::gcp_geo::region(zone)
+        .map(|region| metas(ctx, region, None, None))
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|m| gcp::text(m, "id").map(String::from))
+        .collect()
+}
 pub fn load(ctx: &Ctx, cfg: &Dict, zone: &str) -> Result<Prices> {
     load_for(ctx, cfg, zone, None)
 }
@@ -491,16 +510,7 @@ pub fn load_for(ctx: &Ctx, cfg: &Dict, zone: &str, wanted: Option<(&str, bool)>)
         ),
         None => None,
     };
-    let metas = crate::gcp_facts::skus(ctx)
-        .into_iter()
-        .filter(|m| {
-            gcp::text(m, "id").is_some_and(gcp::component)
-                && has_region(m, "regions", &region)
-                && crate::gcp_facts::capacity(m)
-                    .is_some_and(|spot| wanted.is_none_or(|(_, w)| spot == w))
-                && gen.is_none_or(|g| gcp::text(m, "generation") == Some(g))
-        })
-        .collect::<Vec<_>>();
+    let metas = metas(ctx, &region, wanted.map(|(_, spot)| spot), gen);
     if metas.is_empty() {
         return Err(unavailable("No public hourly SKU for this region/type."));
     }
@@ -589,20 +599,33 @@ pub(crate) fn job_at(ctx: &Ctx, cfg: &Dict, zone: Option<&str>) -> Job<std::sync
     let explicit = zone.map(String::from);
     let worker = ctx.clone();
     let cfg = cfg.clone();
-    Job::new(move || {
+    Job::publishing(move |publish| {
         if !crate::setup::gcp_ready(&cfg) {
             return Err("needs gpu setup".into());
         }
         let settings = gcp::Settings::load(&cfg).map_err(|e| e.text().to_string())?;
-        // Refresh during this launch only; failures retain the last offline facts.
-        let _ = crate::gcp_facts::refresh_skus(&worker, &settings.project);
         let zone = explicit
             .clone()
             .or_else(|| crate::gcp_preferences::preview(&worker, &settings))
             .ok_or("No known TPU pricing region.")?;
-        load(&worker, &cfg, &zone)
-            .map(std::sync::Arc::new)
-            .map_err(|e| e.text().to_string())
+        let price = || {
+            load(&worker, &cfg, &zone)
+                .map(std::sync::Arc::new)
+                .map_err(|e| e.text().to_string())
+        };
+        let before = relevant_skus(&worker, &zone);
+        let first = std::thread::scope(|s| {
+            s.spawn(|| crate::gcp_facts::refresh_skus_once(&worker, &settings.project));
+            let first = (!before.is_empty()).then(price);
+            if let Some(Ok(prices)) = &first {
+                publish(prices.clone());
+            }
+            first
+        });
+        match first {
+            Some(first) if relevant_skus(&worker, &zone) == before => first,
+            _ => price(),
+        }
     })
 }
 

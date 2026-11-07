@@ -432,8 +432,8 @@ fn vast_ids_containing_401_are_not_authentication_failures() {
         (
             vec!["stop", "24015678"],
             "no such instance 24015678",
-            1,
-            "error",
+            16,
+            "not_found",
         ),
         (
             vec!["down", "24015678", "--yes"],

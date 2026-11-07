@@ -13,6 +13,7 @@ pub enum ExitCode {
     AuthExpired = 13,
     WaitTimeout = 14,
     SpendLimit = 15,
+    NotFound = 16,
 }
 
 impl ExitCode {
@@ -24,6 +25,7 @@ impl ExitCode {
             Self::AuthExpired => "auth_expired",
             Self::WaitTimeout => "wait_timeout",
             Self::SpendLimit => "spend_limit",
+            Self::NotFound => "not_found",
         }
     }
 }
@@ -51,6 +53,13 @@ impl Error {
 
     pub fn status(code: ExitCode, text: impl Into<String>) -> Error {
         Error::Status(code, text.into())
+    }
+
+    pub fn not_found(id: &str) -> Error {
+        Self::status(
+            ExitCode::NotFound,
+            format!("Instance {id} not found in the account. Next: gpu ls"),
+        )
     }
 
     pub fn exit_code(&self) -> i32 {

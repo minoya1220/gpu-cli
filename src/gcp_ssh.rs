@@ -237,7 +237,7 @@ fn wait_for_ssh(ctx: &Ctx, id: &TpuId, next: &str, timeout: f64) -> Result<Dict>
             ),
         )
     };
-    ctx.eprintln(&format!(
+    ctx.progress(&format!(
         "Waiting for TPU {} and SSH (up to {}s)...",
         id.cli(),
         crate::pyfmt::general(timeout)
@@ -279,7 +279,7 @@ fn wait_for_ssh(ctx: &Ctx, id: &TpuId, next: &str, timeout: f64) -> Result<Dict>
             return Err(gcp::bad_reply());
         }
         if state != previous {
-            ctx.eprintln(&format!("TPU {}: {state}", id.cli()))?;
+            ctx.progress(&format!("TPU {}: {state}", id.cli()))?;
             previous = state.into();
         }
         reason = format!("provider status: {state}");
@@ -303,7 +303,7 @@ fn wait_for_ssh(ctx: &Ctx, id: &TpuId, next: &str, timeout: f64) -> Result<Dict>
                 if ctx.clock.monotonic() >= end {
                     return Err(timed_out(&reason));
                 }
-                ctx.eprintln("TPU is READY; waiting for SSH...")?;
+                ctx.progress("TPU is READY; waiting for SSH...")?;
             }
             "CREATING" | "STARTING" | "RESTARTING" | "REIMAGING" | "REPAIRING" => {}
             _ => {

@@ -539,7 +539,7 @@ fn short_tpu_ids_resolve_freshly_for_ssh_edit_expire_stop_and_down() {
     }
     assert!(state.lock().unwrap().nodes.is_empty());
     assert!(state.lock().unwrap().tasks.is_empty());
-    assert_eq!(main(&ctx, &["ssh", "gpu-uwhcp7"]), 1);
+    assert_eq!(main(&ctx, &["ssh", "gpu-uwhcp7"]), 16);
     assert!(err(&ctx).contains("was not found in test-project"));
     assert!(runner.argvs().iter().all(|a| a[0] != "vastai"));
     assert!(runner
@@ -651,11 +651,17 @@ fn every_tpu_editor_waits_for_creating_and_ssh_key_propagation_without_mutating_
             "{}",
             err(&ctx)
         );
-        let progress = err(&ctx);
-        assert!(progress.contains("CREATING"));
-        assert!(progress.contains("READY"));
-        assert!(progress.contains("waiting for SSH"));
-        assert!(!progress.contains("do-not-print"));
+        assert!(err(&ctx).is_empty(), "non-terminal readiness must be quiet");
+        assert_eq!(state.lock().unwrap().creating_reads, 0);
+        assert_eq!(state.lock().unwrap().ssh_failures, 0);
+        assert_eq!(
+            runner
+                .argvs()
+                .iter()
+                .filter(|a| a.iter().any(|s| s == "--command=true"))
+                .count(),
+            3
+        );
         assert!(out(&ctx).contains("/workspace/demo"));
         for call in runner.calls() {
             if call.argv[0] == "gcloud" {
@@ -733,7 +739,7 @@ fn stop_preserves_expiry_and_spot_is_rejected_without_mutation() {
 }
 
 #[test]
-fn down_verifies_disappearance_before_cancelling_tasks_and_is_repeatable() {
+fn down_verifies_disappearance_before_cancelling_tasks_and_rejects_absent_ids() {
     let (_env, ctx, runner, state) = fixture();
     state.lock().unwrap().nodes.push(node(false));
     assert_eq!(main(&ctx, &["expire", ID, "2h"]), 0, "{}", err(&ctx));
@@ -751,7 +757,9 @@ fn down_verifies_disappearance_before_cancelling_tasks_and_is_repeatable() {
         .unwrap();
     assert!(paid < task_delete);
     assert!(state.lock().unwrap().tasks.is_empty());
-    assert_eq!(main(&ctx, &["down", ID, "--yes"]), 0);
+    let before = runner.calls().len();
+    assert_eq!(main(&ctx, &["down", ID, "--yes"]), 16);
+    assert_eq!(runner.calls().len(), before + 1);
 }
 
 #[test]
@@ -1095,7 +1103,7 @@ fn malformed_node_list_never_verifies_destruction() {
     let ctx = env.ctx().runner(&runner).build();
     assert_eq!(main(&ctx, &["down", ID, "--yes"]), 1);
     assert!(err(&ctx).contains("incomplete reply"));
-    assert_eq!(runner.calls().len(), 3);
+    assert_eq!(runner.calls().len(), 1);
 }
 
 #[test]

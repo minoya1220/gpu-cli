@@ -18,7 +18,7 @@ pub struct Cli {
     #[arg(short = 'v', short_alias = 'V', long = "version", action = ArgAction::SetTrue)]
     pub version: bool,
 
-    /// Emit one JSON result object; progress goes to stderr
+    /// Emit structured JSON without progress chatter (ls retains its legacy array)
     #[arg(long = "json", global = true)]
     pub output_json: bool,
 

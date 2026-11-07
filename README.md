@@ -100,7 +100,7 @@ gpu down 12345678       # delete the instance and disk; requires typed yes
 
 **Stopping can still incur storage charges. Destroying deletes the disk.** Omit the ID to pick an instance. Use `gpu down ID --yes` only to skip the destruction confirmation.
 
-Both commands verify Vast's state for up to 60 seconds. TPU commands wait for the Google Cloud operation, then verify the node's state or disappearance. TPU creation (including retries), stopping and deletion show an elapsed timer on terminal stderr, or one progress line when redirected. Failed or unverified completion exits nonzero and does not claim success.
+Both commands verify Vast's state for up to 60 seconds. TPU commands wait for the Google Cloud operation, then verify the node's state or disappearance. TPU creation (including retries), stopping and deletion show an elapsed timer on terminal stderr; progress is silent without a terminal. Failed or unverified completion exits nonzero and does not claim success.
 
 ## Auto-destroy a Vast instance
 
@@ -302,7 +302,7 @@ creates or timer cleanup never offer another paid launch.
 Worker **0** handles SSH/editing, including multi-worker types. Successful
 interactive launches offer the same editor picker as Vast. `gpu ssh` prints the
 command; `--exec` runs it. Editing waits up to 120 seconds for CREATING → READY
-and SSH, with progress on stderr. It retries boot/key-propagation failures;
+and SSH, with progress on terminal stderr. It retries boot/key-propagation failures;
 stopped, deleted, or preempted nodes and IAM errors fail without starting a VM
 or changing its expiry. gcloud provisions SSH keys and resolves the user; the
 editor then reuses that connection through `~/.ssh/gpu_gcp_config`.
@@ -421,19 +421,19 @@ gpu cp 12345678 ./data :/workspace/data
 gpu cp 12345678 :/workspace/results ./results
 ```
 
-`wait`, `exec` and `cp` support both providers and their existing IDs/SSH aliases. `up --wait` waits for working SSH; `--timeout SECONDS` bounds readiness (default 120, maximum 86400). `exec` and `cp` wait first too; their timeout bounds readiness, not command runtime/transfer time. `exec` closes stdin, allocates no terminal, quotes arguments literally (use `sh -c SCRIPT` for shell syntax), and passes stdout, stderr and the remote exit code through. `cp` requires exactly one `:/absolute/path`, uses batch SFTP (`scp -s` required), and accepts `--recursive`. Neither bypasses SSH host-key checks; configure host trust/keys beforehand.
+`wait`, `exec` and `cp` support both providers and their existing IDs/SSH aliases. `up --wait` waits for working SSH; `--timeout SECONDS` bounds readiness (default 120, maximum 86400). `exec` and `cp` wait first too; their timeout bounds readiness, not command runtime/transfer time. `exec` closes stdin, allocates no terminal, quotes arguments literally (use `sh -c SCRIPT` for shell syntax), and passes stdout, stderr and the remote exit code through. `cp` requires exactly one `:/absolute/path`, uses batch SFTP (`scp -s` required), and accepts `--recursive`. Non-terminal progress is silent. SSH authentication banners are suppressed for `exec`/`cp` with `LogLevel=ERROR`, without filtering remote output or hiding SSH errors. Neither bypasses SSH host-key checks; configure host trust/keys beforehand.
 
-Every command except `ls` accepts `--json`: stdout is exactly one object, with progress on stderr:
+With `--json`, every command except `ls` emits exactly one object, without progress chatter:
 `{"command":"wait","ok":true,"result":{"id":"12345678","ready":true,"ssh_alias":"vast-12345678"}}`.
 Failures set `ok:false` and add `error:{code,message,exit_code}`; `result` retains known partial results, including the created ID if expiry/readiness fails. Parse failures use command `"parse"`. Help/version remain text; `gpu ls --json` keeps its bare JSON array of credential-redacted instance records (no envelope, errors stay text); interactive SSH/Neovim sessions reject JSON (use `exec` instead). Result fields:
 
 - `up`: `provider`, `id`, `ssh_alias`, `price_per_hour` (USD), `expires_at` (UTC), `created`, `expiry_armed`, `ready`, `dry_run`; dry runs also include `request`. Unknown values are null; a TPU `ssh_alias` stays null until `--wait` (or `gpu wait`) configures it. Check `created` and `expiry_armed` before assuming success.
 - `wait`: `id`, `ssh_alias`, `ready`; `exec`/`cp` add `exit_code`, `stdout`, `stderr`; `cp` also returns `source`, `destination`. Captured streams are UTF-8 text (invalid bytes replaced); plain execution preserves bytes.
-- `stop`/`down`: `id`, `state` (`stopped`/`destroyed`). `expire`: `id`, `action`, `expiry:{status,deadlines}` (UTC list).
+- `stop`/`down`: `id`, `state` (`stopped`/`destroyed`); unknown IDs fail before mutation rather than claiming billing stopped. `expire`: `id`, `action`, `expiry:{status,deadlines}` (UTC list).
 - `setup`: `provider`, `project`, `action`, `dry_run`, plus `ready` for a selected provider or `vast_ready`/`gcp_ready` for status. GCP plans also report `queue` and `enable_apis` when applicable.
 - `ssh`: `id`, `ssh_command`; `edit`/`cursor`: `id`, `ssh_alias`, `directory`, `editor`.
 
-Exit codes: **0** success, **1** other failure, **2** usage/missing flags, **10** no capacity (change model/zone), **11** over max price (raise limit/change hardware), **12** not set up (`gpu setup`), **13** authentication expired (sign in again), **14** readiness timeout (inspect state/retry with a longer timeout), **15** spending guardrail (shorten expiry/choose cheaper hardware/change cap). `exec`/`cp` preserve the subprocess status, which may overlap these codes; JSON distinguishes `remote_exit`. No automatic destroy is attempted after a launch failure.
+Exit codes: **0** success, **1** other failure, **2** usage/missing flags, **10** no capacity (change model/zone), **11** over max price (raise limit/change hardware), **12** not set up (`gpu setup`), **13** authentication expired (sign in again), **14** readiness timeout (inspect state/retry with a longer timeout), **15** spending guardrail (shorten expiry/choose cheaper hardware/change cap), **16** `not_found` (refresh IDs with `gpu ls`). `exec`/`cp` preserve the subprocess status, which may overlap these codes; JSON distinguishes `remote_exit`. No automatic destroy is attempted after a launch failure.
 
 Optional config `max_session_spend` is off by default. A positive USD amount caps **one launch's estimated compute spend** through its expiry; an unknown price/deadline refuses. It is not a daily/account budget or billing guarantee: storage, network, price changes and failed expiry can cost extra. All existing expiry safety limits still apply.
 

@@ -347,23 +347,27 @@ pub fn manage(
     if let Some(deadline) = deadline {
         validate_deadline(ctx, deadline)?;
     }
-    reconcile(ctx, cfg)?;
     // Listing also lets cancel clean up tasks left by a failed/expired create.
     // Authentication failures are not confused with absence.
     let node = gcp::nodes(ctx, &id.project, &id.zone)?
         .into_iter()
         .find(|d| text(d, "name").is_some_and(|n| n.rsplit('/').next() == Some(&id.name)));
     if node.is_none() && action == "arm" {
-        return Err(Error::msg(
-            "TPU was not found; no new deletion task created. Next: gpu ls --provider gcp",
-        ));
+        return Err(Error::not_found(&id.cli()));
     }
+    let absent = node.is_none();
     // Metadata pins the queue even if local defaults have subsequently changed.
     let node = node.unwrap_or_default();
     if node.get("queuedResource").is_some_and(crate::pyfmt::truthy) {
         return Err(Error::msg("Queued-resource expiry is not supported; deleting only the node would leak its request. Next: gpu ls --provider gcp"));
     }
     let queue = queue_for_node(cfg, id, &node)?;
+    // A known orphan expiry task may still be inspected/cancelled after its
+    // node disappeared. An ID with neither a node nor a task is not a success.
+    if absent && queue.tasks(ctx, id)?.is_empty() {
+        return Err(Error::not_found(&id.cli()));
+    }
+    reconcile(ctx, cfg)?;
     if action == "cancel" {
         queue.cancel(ctx, id)?;
         ctx.result(

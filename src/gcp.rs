@@ -191,6 +191,8 @@ pub(crate) fn checked(
             let message = format!("{reason}. Next: {next}");
             if reason == "No TPU capacity in this zone" {
                 Err(Error::status(crate::error::ExitCode::NoCapacity, message))
+            } else if reason == "Google Cloud resource was not found" {
+                Err(Error::status(crate::error::ExitCode::NotFound, message))
             } else {
                 Err(Error::msg(message))
             }
@@ -889,7 +891,11 @@ fn launch_loop(
                         ),
                     ));
                 }
-                return Err(Error::msg(format!("Create rejected: {}. No node created. Deletion task removed. Next: gpu up --provider gcp",e.text().split(". Next:").next().unwrap_or("request rejected"))));
+                let message = format!("Create rejected: {}. No node created. Deletion task removed. Next: gpu up --provider gcp", e.text().split(". Next:").next().unwrap_or("request rejected"));
+                return Err(match e {
+                    Error::Status(code, _) => Error::status(code, message),
+                    _ => Error::msg(message),
+                });
             }
             let message = format!(
             "{}\nCreate {} unverified. Deletion task remains armed. Next: gpu ls --provider gcp",
@@ -971,6 +977,10 @@ fn startup(repo: &crate::repos::Repo, cfg: &Dict) -> Result<String> {
 }
 
 pub fn lifecycle(ctx: &Ctx, id: &TpuId, cfg: &Dict, destroy: bool, yes: bool) -> Result<()> {
+    let node = nodes(ctx, &id.project, &id.zone)?
+        .into_iter()
+        .find(|d| text(d, "name").is_some_and(|n| n.rsplit('/').next() == Some(&id.name)))
+        .ok_or_else(|| Error::not_found(&id.cli()))?;
     if destroy
         && !yes
         && !crate::prompt::confirm(
@@ -991,22 +1001,6 @@ pub fn lifecycle(ctx: &Ctx, id: &TpuId, cfg: &Dict, destroy: bool, yes: bool) ->
     if destroy {
         crate::gcp_expiry::reconcile(ctx, cfg)?;
     }
-    let listed = nodes(ctx, &id.project, &id.zone)?;
-    let node = listed
-        .into_iter()
-        .find(|d| text(d, "name").is_some_and(|n| n.rsplit('/').next() == Some(&id.name)));
-    let Some(node) = node else {
-        if destroy {
-            if let Ok(queue) = crate::gcp_expiry::queue_for_node(cfg, id, &Dict::new()) {
-                queue.cancel(ctx, id)?;
-            }
-            crate::gcp_ssh::remove(ctx, id)?;
-            drop(wait);
-            ctx.result("state", Value::str("destroyed"));
-            return ctx.println(&format!("TPU {} is already absent.", id.cli()));
-        }
-        return Err(Error::msg("TPU was not found. Next: gpu ls --provider gcp"));
-    };
     if node.get("queuedResource").is_some_and(crate::pyfmt::truthy) {
         return Err(Error::msg(format!("Queued-resource TPU: manage its owning request, not just the node. Next: gcloud compute tpus queued-resources list --project={} --zone={}", id.project, id.zone)));
     }

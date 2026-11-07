@@ -14,7 +14,7 @@ pub fn wait(ctx: &Ctx, id: &str, timeout: f64) -> Result<String> {
     };
     ctx.result("ssh_alias", Value::str(&alias));
     ctx.result("ready", Value::Bool(true));
-    ctx.eprintln(&format!("Instance {id} answers SSH ({alias})."))?;
+    ctx.progress(&format!("Instance {id} answers SSH ({alias})."))?;
     Ok(alias)
 }
 
@@ -75,6 +75,11 @@ pub fn exec(ctx: &Ctx, id: &str, command: &[String], timeout: f64) -> Result<()>
             "BatchMode=yes".into(),
             "-o".into(),
             "ConnectTimeout=5".into(),
+            // Vast's /etc/banner is an SSH authentication banner, not remote
+            // command stderr. OpenSSH suppresses it at LogLevel=ERROR; never
+            // strip banner-looking text from the actual command streams.
+            "-o".into(),
+            "LogLevel=ERROR".into(),
             alias,
             command,
         ],
@@ -122,6 +127,10 @@ pub fn copy(
         "BatchMode=yes".into(),
         "-o".into(),
         "ConnectTimeout=5".into(),
+        "-o".into(),
+        "LogLevel=ERROR".into(),
+        "-o".into(),
+        "RequestTTY=no".into(),
     ];
     if recursive {
         argv.push("-r".into());

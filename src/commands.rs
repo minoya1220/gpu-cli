@@ -118,7 +118,7 @@ pub fn wait_for_ssh(ctx: &Ctx, instance_id: &str, timeout: f64) -> Result<(Strin
             "Timed out waiting for instance {instance_id} to run and answer SSH after {}s ({reason}). Next: gpu wait {instance_id} --timeout 120", general(timeout)
         ))
     };
-    ctx.eprintln(&format!(
+    ctx.progress(&format!(
         "Waiting for instance {instance_id} and SSH (up to {}s)...",
         general(timeout)
     ))?;
@@ -134,8 +134,8 @@ pub fn wait_for_ssh(ctx: &Ctx, instance_id: &str, timeout: f64) -> Result<(Strin
             }
             Err((_, err)) => return Err(err),
         };
-        let instance = find_instance(&live, instance_id)
-            .ok_or_else(|| Error::msg(format!("Instance {instance_id} not found")))?;
+        let instance =
+            find_instance(&live, instance_id).ok_or_else(|| Error::not_found(instance_id))?;
         if let Some(Value::Str(state)) = instance.get("actual_status") {
             reason = format!("provider status: {}", redact_text(state));
             let stopping = matches!(
@@ -177,7 +177,7 @@ pub fn wait_for_ssh(ctx: &Ctx, instance_id: &str, timeout: f64) -> Result<(Strin
                                     None => "/workspace".into(),
                                 };
                                 if repo.is_none() {
-                                    ctx.eprintln(
+                                    ctx.progress(
                                         "No repository recorded on instance; opening /workspace.",
                                     )?;
                                 }
@@ -287,6 +287,16 @@ pub fn ssh(ctx: &Ctx, instance_id: &str, exec: bool) -> Result<()> {
 
 /// `stop` keeps the instance; `down` destroys it after a typed confirmation.
 pub fn lifecycle(ctx: &Ctx, instance_id: &str, destroy: bool, yes: bool) -> Result<()> {
+    // Prove the requested ID belongs to this account before authorizing a
+    // mutation. Disappearance only verifies a destroy after this preflight.
+    let live = list_instances(ctx, Some(60.0))?;
+    let instance =
+        find_instance(&live, instance_id).ok_or_else(|| Error::not_found(instance_id))?;
+    let gpu = instance
+        .get("gpu_name")
+        .filter(|name| truthy(name))
+        .map(py_str)
+        .unwrap_or_else(|| "unknown GPU".into());
     if destroy
         && !yes
         && !confirm(
@@ -296,26 +306,22 @@ pub fn lifecycle(ctx: &Ctx, instance_id: &str, destroy: bool, yes: bool) -> Resu
     {
         return ctx.println("Cancelled.");
     }
-    let live = list_instances(ctx, Some(60.0))?;
-    let gpu = match find_instance(&live, instance_id) {
-        Some(instance) => match instance.get("gpu_name") {
-            Some(name) if truthy(name) => py_str(name),
-            _ => "unknown GPU".into(),
-        },
-        None => "unknown GPU".into(),
-    };
     let action = if destroy { "destroy" } else { "stop" };
     let mut command = vec!["vastai", action, "instance", instance_id];
     if destroy {
         command.push("--yes");
     }
     if let Err(err) = run(ctx, &command, Some(60.0)) {
-        return Err(Error::msg(format!(
+        let message = format!(
             "Instance {instance_id}: {action} failed; completion not verified: {}",
             err.text()
-        )));
+        );
+        return Err(match err {
+            Error::Status(code, _) => Error::status(code, message),
+            _ => Error::msg(message),
+        });
     }
-    ctx.eprintln(&format!(
+    ctx.progress(&format!(
         "Waiting for instance {instance_id} to {action}..."
     ))?;
     wait_for_lifecycle(ctx, instance_id, action, 60.0)?;

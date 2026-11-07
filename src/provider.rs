@@ -80,10 +80,13 @@ pub fn selected_id(
                 ctx.result("id", Value::str(tpu.cli()));
                 Ok(Some(tpu.cli()))
             }
-            [] => Err(Error::msg(format!(
-                "TPU {id} was not found in {}. Next: gpu ls --provider gcp",
-                settings.project
-            ))),
+            [] => Err(Error::status(
+                crate::error::ExitCode::NotFound,
+                format!(
+                    "TPU {id} was not found in {}. Next: gpu ls --provider gcp",
+                    settings.project
+                ),
+            )),
             _ => Err(Error::msg(format!(
                 "TPU ID {id} is ambiguous. Use a full ID. Next: gpu ls --provider gcp --long"
             ))),

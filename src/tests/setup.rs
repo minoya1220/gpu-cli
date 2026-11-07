@@ -640,7 +640,7 @@ fn removal_dry_run_and_decline_never_change_cloud_or_config() {
 fn missing_identity_and_failed_inventory_never_authorize_removal() {
     let (env, ctx, runner, state) = fixture();
     state.lock().unwrap().identity = false;
-    assert_eq!(main(&ctx, APPLY), 1);
+    assert_eq!(main(&ctx, APPLY), 16);
     assert!(mutations(&runner).is_empty());
     state.lock().unwrap().identity = true;
     assert_eq!(main(&ctx, APPLY), 0, "{}", err(&ctx));

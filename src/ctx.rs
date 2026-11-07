@@ -422,7 +422,7 @@ impl Ctx {
 
     pub fn println(&self, text: &str) -> Result<()> {
         if self.json() {
-            self.console.eprintln(text)
+            self.progress(text)
         } else {
             self.console.println(text)
         }
@@ -430,6 +430,16 @@ impl Ctx {
 
     pub fn eprintln(&self, text: &str) -> Result<()> {
         self.console.eprintln(text)
+    }
+
+    /// GPU-owned progress is useful in a terminal, but must not mix with a
+    /// remote command's stderr or a non-terminal command's machine output.
+    pub(crate) fn progress(&self, text: &str) -> Result<()> {
+        if self.interactive() {
+            self.eprintln(text)
+        } else {
+            Ok(())
+        }
     }
 
     pub fn interactive(&self) -> bool {

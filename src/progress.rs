@@ -16,8 +16,7 @@ pub(crate) struct Wait {
 impl Wait {
     pub(crate) fn start(ctx: &Ctx, message: &str) -> Result<Self> {
         let console = ctx.console.clone();
-        if !console.stderr_terminal() {
-            console.eprintln(&format!("{message}..."))?;
+        if !ctx.interactive() || !console.stderr_terminal() {
             return Ok(Self {
                 console,
                 ticker: None,

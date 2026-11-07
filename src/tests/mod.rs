@@ -11,6 +11,7 @@ mod gcp_prices;
 mod instances;
 mod lifecycle;
 mod listing;
+mod not_found;
 mod picker;
 mod repo_cache;
 mod repos;

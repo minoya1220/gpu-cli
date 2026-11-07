@@ -53,8 +53,8 @@ fn tpu_json_launch_wait_exec_copy_expiry_and_lifecycle_use_managed_aliases() {
         .into_iter()
         .rfind(|c| c.program() == "ssh")
         .unwrap();
-    assert_eq!(ssh.argv[6], alias);
-    assert_eq!(ssh.argv[7], "printf %s 'a b'");
+    assert_eq!(ssh.argv[ssh.argv.len() - 2], alias);
+    assert_eq!(ssh.argv.last().unwrap(), "printf %s 'a b'");
     let copied = result(&ctx, &["cp", id, ":/workspace/file", "./local file"]);
     assert_eq!(copied.get("exit_code"), Some(&Value::Int(0)));
     assert!(runner
@@ -70,6 +70,53 @@ fn tpu_json_launch_wait_exec_copy_expiry_and_lifecycle_use_managed_aliases() {
     let destroyed = result(&ctx, &["down", id, "--yes"]);
     assert_eq!(destroyed.get("state"), Some(&Value::str("destroyed")));
     assert!(state.lock().unwrap().nodes.is_empty());
+}
+
+#[test]
+fn unknown_tpu_ids_return_not_found_without_lifecycle_or_ssh_calls() {
+    for args in [
+        vec!["down", ID, "--yes"],
+        vec!["stop", ID],
+        vec!["expire", ID, "2h"],
+        vec!["expire", ID, "show"],
+        vec!["expire", ID, "cancel"],
+        vec!["wait", ID],
+        vec!["exec", ID, "--", "true"],
+        vec!["cp", ID, "./file", ":/workspace/file"],
+    ] {
+        let (_env, ctx, runner, _state) = fixture();
+        let mut args = args;
+        args.insert(0, "--json");
+        assert_eq!(main(&ctx, &args), 16, "{args:?}: {}", err(&ctx));
+        let object = dict(&out(&ctx));
+        assert_eq!(
+            object.get("error").unwrap().as_dict().unwrap().get("code"),
+            Some(&Value::str("not_found"))
+        );
+        assert!(object
+            .get("result")
+            .unwrap()
+            .as_dict()
+            .unwrap()
+            .get("state")
+            .is_none());
+        assert!(runner.argvs().iter().all(|a| a[0] != "ssh"
+            && a[0] != "scp"
+            && !a.iter().any(
+                |s| ["create", "create-http-task", "delete", "stop", "start"].contains(&s.as_str())
+            )));
+    }
+}
+
+#[test]
+fn a_known_orphan_expiry_task_can_still_be_cancelled() {
+    let (_env, ctx, _runner, state) = fixture();
+    state.lock().unwrap().nodes.push(node(false));
+    assert_eq!(main(&ctx, &["expire", ID, "2h"]), 0, "{}", err(&ctx));
+    state.lock().unwrap().nodes.clear();
+    assert_eq!(main(&ctx, &["expire", ID, "cancel"]), 0, "{}", err(&ctx));
+    assert!(state.lock().unwrap().tasks.is_empty());
+    assert_eq!(main(&ctx, &["expire", ID, "cancel"]), 16);
 }
 
 #[test]

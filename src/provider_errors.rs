@@ -81,5 +81,15 @@ pub(crate) fn vast(detail: &str) -> Option<Error> {
             "vastai login",
         );
     }
+    if [
+        "no such instance",
+        "instance not found",
+        "instance does not exist",
+    ]
+    .iter()
+    .any(|s| lower.contains(s))
+    {
+        return with_detail(ExitCode::NotFound, "Vast instance was not found", "gpu ls");
+    }
     None
 }

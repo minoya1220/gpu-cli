@@ -188,7 +188,7 @@ fn test_down_selection_still_confirms_and_cancel_is_safe() {
         .pickers(&[RIGHT, "no\r"])
         .build();
     assert_eq!(main(&ctx, &["down"]), 0);
-    assert_eq!(runner.calls().len(), 1);
+    assert_eq!(runner.calls().len(), 2);
     assert!(!t.home.join(".ssh").exists());
     let managed = t.home.join(".ssh").join("vst_config");
     update_host(&t.env(), &instances()[0]).unwrap();
@@ -214,7 +214,7 @@ fn test_down_selection_still_confirms_and_cancel_is_safe() {
         .pickers(&[&format!("{BACK}{BACK}")])
         .build();
     assert_eq!(main(&ctx, &["down"]), 1);
-    assert_eq!(runner.calls().len(), 6);
+    assert_eq!(runner.calls().len(), 7);
 }
 
 #[test]
@@ -227,7 +227,7 @@ fn test_cursor_repo_and_fallback() {
     );
     let mut stdout = String::new();
     for (instance_id, path) in [("12", "/workspace/ThunderKittens"), ("34", "/workspace")] {
-        let ctx = t.ctx().runner(&runner).build();
+        let ctx = t.ctx().runner(&runner).interactive(true).build();
         assert_eq!(main(&ctx, &["cursor", instance_id]), 0, "{}", err(&ctx));
         stdout += &(out(&ctx) + &err(&ctx));
         let alias = format!("ssh-remote+vast-{instance_id}");
@@ -293,7 +293,7 @@ fn test_ssh_wait_timeout() {
     let mut loading = instances()[0].clone();
     loading.insert("actual_status", Value::str("loading"));
     let runner = fake_vast(vec![loading], no_other);
-    let ctx = t.ctx().runner(&runner).build();
+    let ctx = t.ctx().runner(&runner).interactive(true).build();
     let error = edit_instance(&ctx, "12", Some("cursor"), None, 4.0).unwrap_err();
     assert!(error.text().contains("Timed out waiting"));
     assert!(err(&ctx).contains("Waiting for instance"));

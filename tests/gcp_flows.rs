@@ -15,6 +15,65 @@ fn configured() -> Sandbox {
 }
 
 #[test]
+fn tpu_waits_emit_one_plain_stderr_line_when_redirected() {
+    let s = Sandbox::new();
+    s.gcp_lifecycle();
+    let output = s
+        .command(&[
+            "up",
+            "--tpu",
+            "v6e-1",
+            "--zone",
+            "us-east5-b",
+            "--no-repo",
+            "--expire",
+            "2h",
+            "--yes",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(!stdout.contains("Waiting for"));
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "Waiting for Google Cloud to create the TPU...\n"
+    );
+    let id = stdout
+        .split_once("Created TPU ")
+        .unwrap()
+        .1
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .trim_end_matches('.');
+    for (command, action) in [("stop", "stop"), ("down", "delete")] {
+        let args = if command == "down" {
+            vec![command, id, "--yes"]
+        } else {
+            vec![command, id]
+        };
+        let result = s.command(&args).stdin(Stdio::null()).output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(result.stderr).unwrap(),
+            format!("Waiting for Google Cloud to {action} the TPU...\n")
+        );
+        let stdout = String::from_utf8(result.stdout).unwrap();
+        assert!(!stdout.contains("Waiting for") && !stdout.contains('\x1b'));
+    }
+}
+
+#[test]
 fn gcp_dry_run_is_offline_and_outputs_only_json_requests_after_banner() {
     let s = configured();
     let output = s

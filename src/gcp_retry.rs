@@ -120,7 +120,7 @@ pub(crate) fn screen(
     });
     let approved = offer.clone();
     let result = offer.clone();
-    let tpu = picks.tpu.clone();
+    let tpu = crate::gcp_types::public(picks.tpu.clone());
     let mode = if picks.spot { "Spot" } else { "on-demand" };
     let picker_config = cfg.clone();
     let picker_spot = picks.spot;
@@ -128,11 +128,7 @@ pub(crate) fn screen(
     let settings = settings.clone();
     let tpu_filter = picks.tpu.clone();
     let excluded = excluded.clone();
-    let local = picks
-        .deadline
-        .to_zoned(crate::expiry::local_zone(&ctx.env))
-        .strftime("%b %d %H:%M %Z")
-        .to_string();
+    let local = crate::gcp::deadline_label(ctx, picks.deadline);
     Screen::new(
         "Retry TPU launch",
         move || {
@@ -182,6 +178,6 @@ pub(crate) fn screen(
     .load(offer)
     .loading("Finding next zone and price…")
     .notice(format!(
-        "Paid retry; delete at {local}. USD list; storage/network/tax extra."
+        "Deletes at {local} (storage and networking charges apply)."
     ))
 }

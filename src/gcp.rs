@@ -94,8 +94,9 @@ impl Settings {
             .get("gcp")
             .and_then(Value::as_dict)
             .ok_or_else(|| Error::msg(crate::setup::GCP_NOT_SETUP))?;
-        let project = optional(d, "project")?.filter(|s| component(s)).ok_or_else(|| Error::msg(
-            "Set gcp.project in gpu/config.json; no ambient gcloud project is used. Next: gpu up --help"))?;
+        let project = optional(d, "project")?
+            .filter(|s| component(s))
+            .ok_or_else(|| Error::msg("Set gcp.project in gpu/config.json. Next: gpu setup"))?;
         let zone = optional(d, "zone")?;
         if zone.as_ref().is_some_and(|s| !component(s)) {
             return Err(Error::msg("Invalid gcp.zone. Next: gpu up --help"));
@@ -135,7 +136,7 @@ pub(crate) fn checked(
         result => {
             let reason = match result {
                 Err(RunError::NotFound) => "Install the Google Cloud CLI",
-                Err(RunError::TimedOut) => "Google Cloud timed out; completion is unverified",
+                Err(RunError::TimedOut) => "Google Cloud timed out. Completion unverified",
                 Ok(out) => {
                     let detail = format!("{} {}", out.stdout, out.stderr).to_ascii_lowercase();
                     if detail.contains("quota") {
@@ -146,7 +147,7 @@ pub(crate) fn checked(
                     {
                         "No TPU capacity in this zone"
                     } else if detail.contains("permission") || detail.contains("forbidden") {
-                        "Google Cloud denied access; check project IAM and enabled APIs"
+                        "Google Cloud denied access. Check project IAM and enabled APIs"
                     } else if detail.contains("login")
                         || detail.contains("credential")
                         || detail.contains("reauth")
@@ -157,7 +158,7 @@ pub(crate) fn checked(
                     } else if detail.contains("not_found") || detail.contains("not found") {
                         "Google Cloud resource was not found"
                     } else {
-                        "Google Cloud request failed; completion is unverified"
+                        "Google Cloud request failed. Completion unverified"
                     }
                 }
                 _ => "Could not run Google Cloud CLI",
@@ -231,11 +232,11 @@ pub fn absent(ctx: &Ctx, id: &TpuId) -> Result<bool> {
                 return Ok(true);
             }
             Err(Error::msg(
-                "TPU absence unverified; expiry tasks kept. Next: gpu ls --provider gcp",
+                "TPU absence unverified. Expiry tasks kept. Next: gpu ls --provider gcp",
             ))
         }
         _ => Err(Error::msg(
-            "Could not verify TPU absence; deletion tasks were kept. Next: gpu ls --provider gcp",
+            "Could not verify TPU absence. Deletion tasks kept. Next: gpu ls --provider gcp",
         )),
     }
 }
@@ -324,7 +325,7 @@ pub fn all_nodes(ctx: &Ctx, project: &str) -> Result<Vec<Dict>> {
         let data=crate::gcp_http::get(ctx,project,&format!("https://tpu.googleapis.com/v2/projects/{project}/locations/-/nodes?pageSize=1000&pageToken={}",crate::gcp_http::encode(&next)))?;
         if let Some(unreachable) = data.get("unreachable") {
             if !unreachable.as_list().is_some_and(|xs| xs.is_empty()) {
-                return Err(Error::msg("Some TPU zones are unreachable; expiry tasks kept. Next: gpu ls --provider gcp"));
+                return Err(Error::msg("Some TPU zones are unreachable. Expiry tasks kept. Next: gpu ls --provider gcp"));
             }
         }
         nodes.extend(objects(
@@ -569,11 +570,13 @@ pub(crate) fn launch_with_retry(
                 None,
             ),
         };
-        let local = deadline
-            .to_zoned(crate::expiry::local_zone(&ctx.env))
-            .strftime("%b %d %H:%M %Z")
-            .to_string();
-        ctx.println(&format!("Launch {} {} in {}, {price}, delete at {local}.\nPaid; USD list. Storage/network/tax extra; discounts excluded.",picks.tpu,if picks.spot {"Spot"} else {"on-demand"},picks.zone))?;
+        let local = deadline_label(ctx, deadline);
+        ctx.println(&format!(
+            "Launch {} {} in {} for {price}, deletes at {local}? (storage and networking charges apply)",
+            crate::gcp_types::public(picks.tpu.clone()),
+            if picks.spot { "Spot" } else { "on-demand" },
+            picks.zone
+        ))?;
         if check_rate && rate != approved_rate {
             confirm = true;
         }
@@ -582,15 +585,16 @@ pub(crate) fn launch_with_retry(
         }
         if deadline.as_second() <= ctx.clock.now().as_second() {
             return Err(Error::msg(
-                "Expiry deadline passed; no TPU created. Next: gpu up --provider gcp --expire 2h",
+                "Expiry deadline passed. No TPU created. Next: gpu up --provider gcp --expire 2h",
             ));
         }
+        let wait = crate::progress::Wait::start(ctx, "Waiting for Google Cloud to create the TPU")?;
         queue.check(ctx)?;
         // Arm and read back the control-plane task BEFORE issuing create. A laptop
         // crash, SSH failure, stopped VM or guest failure cannot remove this timer.
         queue.arm(ctx, &id, deadline)?;
         if deadline.as_second() <= ctx.clock.now().as_second() {
-            return Err(Error::msg(format!("Expiry deadline passed; no TPU created, but its deletion task may remain. Next: gpu expire {} cancel", id.cli())));
+            return Err(Error::msg(format!("Expiry deadline passed. No TPU created. Its deletion task may remain. Next: gpu expire {} cancel", id.cli())));
         }
         if let Err(e) = run(ctx, &args, "gpu up --provider gcp --spot --expire 2h") {
             // A known request rejection plus an authenticated 404 is terminal.
@@ -604,9 +608,10 @@ pub(crate) fn launch_with_retry(
             .iter()
             .any(|s| e.text().starts_with(s));
             if rejected && absent(ctx, &id).unwrap_or(false) && queue.cancel(ctx, &id).is_ok() {
+                drop(wait);
                 if e.text().starts_with("No TPU capacity") {
                     let failure = format!(
-                        "No {} capacity in {}. No node; deletion task removed.",
+                        "No {} capacity in {}. No node created. Deletion task removed.",
                         if picks.spot { "Spot" } else { "on-demand" },
                         picks.zone
                     );
@@ -645,10 +650,10 @@ pub(crate) fn launch_with_retry(
                         }
                     )));
                 }
-                return Err(Error::msg(format!("Create rejected: {}. No node; deletion task removed. Next: gpu up --provider gcp",e.text().split(". Next:").next().unwrap_or("request rejected"))));
+                return Err(Error::msg(format!("Create rejected: {}. No node created. Deletion task removed. Next: gpu up --provider gcp",e.text().split(". Next:").next().unwrap_or("request rejected"))));
             }
             return Err(Error::msg(format!(
-            "{}\nCreate {} unverified; deletion task remains armed. Next: gpu ls --provider gcp",
+            "{}\nCreate {} unverified. Deletion task remains armed. Next: gpu ls --provider gcp",
             e.text()
                 .split(". Next:")
                 .next()
@@ -656,8 +661,9 @@ pub(crate) fn launch_with_retry(
             id.cli()
         )));
         }
+        drop(wait);
         ctx.println(&format!(
-            "Created TPU {}; deletion requested at {deadline}.\nNext: gpu ssh {} --exec",
+            "Created TPU {}. Deletes at {local}.\nNext: gpu ssh {} --exec",
             id.cli(),
             id.cli()
         ))?;
@@ -672,6 +678,21 @@ pub(crate) fn launch_with_retry(
         }
         return Ok(());
     }
+}
+
+/// Keep today's deadline short, but never hide a different date or year.
+pub(crate) fn deadline_label(ctx: &Ctx, deadline: Timestamp) -> String {
+    let zone = crate::expiry::local_zone(&ctx.env);
+    let now = ctx.clock.now().to_zoned(zone.clone());
+    let local = deadline.to_zoned(zone);
+    let format = if local.date() == now.date() {
+        "%-I:%M %p"
+    } else if local.year() == now.year() {
+        "%b %-d at %-I:%M %p"
+    } else {
+        "%b %-d %Y at %-I:%M %p"
+    };
+    local.strftime(format).to_string()
 }
 
 pub fn unique_name(ctx: &Ctx, prefix: &str) -> Result<String> {
@@ -710,14 +731,19 @@ pub fn lifecycle(ctx: &Ctx, id: &TpuId, cfg: &Dict, destroy: bool, yes: bool) ->
         && !yes
         && !crate::prompt::confirm(
             ctx,
-            &format!(
-                "Destroy TPU {} and its boot disk? Type 'yes' to confirm: ",
-                id.cli()
-            ),
+            &format!("Destroy TPU {} and its boot disk? Type yes: ", id.cli()),
         )?
     {
         return ctx.println("Cancelled.");
     }
+    let wait = crate::progress::Wait::start(
+        ctx,
+        if destroy {
+            "Waiting for Google Cloud to delete the TPU"
+        } else {
+            "Waiting for Google Cloud to stop the TPU"
+        },
+    )?;
     if destroy {
         crate::gcp_expiry::reconcile(ctx, cfg)?;
     }
@@ -731,6 +757,7 @@ pub fn lifecycle(ctx: &Ctx, id: &TpuId, cfg: &Dict, destroy: bool, yes: bool) ->
                 queue.cancel(ctx, id)?;
             }
             crate::gcp_ssh::remove(ctx, id)?;
+            drop(wait);
             return ctx.println(&format!("TPU {} is already absent.", id.cli()));
         }
         return Err(Error::msg("TPU was not found. Next: gpu ls --provider gcp"));
@@ -751,8 +778,9 @@ pub fn lifecycle(ctx: &Ctx, id: &TpuId, cfg: &Dict, destroy: bool, yes: bool) ->
             )));
         }
         if text(&node, "state") == Some("STOPPED") {
+            drop(wait);
             return ctx.println(&format!(
-                "TPU {} is already stopped; any existing expiry is unchanged.",
+                "TPU {} is already stopped. Expiry unchanged.",
                 id.cli()
             ));
         }
@@ -793,13 +821,12 @@ pub fn lifecycle(ctx: &Ctx, id: &TpuId, cfg: &Dict, destroy: bool, yes: bool) ->
             Err(_) => {}
         }
         crate::gcp_ssh::remove(ctx, id)?;
-        ctx.println(&format!(
-            "Destroyed TPU {} and its boot disk; separately attached storage may still bill.",
-            id.cli()
-        ))
+        drop(wait);
+        ctx.println(&format!("Destroyed TPU {} and its boot disk.", id.cli()))
     } else {
+        drop(wait);
         ctx.println(&format!(
-            "Stopped {}; expiry unchanged; storage may still bill.\nNext: gpu down {}",
+            "Stopped {}. Expiry unchanged. Storage still bills.\nNext: gpu down {}",
             id.cli(),
             id.cli()
         ))

@@ -583,7 +583,7 @@ fn disabled_apis_are_not_treated_as_proof_that_resources_are_absent() {
         state.lock().unwrap().apis.retain(|s| s != api);
         let before = mutations(&runner).len();
         assert_eq!(main(&ctx, REMOVE), 1);
-        assert!(err(&ctx).contains("absence unverified"));
+        assert!(err(&ctx).contains("Absence unverified"));
         assert_eq!(mutations(&runner).len(), before);
         assert!(cfg(&env).get("gcp").is_some());
     }
@@ -764,7 +764,7 @@ fn setup_zone_flag_is_rejected_without_cloud_calls() {
     let mut args = APPLY.to_vec();
     args.extend(["--zone", "us-west1-b"]);
     assert_eq!(main(&ctx, &args), 1);
-    assert!(err(&ctx).contains("choose it at launch"));
+    assert!(err(&ctx).contains("Choose it at launch"));
     assert!(runner.calls().is_empty());
 }
 

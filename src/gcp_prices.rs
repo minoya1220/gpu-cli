@@ -237,15 +237,7 @@ impl Prices {
     }
     pub fn quote(&self, tpu: &str, spot: bool) -> String {
         self.hourly(tpu, spot)
-            .map(|p| {
-                format!(
-                    "${}/hr{}",
-                    crate::pyfmt::fixed(p, 3),
-                    self.cache_age
-                        .map(|_| format!(" ({})", self.cache_note()))
-                        .unwrap_or_default()
-                )
-            })
+            .map(|p| format!("${}/hr", crate::pyfmt::fixed(p, 2)))
             .unwrap_or_else(|| {
                 format!(
                     "price unavailable ({})",

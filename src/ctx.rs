@@ -163,18 +163,28 @@ impl Console {
         self.write_out(&format!("{text}\n"))
     }
 
-    /// `print(text, file=sys.stderr)`.
-    pub fn eprintln(&self, text: &str) -> Result<()> {
-        let line = format!("{text}\n");
+    pub(crate) fn stderr_terminal(&self) -> bool {
+        match &*self.lock() {
+            ConsoleIo::Real => io::stderr().is_terminal(),
+            ConsoleIo::Buffer { .. } => self.interactive,
+        }
+    }
+
+    pub(crate) fn write_err(&self, text: &str) -> Result<()> {
         match &mut *self.lock() {
             ConsoleIo::Real => {
                 let mut stderr = io::stderr().lock();
-                stderr.write_all(line.as_bytes())?;
+                stderr.write_all(text.as_bytes())?;
                 stderr.flush()?;
             }
-            ConsoleIo::Buffer { err, .. } => err.extend_from_slice(line.as_bytes()),
+            ConsoleIo::Buffer { err, .. } => err.extend_from_slice(text.as_bytes()),
         }
         Ok(())
+    }
+
+    /// `print(text, file=sys.stderr)`.
+    pub fn eprintln(&self, text: &str) -> Result<()> {
+        self.write_err(&format!("{text}\n"))
     }
 
     /// `input(prompt)`: `Ok(None)` at end of input.

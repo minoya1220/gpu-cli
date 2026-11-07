@@ -418,7 +418,7 @@ fn stockout_with_verified_absence_cleans_its_task_and_reports_one_next_command()
         .contains("--zone us-east5-b"));
     assert_eq!(message.matches("Next:").count(), 1);
     assert!(!message.contains("do-not-print"));
-    assert!(message.contains("deletion task removed"));
+    assert!(message.contains("Deletion task removed"));
     assert!(state.lock().unwrap().tasks.is_empty());
 }
 
@@ -924,7 +924,7 @@ fn ambiguous_create_keeps_timer_and_next_command_reconciles_a_verified_orphan() 
     }
     assert_eq!(main(&ctx, UP), 1);
     assert_eq!(state.lock().unwrap().tasks.len(), 1);
-    assert!(err(&ctx).contains("deletion task remains armed"));
+    assert!(err(&ctx).contains("Deletion task remains armed"));
     assert_eq!(main(&ctx, &["ls", "--provider", "gcp"]), 0);
     assert_eq!(
         state.lock().unwrap().tasks.len(),
@@ -937,6 +937,26 @@ fn ambiguous_create_keeps_timer_and_next_command_reconciles_a_verified_orphan() 
 }
 
 #[test]
+fn deadline_labels_use_local_time_without_hiding_a_different_date() {
+    let (_env, mut ctx, _, _) = fixture();
+    for (timestamp, expected) in [
+        ("2026-11-03T02:00:00Z", "2:00 AM"),
+        ("2026-11-04T02:00:00Z", "Nov 4 at 2:00 AM"),
+        ("2027-01-01T14:58:00Z", "Jan 1 2027 at 2:58 PM"),
+    ] {
+        assert_eq!(
+            crate::gcp::deadline_label(&ctx, timestamp.parse().unwrap()),
+            expected
+        );
+    }
+    ctx.env = Arc::new((*ctx.env).clone().with("TZ", "America/Los_Angeles"));
+    assert_eq!(
+        crate::gcp::deadline_label(&ctx, "2026-11-03T02:00:00Z".parse().unwrap()),
+        "6:00 PM"
+    );
+}
+
+#[test]
 fn launch_confirmation_quotes_cached_catalog_prices_for_both_capacity_modes() {
     for spot in [false, true] {
         let (env, ctx, _runner, _state) = fixture();
@@ -946,11 +966,14 @@ fn launch_confirmation_quotes_cached_catalog_prices_for_both_capacity_modes() {
             args.push("--spot");
         }
         assert_eq!(main(&ctx, &args), 0, "{}", err(&ctx));
-        assert!(out(&ctx).contains(if spot {
-            "$0.750/hr (cached 0s)"
-        } else {
-            "$2.750/hr (cached 0s)"
-        }));
+        let text = out(&ctx);
+        let line = text.lines().next().unwrap();
+        assert_eq!(line, format!(
+            "Launch v6e-1 {} in us-east5-b for {}, deletes at 2:00 AM? (storage and networking charges apply)",
+            if spot { "Spot" } else { "on-demand" },
+            if spot { "$0.75/hr" } else { "$2.75/hr" }
+        ));
+        assert!(!text.contains("cached") && !text.contains(';') && !text.contains("USD list"));
     }
 }
 
@@ -1114,7 +1137,7 @@ fn spot_stockout_names_a_different_zone_and_preserves_request_scope() {
     assert_eq!(main(&ctx, &args), 1);
     let text = err(&ctx);
     assert!(
-        text.contains("No Spot capacity in us-east5-b. No node; deletion task removed."),
+        text.contains("No Spot capacity in us-east5-b. No node created. Deletion task removed."),
         "{text}"
     );
     assert!(!text.contains("or Spot"));
@@ -1156,11 +1179,8 @@ fn interactive_capacity_retry_is_one_key_and_keeps_original_deadline() {
             );
             let clock = clock.clone();
             match drive(screen, move |keys| {
-                keys.wait(|s| s.labels.iter().any(|l| l.contains("us-east5-a  $0.750/hr")));
-                assert!(keys
-                    .snapshot()
-                    .notice
-                    .contains("delete at Nov 03 02:00 UTC"));
+                keys.wait(|s| s.labels.iter().any(|l| l.contains("us-east5-a  $0.75/hr")));
+                assert!(keys.snapshot().notice.contains("Deletes at 2:00 AM"));
                 assert!(!keys.labels().iter().any(|s| s.contains("in us-east5-b")));
                 clock.sleep(30.0);
                 keys.press("1");

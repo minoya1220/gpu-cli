@@ -100,7 +100,7 @@ gpu down 12345678       # delete the instance and disk; requires typed yes
 
 **Stopping can still incur storage charges. Destroying deletes the disk.** Omit the ID to pick an instance. Use `gpu down ID --yes` only to skip the destruction confirmation.
 
-Both commands verify Vast's state for up to 60 seconds. TPU commands wait for the Google Cloud operation, then verify the node's state or disappearance. Failed or unverified completion exits nonzero and does not claim success.
+Both commands verify Vast's state for up to 60 seconds. TPU commands wait for the Google Cloud operation, then verify the node's state or disappearance. TPU creation (including retries), stopping and deletion show an elapsed timer on terminal stderr, or one progress line when redirected. Failed or unverified completion exits nonzero and does not claim success.
 
 ## Auto-destroy a Vast instance
 

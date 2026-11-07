@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import shlex
 import sys
+import time
 
 args = sys.argv[1:]
 root = Path(os.environ['FAKE_CLI_LOG']).parent
@@ -48,7 +49,12 @@ if args[:3] == ['compute', 'tpus', 'tpu-vm']:
     nodes = load('gcp-nodes.json', {'nodes': []})
     if action == 'list':
         reply([n for n in nodes['nodes'] if f'/locations/{flag("zone")}/' in n['name']])
+    if action in ('create', 'delete', 'stop'):
+        time.sleep(load(f'gcp-{action}-delay.json', 0))
     if action == 'create':
+        if flag('zone') in load('gcp-reject-zones.json', []):
+            print('RESOURCE_EXHAUSTED: no capacity', file=sys.stderr)
+            sys.exit(1)
         assert load('gcp-task.json', {}).get('scheduleTime'), 'paid create without verified expiry'
         metadata = dict(part.split('=', 1) for part in flag('metadata').split('|') if part.startswith(('gpu-workspace=', 'gpu-expiry-queue=')))
         node = {'name': f'projects/test-project/locations/{flag("zone")}/nodes/{name}', 'state': 'CREATING', 'acceleratorType': flag('accelerator-type'), 'metadata': metadata}
@@ -57,7 +63,7 @@ if args[:3] == ['compute', 'tpus', 'tpu-vm']:
         reply({})
     if action == 'describe':
         if not nodes['nodes']:
-            print('NOT_FOUND', file=sys.stderr)
+            print('NOT_FOUND: node does not exist', file=sys.stderr)
             sys.exit(1)
         node = nodes['nodes'][0]
         remaining = load('gcp-creating-reads.json', 0)
@@ -69,6 +75,10 @@ if args[:3] == ['compute', 'tpus', 'tpu-vm']:
         reply(node)
     if action == 'delete':
         save('gcp-nodes.json', {'nodes': []})
+        reply({})
+    if action == 'stop':
+        nodes['nodes'][0]['state'] = 'STOPPED'
+        save('gcp-nodes.json', nodes)
         reply({})
     if action == 'ssh':
         key = Path(os.environ['HOME']) / '.ssh/google_compute_engine'

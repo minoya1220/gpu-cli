@@ -27,6 +27,7 @@ pub mod launch;
 pub mod offers;
 pub mod picker;
 pub mod process;
+mod progress;
 pub mod prompt;
 pub mod provider;
 pub mod pyfmt;

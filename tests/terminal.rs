@@ -804,6 +804,167 @@ printf 'test-token\n'
 }
 
 #[test]
+fn test_tpu_wait_timer_counts_in_place_and_clears_for_retry_and_results() {
+    let sandbox = Sandbox::new();
+    sandbox.gcp_lifecycle();
+    std::fs::write(sandbox.root.join("gcp-create-delay.json"), "2").unwrap();
+    std::fs::write(
+        sandbox.root.join("gcp-reject-zones.json"),
+        r#"["us-east5-b"]"#,
+    )
+    .unwrap();
+    let mut term = Terminal::start(
+        &sandbox,
+        &[
+            "up",
+            "--tpu",
+            "v5e-1",
+            "--zone",
+            "us-east5-b",
+            "--spot",
+            "--no-repo",
+            "--expire",
+            "2h",
+        ],
+    );
+    term.wait(shows("Type yes:"));
+    let confirmation = term
+        .lines()
+        .into_iter()
+        .find(|l| l.starts_with("Launch "))
+        .unwrap();
+    assert!(
+        confirmation.starts_with("Launch v5e-1 Spot in us-east5-b for $"),
+        "{confirmation}"
+    );
+    assert!(!term.output_text().contains("cached"));
+    assert!(!term.output_text().contains("Paid;"));
+    assert!(term
+        .output_text()
+        .contains("(storage and networking charges apply)"));
+    term.press("yes\r");
+    for attempt in 0..2 {
+        term.wait(shows("Waiting for Google Cloud to create the TPU... 0:00"));
+        term.wait(shows("Waiting for Google Cloud to create the TPU... 0:01"));
+        assert_eq!(
+            term.lines()
+                .iter()
+                .filter(|l| l.contains("Waiting for Google Cloud"))
+                .count(),
+            1
+        );
+        if attempt == 0 {
+            term.wait(shows("Retry v5e-1 Spot"));
+            assert!(!shows("Waiting for Google Cloud")(&term));
+            assert!(!term.lines().iter().any(|l| l.contains(';')));
+            term.press(RIGHT);
+        }
+    }
+    term.wait(shows("Open workspace"));
+    assert!(!shows("Waiting for Google Cloud")(&term));
+    term.press("2");
+    assert_eq!(term.exit_status(), 0, "{}", term.output_text());
+    let output = term.output_text();
+    assert!(output.contains("\r\x1b[2KCreated TPU"), "{output:?}");
+    assert!(!output
+        .rsplit_once("Created TPU")
+        .unwrap()
+        .1
+        .contains("Waiting for Google Cloud"));
+
+    let nodes =
+        gpu::pyjson::loads(&std::fs::read_to_string(sandbox.root.join("gcp-nodes.json")).unwrap())
+            .unwrap();
+    let name = nodes
+        .as_dict()
+        .unwrap()
+        .get("nodes")
+        .unwrap()
+        .as_list()
+        .unwrap()[0]
+        .as_dict()
+        .unwrap()
+        .get("name")
+        .unwrap()
+        .as_str()
+        .unwrap();
+    let parts = name.split('/').collect::<Vec<_>>();
+    let id = format!("gcp:{}:{}:{}", parts[1], parts[3], parts[5]);
+    for (action, result, message) in [
+        (
+            "stop",
+            "Stopped",
+            "Waiting for Google Cloud to stop the TPU",
+        ),
+        (
+            "delete",
+            "Destroyed TPU",
+            "Waiting for Google Cloud to delete the TPU",
+        ),
+    ] {
+        std::fs::write(sandbox.root.join(format!("gcp-{action}-delay.json")), "2").unwrap();
+        let args = if action == "delete" {
+            vec!["down", &id, "--yes"]
+        } else {
+            vec!["stop", &id]
+        };
+        let mut lifecycle = Terminal::start(&sandbox, &args);
+        lifecycle.wait(|t| {
+            t.lines()
+                .iter()
+                .any(|l| l.contains(&format!("{message}... 0:00")))
+        });
+        lifecycle.wait(|t| {
+            t.lines()
+                .iter()
+                .any(|l| l.contains(&format!("{message}... 0:01")))
+        });
+        assert_eq!(lifecycle.exit_status(), 0, "{}", lifecycle.output_text());
+        assert!(!shows("Waiting for Google Cloud")(&lifecycle));
+        assert!(lifecycle
+            .output_text()
+            .contains(&format!("\r\x1b[2K{result}")));
+    }
+    assert!(!sandbox.root.join("gcp-task.json").exists());
+}
+
+#[test]
+fn test_tpu_wait_timer_clears_before_a_create_error() {
+    let sandbox = Sandbox::new();
+    sandbox.gcp_lifecycle();
+    // Fail after the waiting line starts, but before any paid create request.
+    sandbox.stub("gcloud", &include_str!("common/gcp_native.py").replace(
+        "if args[1:3] == ['queues', 'describe']:",
+        "if args[1:3] == ['queues', 'describe']:\n        time.sleep(2)\n        sys.exit('PERMISSION_DENIED')",
+    ));
+    let mut term = Terminal::start(
+        &sandbox,
+        &[
+            "up",
+            "--tpu",
+            "v6e-1",
+            "--zone",
+            "us-east5-b",
+            "--no-repo",
+            "--expire",
+            "2h",
+            "--yes",
+            "--on-demand",
+        ],
+    );
+    term.wait(shows("Waiting for Google Cloud to create the TPU... 0:01"));
+    assert_eq!(term.exit_status(), 1);
+    assert!(term
+        .output_text()
+        .contains("\r\x1b[2Kgpu: Google Cloud denied access"));
+    assert!(!shows("Waiting for Google Cloud")(&term));
+    assert!(!sandbox
+        .calls()
+        .iter()
+        .any(|a| a.iter().any(|v| v == "create")));
+}
+
+#[test]
 fn test_tpu_post_launch_editor_then_edit_and_cursor_use_instance_picker() {
     let sandbox = Sandbox::new();
     sandbox.gcp_lifecycle();

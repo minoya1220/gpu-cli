@@ -154,8 +154,9 @@ gpu ls --provider gcp
 3. Keep the undo journal in `~/.config/gpu/config.json` (macOS/Linux), or
    `$XDG_CONFIG_HOME/gpu/config.json`. Other config stays intact.
 
-**No ordinary command invokes gcloud until setup succeeds.** The offline GPU
-screen still shows TPU choices; without setup, their price says `needs gpu setup`.
+**No ordinary command invokes gcloud until setup succeeds.** Before setup, the
+GPU screen shows only the **TPU (Google Cloud)** category, with no TPU types or
+prices; selecting it points to `gpu setup`.
 A hand-written legacy `gcp` section is not consent. Project always comes from
 config, never gcloud's ambient project.
 

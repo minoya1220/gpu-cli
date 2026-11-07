@@ -1,7 +1,6 @@
 # Plan: Rust rewrite of the `gpu` CLI
 
-Historical parity plan. Current picker keys are documented in README: lists
-use → to select and ← to return; Enter is reserved for text entry.
+Historical parity plan. Current picker keys are documented in README.
 
 Status: approved and implemented. During phase 2 the owner changed section 3.9
 (the remote worker became a bash script) and approved both fixes in 9.4; those

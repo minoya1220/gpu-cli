@@ -18,6 +18,10 @@ pub struct Cli {
     #[arg(short = 'v', short_alias = 'V', long = "version", action = ArgAction::SetTrue)]
     pub version: bool,
 
+    /// Emit structured JSON without progress chatter (ls retains its legacy array)
+    #[arg(long = "json", global = true)]
+    pub output_json: bool,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -30,8 +34,8 @@ pub enum Command {
     Up(UpFlags),
     /// List rented instances
     Ls {
-        /// print raw JSON for scripts
-        #[arg(long)]
+        /// Filled from the global JSON flag
+        #[arg(skip)]
         json: bool,
         /// Show full provider-qualified IDs
         #[arg(long)]
@@ -39,6 +43,33 @@ pub enum Command {
         /// Limit listing to one provider
         #[arg(long, value_parser = ["vast", "gcp"])]
         provider: Option<String>,
+    },
+    /// Wait until the instance answers a non-interactive SSH probe
+    Wait {
+        id: String,
+        /// Maximum readiness wait in seconds
+        #[arg(long, default_value = "120", value_parser = positive_seconds)]
+        timeout: f64,
+    },
+    /// Execute a remote command without a terminal; preserve its exit code
+    Exec {
+        id: String,
+        #[arg(required = true, last = true, num_args = 1..)]
+        command: Vec<String>,
+        /// Maximum SSH readiness wait in seconds, not remote command runtime
+        #[arg(long, default_value = "120", value_parser = positive_seconds)]
+        timeout: f64,
+    },
+    /// Copy files; prefix exactly one path with :/ to select the remote side
+    Cp {
+        id: String,
+        source: String,
+        destination: String,
+        #[arg(short, long)]
+        recursive: bool,
+        /// Maximum SSH readiness wait in seconds, not transfer time
+        #[arg(long, default_value = "120", value_parser = positive_seconds)]
+        timeout: f64,
     },
     /// Print or execute the SSH command
     Ssh {
@@ -76,6 +107,25 @@ pub enum Command {
         #[arg(value_name = "ID/WHEN", num_args = 0..)]
         expiry_args: Vec<String>,
     },
+}
+
+impl Command {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Setup(_) => "setup",
+            Self::Up(_) => "up",
+            Self::Ls { .. } => "ls",
+            Self::Wait { .. } => "wait",
+            Self::Exec { .. } => "exec",
+            Self::Cp { .. } => "cp",
+            Self::Ssh { .. } => "ssh",
+            Self::Cursor { .. } => "cursor",
+            Self::Edit { .. } => "edit",
+            Self::Stop { .. } => "stop",
+            Self::Down { .. } => "down",
+            Self::Expire { .. } => "expire",
+        }
+    }
 }
 
 #[derive(clap::Args, Debug, Default)]
@@ -150,6 +200,12 @@ pub struct UpFlags {
     /// Auto-destroy after e.g. 2h or 1h30m (includes boot time)
     #[arg(long, value_name = "DURATION")]
     pub expire: Option<String>,
+    /// Wait for working SSH after launch
+    #[arg(long)]
+    pub wait: bool,
+    /// Maximum SSH readiness wait in seconds (with --wait)
+    #[arg(long, default_value = "120", value_parser = positive_seconds)]
+    pub timeout: f64,
     #[arg(long, allow_negative_numbers = true)]
     pub reliability: Option<f64>,
     /// include verified, unverified, and deverified hosts
@@ -157,9 +213,19 @@ pub struct UpFlags {
     pub unverified: bool,
 }
 
+fn positive_seconds(s: &str) -> std::result::Result<f64, String> {
+    let value: f64 = s.parse().map_err(|_| "expected seconds".to_string())?;
+    if value.is_finite() && value > 0.0 && value <= 86400.0 {
+        Ok(value)
+    } else {
+        Err("timeout must be greater than 0 and at most 86400 seconds".into())
+    }
+}
+
 /// What argument parsing produced.
 pub enum Parsed {
     Run(Box<Command>),
+    RunJson(Box<Command>),
     /// Print `text` (stdout when `to_stdout`) and exit with `code`.
     Exit {
         code: i32,
@@ -176,9 +242,20 @@ pub fn parse(argv: &[String]) -> Parsed {
             to_stdout: true,
         },
         Ok(Cli {
-            command: Some(command),
+            command: Some(mut command),
+            output_json,
             ..
-        }) => Parsed::Run(Box::new(command)),
+        }) => {
+            if let Command::Ls { json, .. } = &mut command {
+                *json = output_json;
+                return Parsed::Run(Box::new(command));
+            }
+            if output_json {
+                Parsed::RunJson(Box::new(command))
+            } else {
+                Parsed::Run(Box::new(command))
+            }
+        }
         Ok(Cli { command: None, .. }) => {
             let mut cmd = Cli::command();
             let err = cmd.error(

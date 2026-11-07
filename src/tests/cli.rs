@@ -380,13 +380,20 @@ fn test_interactive_offer_selection_does_not_print_second_list() {
     let runner = search_answer(
         r#"[{"id": 42, "gpu_name": "Tesla T4", "num_gpus": 1, "dph_total": 0.1, "reliability": 0.99, "geolocation": "Test", "verification": "verified"}]"#,
     );
-    let ctx = t.ctx().runner(&runner).input(&["1"]).build();
+    let ctx = t
+        .ctx()
+        .runner(&runner)
+        .interactive(true)
+        .input(&["1"])
+        .build();
     let args = UpArgs {
         gpu: Some("Tesla T4".into()),
         dry_run: true,
         ..up_args()
     };
-    launch(&ctx, &args, &defaults(), None).unwrap();
+    let search = crate::offers::OfferSearch::new(Vast::new(&ctx), &args, &defaults()).unwrap();
+    let offers = search.offers("container", Some("Tesla T4")).unwrap();
+    crate::launch::select_offer(&ctx, offers, &args).unwrap();
     let output = out(&ctx);
     assert_eq!(output.matches("1. id=42").count(), 1);
     assert!(!output.contains("\n1. 42\n"));
@@ -499,18 +506,31 @@ fn test_interactive_gpu_stats_and_offers_share_unverified_filter() {
         {"id": 3, "gpu_name": "Tesla T4", "num_gpus": 1, "dph_total": 0.05, "reliability": 0.99, "geolocation": "C", "verification": "deverified"}
     ]"#,
     );
-    let ctx = t.ctx().runner(&runner).input(&["1", "1", "1"]).build();
+    let ctx = t
+        .ctx()
+        .runner(&runner)
+        .interactive(true)
+        .input(&["1", "1", "1"])
+        .build();
     let args = UpArgs {
         dry_run: true,
         ..up_args()
     };
-    launch(&ctx, &args, &defaults(), None).unwrap();
+    let search = crate::offers::OfferSearch::new(Vast::new(&ctx), &args, &defaults()).unwrap();
+    let (_, offers) = crate::launch::prompt_for_picks(
+        &ctx,
+        crate::wizard::Picks::new(args.repo.clone(), args.mode.as_deref(), None),
+        &search,
+        "minoya1220",
+    )
+    .unwrap();
+    let selected = crate::launch::select_offer(&ctx, offers, &args).unwrap();
     let output = out(&ctx);
     assert!(!runner.argvs()[0][3].contains("verified=true"));
     assert!(output.contains("$0.095/hr") && output.contains("2 offers"));
     assert!(output.contains("verification=unverified"));
     assert!(!output.contains("deverified"));
-    assert_eq!(dry_run_request(&output)[3], "2");
+    assert_eq!(selected.get("id"), Some(&Value::Int(2)));
 }
 
 #[test]
@@ -553,6 +573,7 @@ fn test_history_is_written_only_after_successful_confirmed_launch() {
     let args = UpArgs {
         gpu: Some("Tesla T4".into()),
         offer: Some(42),
+        yes: true,
         ..up_args()
     };
     launch(&ctx, &args, &defaults(), None).unwrap();

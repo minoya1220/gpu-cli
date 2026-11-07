@@ -103,13 +103,28 @@ impl OfferSearch {
     /// Matching offers, cheapest first. Blocks on the Vast CLI.
     pub fn offers(&self, mode: &str, gpu: Option<&str>) -> Result<Vec<Dict>> {
         let mut items = offer_dicts(self.vast.offers(&self.query(mode, gpu), self.bid)?)?;
+        // An empty price-filtered response does not distinguish capacity from
+        // price. One read-only unpriced query supplies that distinction.
+        if items.is_empty() && self.max_price.is_some() && !self.vast.ctx.interactive() {
+            let mut unpriced = self.clone();
+            unpriced.max_price = None;
+            if !unpriced.offers(mode, gpu)?.is_empty() {
+                return Err(Error::status(crate::error::ExitCode::OverMaxPrice,
+                    "Offers exceed --max-price. Next: raise --max-price or choose a cheaper --gpu model."));
+            }
+        }
         update_gpu_cache(&self.vast.ctx.env, &items, None);
         if let Some(max_price) = self.max_price {
+            let had_offers = !items.is_empty();
             let mut kept = Vec::new();
             for offer in items {
                 if offer_price(&offer)? <= max_price {
                     kept.push(offer);
                 }
+            }
+            if kept.is_empty() && had_offers && !self.vast.ctx.interactive() {
+                return Err(Error::status(crate::error::ExitCode::OverMaxPrice,
+                    "Offers exceed --max-price. Next: raise --max-price or choose a cheaper --gpu model."));
             }
             items = kept;
         }

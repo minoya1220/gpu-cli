@@ -53,7 +53,10 @@ pub fn token(ctx: &Ctx, project: &str) -> Result<String> {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"-._~+/=".contains(&b))
     {
-        return Err(error("gcloud authentication failed"));
+        return Err(Error::status(
+            crate::error::ExitCode::AuthExpired,
+            "Google Cloud authentication failed or expired. Next: gcloud auth login",
+        ));
     }
     tokens.insert(project.into(), token.into());
     Ok(token.into())
@@ -72,12 +75,14 @@ fn body(ctx: &Ctx, project: &str, raw: &str, status: u16) -> Result<Dict> {
         if let Ok(mut tokens) = ctx.gcp_tokens.lock() {
             tokens.remove(project);
         }
+        return Err(Error::status(
+            crate::error::ExitCode::AuthExpired,
+            "Google Cloud authentication expired. Next: gcloud auth login",
+        ));
     }
     if !(200..300).contains(&status) {
         let reason = if raw.contains("SERVICE_DISABLED") {
             "API is disabled"
-        } else if status == 401 {
-            "authentication expired; retry"
         } else if raw.contains("PERMISSION_DENIED") || status == 403 {
             "access was denied"
         } else {

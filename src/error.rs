@@ -3,14 +3,44 @@ use std::path::Path;
 
 use crate::pyfmt::repr_str;
 
+/// Stable CLI failure statuses (remote commands preserve their own exit status).
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[repr(i32)]
+pub enum ExitCode {
+    NoCapacity = 10,
+    OverMaxPrice = 11,
+    NotSetup = 12,
+    AuthExpired = 13,
+    WaitTimeout = 14,
+    SpendLimit = 15,
+    NotFound = 16,
+}
+
+impl ExitCode {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::NoCapacity => "no_capacity",
+            Self::OverMaxPrice => "over_max_price",
+            Self::NotSetup => "not_setup",
+            Self::AuthExpired => "auth_expired",
+            Self::WaitTimeout => "wait_timeout",
+            Self::SpendLimit => "spend_limit",
+            Self::NotFound => "not_found",
+        }
+    }
+}
+
 /// How a command ends other than success.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Error {
     /// A handled error: `gpu: <redacted message>` on stderr, exit 1.
     Msg(String),
+    Status(ExitCode, String),
+    /// An SSH/scp process completed; do not replace its diagnostics or exit code.
+    Remote(i32),
     /// The user quit; `Cancelled.` on stdout and this exit status.
     Cancelled(i32),
-    /// A usage error, already rendered like clap's; stderr, exit 2.
+    /// Actionable missing-input text or clap-rendered usage; stderr, exit 2.
     Usage(String),
 }
 
@@ -21,6 +51,36 @@ impl Error {
         Error::Msg(text.into())
     }
 
+    pub fn status(code: ExitCode, text: impl Into<String>) -> Error {
+        Error::Status(code, text.into())
+    }
+
+    pub fn not_found(id: &str) -> Error {
+        Self::status(
+            ExitCode::NotFound,
+            format!("Instance {id} not found in the account. Next: gpu ls"),
+        )
+    }
+
+    pub fn exit_code(&self) -> i32 {
+        match self {
+            Self::Msg(_) => 1,
+            Self::Usage(_) => 2,
+            Self::Cancelled(code) | Self::Remote(code) => *code,
+            Self::Status(code, _) => *code as i32,
+        }
+    }
+
+    pub fn code_name(&self) -> &'static str {
+        match self {
+            Self::Status(code, _) => code.name(),
+            Self::Usage(_) => "usage",
+            Self::Cancelled(_) => "cancelled",
+            Self::Remote(_) => "remote_exit",
+            Self::Msg(_) => "error",
+        }
+    }
+
     /// Python's `KeyError` text for a missing key.
     pub fn key(key: &str) -> Error {
         Error::Msg(format!("Required field missing: {}.", repr_str(key)))
@@ -29,8 +89,8 @@ impl Error {
     /// Message text for handled errors (empty for the other kinds).
     pub fn text(&self) -> &str {
         match self {
-            Error::Msg(text) | Error::Usage(text) => text,
-            Error::Cancelled(_) => "",
+            Error::Msg(text) | Error::Usage(text) | Error::Status(_, text) => text,
+            Error::Cancelled(_) | Error::Remote(_) => "",
         }
     }
 }

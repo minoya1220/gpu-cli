@@ -207,6 +207,11 @@ pub fn launch_editor(
     directory: &str,
     config: Option<&str>,
 ) -> Result<()> {
+    if ctx.json() && editor == "nvim" {
+        return Err(crate::output::usage(
+            "Neovim needs a terminal; use --editor code or gpu exec ID -- COMMAND with --json.",
+        ));
+    }
     check_editor(&ctx.env, editor)?;
     if editor != "nvim" {
         let argv: Vec<String> = if editor == "zed" {

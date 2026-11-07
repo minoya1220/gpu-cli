@@ -28,6 +28,8 @@ pub struct Cmd {
     /// Capture stdout and stderr; otherwise they are inherited.
     pub capture: bool,
     pub timeout: Option<f64>,
+    /// Python-compatible text mode by default; remote command data opts out.
+    pub normalize_newlines: bool,
 }
 
 impl Cmd {
@@ -37,6 +39,7 @@ impl Cmd {
             stdin: Input::Null,
             capture: true,
             timeout: None,
+            normalize_newlines: true,
         }
     }
 
@@ -52,6 +55,11 @@ impl Cmd {
 
     pub fn timeout(mut self, timeout: Option<f64>) -> Cmd {
         self.timeout = timeout;
+        self
+    }
+
+    pub fn raw_output(mut self) -> Cmd {
+        self.normalize_newlines = false;
         self
     }
 
@@ -143,7 +151,11 @@ fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> Option<Receiver<Vec<u8>>>
 }
 
 /// A drained pipe's text; `None` when the deadline passes first.
-fn collect(receiver: Option<Receiver<Vec<u8>>>, deadline: Option<Instant>) -> Option<String> {
+fn collect(
+    receiver: Option<Receiver<Vec<u8>>>,
+    deadline: Option<Instant>,
+    normalize_newlines: bool,
+) -> Option<String> {
     let Some(receiver) = receiver else {
         return Some(String::new());
     };
@@ -157,7 +169,11 @@ fn collect(receiver: Option<Receiver<Vec<u8>>>, deadline: Option<Instant>) -> Op
             }
         }
     };
-    Some(translate_newlines(&bytes))
+    Some(if normalize_newlines {
+        translate_newlines(&bytes)
+    } else {
+        String::from_utf8_lossy(&bytes).into_owned()
+    })
 }
 
 fn wait(
@@ -213,8 +229,8 @@ impl Runner for RealRunner {
         let status = wait(&mut child, deadline)
             .map_err(|e| RunError::Os(e.to_string()))?
             .ok_or(RunError::TimedOut)?;
-        let stdout = collect(stdout, deadline).ok_or(RunError::TimedOut)?;
-        let stderr = collect(stderr, deadline).ok_or(RunError::TimedOut)?;
+        let stdout = collect(stdout, deadline, cmd.normalize_newlines).ok_or(RunError::TimedOut)?;
+        let stderr = collect(stderr, deadline, cmd.normalize_newlines).ok_or(RunError::TimedOut)?;
         let code = status
             .code()
             .unwrap_or_else(|| -status.signal().unwrap_or(1));
@@ -240,6 +256,10 @@ pub fn run<S: AsRef<str>>(ctx: &Ctx, argv: &[S], timeout: Option<f64>) -> Result
     let program = cmd.program().to_string();
     match ctx.run(&cmd) {
         Err(RunError::TimedOut) => Err(Error::msg(format!("Timed out running {program}"))),
+        Err(RunError::NotFound) if program == "vastai" => Err(Error::status(
+            crate::error::ExitCode::NotSetup,
+            "Install the Vast CLI, then check authentication. Next: gpu setup --provider vast",
+        )),
         Err(RunError::NotFound) => {
             Err(Error::msg(format!("Required command not found: {program}")))
         }
@@ -251,6 +271,11 @@ pub fn run<S: AsRef<str>>(ctx: &Ctx, argv: &[S], timeout: Option<f64>) -> Result
                 &output.stderr
             };
             let detail = redact_text(detail.trim());
+            if program == "vastai" {
+                if let Some(error) = crate::provider_errors::vast(&detail) {
+                    return Err(error);
+                }
+            }
             Err(Error::msg(if detail.is_empty() {
                 format!("Command failed: {program}")
             } else {

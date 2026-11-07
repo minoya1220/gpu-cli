@@ -1,6 +1,7 @@
 //! Ported Python tests, one module per Python test file (`tests/test_X.py`
 //! maps to `X.rs`, keeping each test's name).
 
+mod automation;
 mod cli;
 mod editors;
 mod expiry;
@@ -10,6 +11,7 @@ mod gcp_prices;
 mod instances;
 mod lifecycle;
 mod listing;
+mod not_found;
 mod picker;
 mod repo_cache;
 mod repos;

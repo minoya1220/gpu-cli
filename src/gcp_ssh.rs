@@ -17,9 +17,10 @@ pub fn ssh(ctx: &Ctx, id: &TpuId, exec: bool) -> Result<()> {
     if exec {
         return Err(Error::msg(ctx.exec(&args)));
     }
+    ctx.result("ssh_command", Value::str(crate::pyfmt::shell_join(&args)));
     ctx.println(&crate::pyfmt::shell_join(&args))
 }
-fn alias(id: &TpuId) -> String {
+pub fn alias(id: &TpuId) -> String {
     format!("gcp_{}_{}_{}", id.project, id.zone, id.name)
 }
 fn quote(value: &str) -> Result<String> {
@@ -149,6 +150,16 @@ fn save(ctx: &Ctx, id: &TpuId, stanza: &str) -> Result<()> {
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     Ok(())
 }
+pub fn has(ctx: &Ctx, id: &TpuId) -> Result<bool> {
+    let path = ctx.env.home().join(".ssh/gpu_gcp_config");
+    if !path.exists() {
+        return Ok(false);
+    }
+    let wanted = format!("Host {}", alias(id));
+    Ok(std::fs::read_to_string(&path)?
+        .lines()
+        .any(|line| line == wanted))
+}
 pub fn remove(ctx: &Ctx, id: &TpuId) -> Result<()> {
     let path = ctx.env.home().join(".ssh/gpu_gcp_config");
     if path.exists() {
@@ -186,30 +197,76 @@ fn probe(ctx: &Ctx, args: &[String], next: &str, timeout: f64) -> Result<bool> {
     }
 }
 
+/// Resolve gcloud's SSH alias after a bounded readiness probe.
+pub fn ready_alias(ctx: &Ctx, id: &TpuId, timeout: f64) -> Result<String> {
+    let start = ctx.clock.monotonic();
+    let next = format!(
+        "gpu wait {} --timeout {}",
+        id.cli(),
+        crate::pyfmt::general(timeout)
+    );
+    wait_for_ssh(ctx, id, &next, timeout)?;
+    let remaining = timeout - (ctx.clock.monotonic() - start);
+    if remaining <= 0.0 {
+        return Err(Error::status(
+            crate::error::ExitCode::WaitTimeout,
+            format!(
+                "Timed out resolving SSH for {}. Next: gpu wait {} --timeout 120",
+                id.cli(),
+                id.cli()
+            ),
+        ));
+    }
+    let mut dry = ssh_args(id);
+    dry.push("--dry-run".into());
+    let command = gcp::run_timeout(ctx, &dry, &next, remaining.min(15.0)).map_err(|e| {
+        if e.text().contains("timed out") {
+            Error::status(
+                crate::error::ExitCode::WaitTimeout,
+                format!("SSH alias resolution timed out. Next: {next}"),
+            )
+        } else {
+            e
+        }
+    })?;
+    save(ctx, id, &stanza(id, &command)?)?;
+    Ok(alias(id))
+}
+
 /// Use the same bounded readiness/SSH wait as Vast, without changing node
 /// lifecycle or its already armed expiry. All work runs after the picker exits.
-fn wait_for_ssh(ctx: &Ctx, id: &TpuId, editor: &str, timeout: f64) -> Result<Dict> {
+fn wait_for_ssh(ctx: &Ctx, id: &TpuId, next: &str, timeout: f64) -> Result<Dict> {
     let end = ctx.clock.monotonic() + timeout;
-    let next = format!("gpu edit {} --editor {editor}", id.cli());
-    let timed_out = || {
-        Error::msg(format!(
-            "Timed out waiting for TPU {} and SSH after {}s; expiry is unchanged. Next: {next}",
-            id.cli(),
-            crate::pyfmt::general(timeout)
-        ))
+    let timed_out = |reason: &str| {
+        Error::status(
+            crate::error::ExitCode::WaitTimeout,
+            format!(
+                "Timed out waiting for TPU {} and SSH after {}s ({reason}); expiry is unchanged. Next: {next}",
+                id.cli(),
+                crate::pyfmt::general(timeout)
+            ),
+        )
     };
-    ctx.eprintln(&format!(
+    ctx.progress(&format!(
         "Waiting for TPU {} and SSH (up to {}s)...",
         id.cli(),
         crate::pyfmt::general(timeout)
     ))?;
     let mut previous = String::new();
+    let mut reason = "provider readiness not observed".to_string();
     loop {
         let remaining = end - ctx.clock.monotonic();
         if remaining <= 0.0 {
-            return Err(timed_out());
+            return Err(timed_out(&reason));
         }
-        let node = gcp::json_timeout(ctx, id.args("describe"), &next, remaining.min(15.0))?
+        let node = gcp::json_timeout(ctx, id.args("describe"), next, remaining.min(15.0))
+            .map_err(|e| {
+                if e.text().contains("timed out") {
+                    timed_out("provider describe request timed out")
+                } else {
+                    e
+                }
+            })?
             .as_dict()
             .cloned()
             .ok_or_else(gcp::bad_reply)?;
@@ -232,30 +289,36 @@ fn wait_for_ssh(ctx: &Ctx, id: &TpuId, editor: &str, timeout: f64) -> Result<Dic
             return Err(gcp::bad_reply());
         }
         if state != previous {
-            ctx.eprintln(&format!("TPU {}: {state}", id.cli()))?;
+            ctx.progress(&format!("TPU {}: {state}", id.cli()))?;
             previous = state.into();
         }
+        reason = format!("provider status: {state}");
         match state {
             "READY" => {
-                workspace(&node)?;
                 let mut ssh = ssh_args(id);
-                ssh.push("--command=true".into());
+                ssh.extend([
+                    "--command=true".into(),
+                    "--ssh-flag=-oBatchMode=yes".into(),
+                    "--ssh-flag=-oConnectTimeout=5".into(),
+                    "--ssh-flag=-T".into(),
+                ]);
                 let remaining = end - ctx.clock.monotonic();
                 if remaining <= 0.0 {
-                    return Err(timed_out());
+                    return Err(timed_out(&reason));
                 }
-                if probe(ctx, &ssh, &next, remaining.min(15.0))? {
+                if probe(ctx, &ssh, next, remaining.min(15.0))? {
                     return Ok(node);
                 }
+                reason = "TPU is READY but SSH is not answering".into();
                 if ctx.clock.monotonic() >= end {
-                    return Err(timed_out());
+                    return Err(timed_out(&reason));
                 }
-                ctx.eprintln("TPU is READY; waiting for SSH...")?;
+                ctx.progress("TPU is READY; waiting for SSH...")?;
             }
             "CREATING" | "STARTING" | "RESTARTING" | "REIMAGING" | "REPAIRING" => {}
             _ => {
                 return Err(Error::msg(format!(
-                    "TPU {} is {state}; cannot open an editor. Next: gpu ls --provider gcp",
+                    "TPU {} is {state}; cannot answer SSH. Next: gpu ls --provider gcp",
                     id.cli()
                 )))
             }
@@ -301,15 +364,23 @@ pub fn edit(
         Some(e) => e,
         None if ctx.interactive() => crate::picker::pick(ctx, crate::editors::editor_screen())?,
         None => {
-            return Err(Error::msg(format!(
+            return Err(crate::output::usage(format!(
                 "Choose an editor. Next: gpu edit {} --editor code",
                 id.cli()
             )))
         }
     };
     crate::editors::check_editor(&ctx.env, &editor)?;
-    let node = wait_for_ssh(ctx, id, &editor, 120.0)?;
+    let node = wait_for_ssh(
+        ctx,
+        id,
+        &format!("gpu edit {} --editor {editor}", id.cli()),
+        120.0,
+    )?;
     let directory = workspace(&node)?;
+    ctx.result("directory", Value::str(directory));
+    ctx.result("editor", Value::str(&editor));
+    ctx.result("ssh_alias", Value::str(alias(id)));
     let mut dry = ssh_args(id);
     dry.push("--dry-run".into());
     let command = gcp::run_timeout(ctx, &dry, &format!("gpu ssh {} --exec", id.cli()), 15.0)?;

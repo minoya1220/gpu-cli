@@ -173,6 +173,8 @@ fn test_cli_dry_run_skips_github_and_prompts() {
             "Tesla T4",
             "--yes",
             "--dry-run",
+            "--expire",
+            "2h",
         ]);
         assert_eq!(main(&ctx, &argv), 0, "{flags:?}: {}", err(&ctx));
         let request = dry_run_request(&out(&ctx));
@@ -360,13 +362,10 @@ impl Search for OneOffer {
 }
 
 #[test]
-fn test_line_picker_new_choices_without_github() {
-    for (answers, repo) in [
-        (&["1"][..], Repo::NoRepo),
-        (
-            &["2", "sgl-project/sglang"],
-            Repo::from_arg("sgl-project/sglang"),
-        ),
+fn test_line_picker_no_repo_choice_and_url_refusal_without_terminal() {
+    for (answers, expected) in [
+        (&["1"][..], Some(Repo::NoRepo)),
+        (&["2", "sgl-project/sglang"][..], None),
     ] {
         let t = TestEnv::new();
         let runner = FakeRunner::new(|cmd| match cmd.program() {
@@ -374,14 +373,17 @@ fn test_line_picker_new_choices_without_github() {
             _ => panic!("unexpected command: {:?}", cmd.argv),
         });
         let ctx = t.ctx().runner(&runner).input(answers).build();
-        let (picks, _) = prompt_for_picks(
+        let result = prompt_for_picks(
             &ctx,
             Picks::new(None, Some("vm"), Some("B200")),
             &OneOffer,
             "minoya1220",
-        )
-        .unwrap();
-        assert_eq!(picks.repo, Some(repo));
+        );
+        if let Some(repo) = expected {
+            assert_eq!(result.unwrap().0.repo, Some(repo));
+        } else {
+            assert!(matches!(result, Err(crate::error::Error::Usage(_))));
+        }
         assert!(err(&ctx).contains("Could not list repositories: offline"));
     }
 }

@@ -58,7 +58,7 @@ pub fn validate_launch_args(args: &UpArgs) -> Result<()> {
     if args.disk.is_some_and(|d| d < 1) {
         return Err(Error::msg("--disk must be at least 1"));
     }
-    if args.max_price.is_some_and(|p| p <= 0.0) {
+    if args.max_price.is_some_and(|p| !p.is_finite() || p <= 0.0) {
         return Err(Error::msg("--max-price must be greater than 0"));
     }
     if args.reliability.is_some_and(|r| !(0.0..=1.0).contains(&r)) {
@@ -173,7 +173,7 @@ pub fn prompt_for_picks(
     // Without a GPU, search every model so the prompt can show real prices.
     let mut offers = search.offers(&mode, picks.gpu.as_deref())?;
     if offers.is_empty() {
-        return Err(Error::msg(NO_OFFERS));
+        return Err(Error::status(crate::error::ExitCode::NoCapacity, NO_OFFERS));
     }
     let gpu = match picks.gpu {
         Some(gpu) => gpu,
@@ -222,7 +222,7 @@ fn github_repos_for_prompt(ctx: &Ctx, owner: &str) -> Result<Vec<String>> {
 /// Offer chosen by `--offer`, `--yes` (cheapest), or a line-based prompt.
 pub fn select_offer(ctx: &Ctx, offers: Vec<Dict>, args: &UpArgs) -> Result<Dict> {
     if offers.is_empty() {
-        return Err(Error::msg(NO_OFFERS));
+        return Err(Error::status(crate::error::ExitCode::NoCapacity, NO_OFFERS));
     }
     let displayed: Vec<Dict> = offers.iter().take(10).cloned().collect();
     let mut labels = Vec::new();
@@ -255,6 +255,12 @@ pub fn select_offer(ctx: &Ctx, offers: Vec<Dict>, args: &UpArgs) -> Result<Dict>
     choose(ctx, &choices, "Offer", None, None)
 }
 
+fn created_id(response: &Dict) -> Option<String> {
+    response.get("new_contract").map(py_str).filter(|id| {
+        !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()) && id.bytes().any(|b| b != b'0')
+    })
+}
+
 /// Summarize `vastai create instance --raw` without echoing its secrets
 /// (`instance_api_key`).
 pub fn created_summary(output: &str) -> Result<String> {
@@ -272,19 +278,19 @@ pub fn created_summary(output: &str) -> Result<String> {
             .find(|v| truthy(v))
             .map(py_str)
             .unwrap_or_else(|| "unknown error".into());
+        if let Some(error) = crate::provider_errors::vast(&reason) {
+            return Err(error);
+        }
         return Err(Error::msg(format!(
             "Vast did not create the instance: {}",
             redact_text(&reason)
         )));
     }
-    match response.get("new_contract") {
-        None | Some(Value::Null) => Ok("Created instance. Next: `gpu ls` to find it.".into()),
-        Some(instance) => {
-            let instance = py_str(instance);
-            Ok(format!(
-                "Created instance {instance}.\nConnect: gpu ssh {instance} --exec"
-            ))
-        }
+    match created_id(&response) {
+        None => Ok("Created instance. Next: `gpu ls` to find it.".into()),
+        Some(instance) => Ok(format!(
+            "Created instance {instance}.\nConnect: gpu ssh {instance} --exec"
+        )),
     }
 }
 
@@ -475,7 +481,29 @@ pub fn launch(ctx: &Ctx, args: &UpArgs, cfg: &Dict, deadline: Option<Timestamp>)
         disk: args.disk,
     };
     let request = vast.request(&offer, &request_args, cfg)?;
+    let rate = if args.interruptible {
+        crate::offers::offer_number("min_bid", crate::offers::field(&offer, "min_bid")?)?
+    } else {
+        offer_price(&offer)?
+    };
+    let rate = rate.is_finite().then_some(rate);
+    crate::guardrails::spending(ctx, cfg, rate, deadline)?;
+    ctx.result("provider", Value::str("vast"));
+    ctx.result("id", Value::Null);
+    ctx.result("ssh_alias", Value::Null);
+    ctx.result("price_per_hour", rate.map_or(Value::Null, Value::Float));
+    ctx.result(
+        "expires_at",
+        deadline.map_or(Value::Null, |at| Value::str(at.to_string())),
+    );
+    ctx.result("ready", Value::Bool(false));
+    ctx.result("created", Value::Bool(false));
+    ctx.result("expiry_armed", Value::Bool(false));
     if args.dry_run {
+        ctx.result(
+            "request",
+            crate::redact::redact(&Value::List(request.clone())),
+        );
         ctx.println("DRY RUN: no instance created")?;
         ctx.println(&pyjson::dumps(&Value::List(request), Some(2)))?;
         if let Some(expire) = args.expire() {
@@ -497,16 +525,39 @@ pub fn launch(ctx: &Ctx, args: &UpArgs, cfg: &Dict, deadline: Option<Timestamp>)
             return Ok(());
         }
     }
+    if deadline.is_some_and(|at| at <= ctx.clock.now()) {
+        return Err(Error::msg(
+            "Expiry deadline passed; no instance created. Next: gpu up --expire 2h",
+        ));
+    }
+    ctx.result("created", Value::Null);
     let response = run(ctx, &argv(&request)?, None)?;
-    ctx.println(&created_summary(&response)?)?;
-    record_picks(&ctx.env, &[("mode", &mode), ("gpu", &gpu)])?;
-    let instance_id = match pyjson::loads(&response) {
-        Ok(Value::Dict(dict)) => dict
-            .get("new_contract")
-            .filter(|v| **v != Value::Null)
-            .map(py_str),
-        _ => None,
-    };
+    let parsed = pyjson::loads(&response).ok();
+    ctx.result(
+        "created",
+        parsed
+            .as_ref()
+            .and_then(Value::as_dict)
+            .and_then(|d| d.get("success"))
+            .filter(|v| matches!(v, Value::Bool(_)))
+            .cloned()
+            .unwrap_or(Value::Null),
+    );
+    let summary = created_summary(&response)?;
+    let instance_id = parsed
+        .as_ref()
+        .and_then(Value::as_dict)
+        .and_then(created_id);
+    if let Some(id) = &instance_id {
+        ctx.result("id", Value::str(id));
+    }
+    // Preserve the created ID and attempt expiry before propagating a failed announcement.
+    let announced = ctx.println(&summary);
+    if ctx.json() && instance_id.is_none() {
+        return Err(Error::msg(
+            "Create accepted but no instance ID returned; completion unverified. Next: gpu ls",
+        ));
+    }
     if args.expire().is_some() {
         let Some(instance_id) = &instance_id else {
             return Err(Error::msg(
@@ -514,20 +565,30 @@ pub fn launch(ctx: &Ctx, args: &UpArgs, cfg: &Dict, deadline: Option<Timestamp>)
             ));
         };
         match expire_instance(ctx, instance_id, "arm", deadline) {
-            Err(Error::Msg(text)) => {
+            Err(error) => {
+                let text = error.text();
                 let next = if text.contains(&format!("gpu expire {instance_id} ")) {
                     format!("Or stop billing: gpu down {instance_id}.")
                 } else {
                     format!("Run gpu expire {instance_id} show or gpu down {instance_id}.")
                 };
-                return Err(Error::msg(format!(
+                let message = format!(
                     "Instance {instance_id} created but expiry NOT verified; billing continues. {text}\n{next}"
-                )));
+                );
+                return Err(match error {
+                    Error::Status(code, _) => Error::status(code, message),
+                    _ => Error::msg(message),
+                });
             }
-            Err(other) => return Err(other),
-            Ok(()) => {}
+            Ok(alias) => {
+                ctx.result("ssh_alias", Value::str(alias));
+                ctx.result("expiry_armed", Value::Bool(true));
+                ctx.result("ready", Value::Bool(true));
+            }
         }
     }
+    announced?;
+    record_picks(&ctx.env, &[("mode", &mode), ("gpu", &gpu)])?;
     if let Some(instance_id) = instance_id {
         if ctx.interactive() {
             let editor = pick(ctx, after_up_screen(last_editor(&ctx.env)))?;

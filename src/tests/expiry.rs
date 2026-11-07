@@ -379,7 +379,12 @@ fn test_cli_dispatch() {
         } else {
             &[]
         };
-        let ctx = t.ctx().runner(&runner).pickers(pickers).build();
+        let ctx = t
+            .ctx()
+            .runner(&runner)
+            .interactive(picked)
+            .pickers(pickers)
+            .build();
         let mut argv = vec!["expire"];
         argv.extend_from_slice(args);
         assert_eq!(main(&ctx, &argv), 0, "{args:?}: {}", err(&ctx));

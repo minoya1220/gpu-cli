@@ -282,6 +282,10 @@ impl Queue {
         self.reconcile_inventory(ctx, &nodes?, tasks?)
     }
 
+    pub fn has_tasks(&self, ctx: &Ctx, id: &TpuId) -> Result<bool> {
+        Ok(!self.tasks(ctx, id)?.is_empty())
+    }
+
     pub fn cancel(&self, ctx: &Ctx, id: &TpuId) -> Result<()> {
         self.delete_tasks(ctx, id, &self.tasks(ctx, id)?)?;
         if !self.tasks(ctx, id)?.is_empty() {
@@ -347,25 +351,36 @@ pub fn manage(
     if let Some(deadline) = deadline {
         validate_deadline(ctx, deadline)?;
     }
-    reconcile(ctx, cfg)?;
     // Listing also lets cancel clean up tasks left by a failed/expired create.
     // Authentication failures are not confused with absence.
     let node = gcp::nodes(ctx, &id.project, &id.zone)?
         .into_iter()
         .find(|d| text(d, "name").is_some_and(|n| n.rsplit('/').next() == Some(&id.name)));
     if node.is_none() && action == "arm" {
-        return Err(Error::msg(
-            "TPU was not found; no new deletion task created. Next: gpu ls --provider gcp",
-        ));
+        return Err(Error::not_found(&id.cli()));
     }
+    let absent = node.is_none();
     // Metadata pins the queue even if local defaults have subsequently changed.
     let node = node.unwrap_or_default();
     if node.get("queuedResource").is_some_and(crate::pyfmt::truthy) {
         return Err(Error::msg("Queued-resource expiry is not supported; deleting only the node would leak its request. Next: gpu ls --provider gcp"));
     }
     let queue = queue_for_node(cfg, id, &node)?;
+    // A known orphan expiry task may still be inspected/cancelled after its
+    // node disappeared. An ID with neither a node nor a task is not a success.
+    if absent && queue.tasks(ctx, id)?.is_empty() {
+        return Err(Error::not_found(&id.cli()));
+    }
+    reconcile(ctx, cfg)?;
     if action == "cancel" {
         queue.cancel(ctx, id)?;
+        ctx.result(
+            "expiry",
+            Value::Dict(crate::pyjson::Dict::from_iter([
+                ("status".into(), Value::str("cancelled")),
+                ("deadlines".into(), Value::List(Vec::new())),
+            ])),
+        );
         return ctx.println(&format!("Expiry cancelled; billing continues. In-flight deletion cannot be stopped.\nNext: gpu down {}", id.cli()));
     }
     queue.check(ctx)?;
@@ -374,6 +389,20 @@ pub fn manage(
         if old.is_empty() {
             return Err(Error::msg("No pending task; expiry unarmed or already dispatched. Next: gpu ls --provider gcp"));
         }
+        ctx.result(
+            "expiry",
+            Value::Dict(crate::pyjson::Dict::from_iter([
+                ("status".into(), Value::str("armed")),
+                (
+                    "deadlines".into(),
+                    Value::List(
+                        old.iter()
+                            .map(|task| text(task, "scheduleTime").map_or(Value::Null, Value::str))
+                            .collect(),
+                    ),
+                ),
+            ])),
+        );
         for task in old {
             ctx.println(&format!("TPU {}: deletion dispatch/retry scheduled for {}; queue is RUNNING (API/IAM health is not guaranteed).", id.cli(), text(&task, "scheduleTime").unwrap_or("unknown")))?;
         }
@@ -383,6 +412,16 @@ pub fn manage(
     // Create and verify replacement first. If interrupted, the earlier of both
     // deadlines wins; never silently lose the only safety task.
     queue.arm(ctx, id, deadline)?;
+    ctx.result(
+        "expiry",
+        Value::Dict(crate::pyjson::Dict::from_iter([
+            ("status".into(), Value::str("armed")),
+            (
+                "deadlines".into(),
+                Value::List(vec![Value::str(deadline.to_string())]),
+            ),
+        ])),
+    );
     queue.delete_tasks(ctx, id, &old).map_err(|_| Error::msg(format!("New expiry is armed but old tasks remain; an earlier deadline may still destroy this TPU. Next: gpu expire {} show", id.cli())))?;
     ctx.println(&format!(
         "Delete {} at {deadline}; works offline.\nNext: gpu expire {} show",

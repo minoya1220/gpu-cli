@@ -278,6 +278,7 @@ pub struct Ctx {
     pub clock: Arc<dyn Clock>,
     pub console: Arc<Console>,
     pub ui: Arc<Ui>,
+    output: Arc<Mutex<crate::output::CommandOutput>>,
 }
 
 impl Ctx {
@@ -295,6 +296,7 @@ impl Ctx {
             }),
             console: Arc::new(Console::real()),
             ui: Arc::new(Ui::Terminal),
+            output: Arc::default(),
         }
     }
 
@@ -316,7 +318,54 @@ impl Ctx {
             gcp_price_lock: Arc::default(),
             gcp_catalog_lock: Arc::default(),
             gcp_sku_refreshed: Arc::default(),
+            output: Arc::default(),
         }
+    }
+
+    /// Fresh output state for one invocation, shared by its worker Jobs.
+    pub(crate) fn for_command(&self, json: bool) -> Self {
+        Self {
+            output: Arc::new(Mutex::new(crate::output::CommandOutput {
+                json,
+                ..Default::default()
+            })),
+            ..self.clone()
+        }
+    }
+
+    pub fn json(&self) -> bool {
+        self.output.lock().unwrap_or_else(|p| p.into_inner()).json
+    }
+
+    pub(crate) fn result(&self, key: &str, value: crate::pyjson::Value) {
+        self.output
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .result
+            .insert(key, value);
+    }
+
+    pub(crate) fn set_ssh_timeout(&self, seconds: f64) {
+        self.output
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .ssh_timeout = Some(seconds);
+    }
+
+    pub(crate) fn ssh_timeout(&self) -> f64 {
+        self.output
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .ssh_timeout
+            .unwrap_or(120.0)
+    }
+
+    pub(crate) fn result_snapshot(&self) -> crate::pyjson::Dict {
+        self.output
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .result
+            .clone()
     }
 
     /// Only setup, after explicit provider selection, may use this scoped copy.
@@ -333,7 +382,10 @@ impl Ctx {
         {
             Ok(())
         } else {
-            Err(Error::msg(crate::setup::GCP_NOT_SETUP))
+            Err(Error::status(
+                crate::error::ExitCode::NotSetup,
+                crate::setup::GCP_NOT_SETUP,
+            ))
         }
     }
 
@@ -369,19 +421,38 @@ impl Ctx {
     }
 
     pub fn println(&self, text: &str) -> Result<()> {
-        self.console.println(text)
+        if self.json() {
+            self.progress(text)
+        } else {
+            self.console.println(text)
+        }
     }
 
     pub fn eprintln(&self, text: &str) -> Result<()> {
         self.console.eprintln(text)
     }
 
+    /// GPU-owned progress is useful in a terminal, but must not mix with a
+    /// remote command's stderr or a non-terminal command's machine output.
+    pub(crate) fn progress(&self, text: &str) -> Result<()> {
+        if self.interactive() {
+            self.eprintln(text)
+        } else {
+            Ok(())
+        }
+    }
+
     pub fn interactive(&self) -> bool {
-        self.console.interactive()
+        self.console.interactive() && !self.json()
     }
 
     /// `input(prompt)`; end of input becomes `Err(on_eof)`.
     pub fn input_or(&self, prompt: &str, on_eof: Error) -> Result<String> {
+        if !self.interactive() {
+            return Err(crate::output::usage(
+                "Cannot prompt without a terminal; pass the missing command flag (see --help).",
+            ));
+        }
         self.console.input(prompt)?.ok_or(on_eof)
     }
 }

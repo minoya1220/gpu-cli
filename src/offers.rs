@@ -49,8 +49,7 @@ pub struct OfferSearch {
 
 impl OfferSearch {
     pub fn new(vast: Vast, args: &UpArgs, cfg: &Dict) -> Result<OfferSearch> {
-        let choosing_offer =
-            !args.yes && args.offer.is_none() && (!args.dry_run || vast.ctx.interactive());
+        let choosing_offer = !args.yes && args.offer.is_none();
         let verified = if args.unverified || choosing_offer {
             ""
         } else {

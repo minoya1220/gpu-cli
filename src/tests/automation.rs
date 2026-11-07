@@ -88,8 +88,8 @@ fn every_vast_command_has_one_json_object_with_machine_results() {
     assert_eq!(result.get("ready"), Some(&Value::Bool(true)));
     let result = object(&ctx, "wait", 0, &["wait", "123", "--timeout", "3"]);
     assert_eq!(result.get("ready"), Some(&Value::Bool(true)));
-    let result = object(&ctx, "ls", 0, &["ls"]);
-    assert_eq!(result.get("instances").unwrap().as_list().unwrap().len(), 1);
+    assert_eq!(main(&ctx, &["ls", "--json"]), 0, "{}", err(&ctx));
+    assert_eq!(dicts(&out(&ctx)).len(), 1);
     let result = object(&ctx, "expire", 0, &["expire", "123", "show"]);
     assert_eq!(result.get("action"), Some(&Value::str("show")));
     assert_eq!(
@@ -327,17 +327,69 @@ fn default_expiry_and_opt_in_session_spend_cap_are_local_guardrails() {
 }
 
 #[test]
-fn dry_run_without_yes_chooses_cheapest_without_prompting() {
+fn nonterminal_dry_run_without_an_offer_choice_refuses_before_searching() {
     let (_t, ctx, runner) = fixture();
     let mut flags: Vec<_> = UP.iter().copied().filter(|a| *a != "--yes").collect();
-    flags.extend(["--dry-run", "--json"]);
-    assert_eq!(main(&ctx, &flags), 0, "{}", err(&ctx));
+    flags.push("--dry-run");
+    assert_eq!(main(&ctx, &flags), 2);
+    let stderr = err(&ctx);
+    assert!(
+        stderr.contains("--yes (cheapest) or --offer ID"),
+        "{stderr}"
+    );
+    assert!(out(&ctx).is_empty());
+    assert!(runner.calls().is_empty());
+}
+
+#[test]
+fn vast_ids_containing_401_are_not_authentication_failures() {
+    for (args, reply, expected, name) in [
+        (
+            vec!["stop", "24015678"],
+            "no such instance 24015678",
+            1,
+            "error",
+        ),
+        (
+            vec!["down", "24015678", "--yes"],
+            "failed with error 401: please log in again",
+            13,
+            "auth_expired",
+        ),
+    ] {
+        let t = TestEnv::new();
+        let runner = FakeRunner::new(move |_| Ok(Output::failed(1, reply)));
+        let ctx = t.ctx().runner(&runner).build();
+        let mut args = args.clone();
+        args.push("--json");
+        assert_eq!(main(&ctx, &args), expected, "{args:?}");
+        let object = dict(&out(&ctx));
+        let error = object.get("error").unwrap().as_dict().unwrap();
+        assert_eq!(error.get("code"), Some(&Value::str(name)), "{args:?}");
+        assert!(crate::pyfmt::py_str(error.get("message").unwrap()).contains(reply));
+    }
+}
+
+#[test]
+fn vast_offer_gone_with_401_digits_reports_no_capacity_with_detail() {
+    let t = TestEnv::new();
+    let runner = FakeRunner::new(|cmd| match strs(&cmd.argv)[..] {
+        ["vastai", "search", ..] => {
+            ok(r#"[{"id":14012345,"gpu_name":"Tesla T4","num_gpus":1,"dph_total":0.1}]"#)
+        }
+        ["vastai", "create", ..] => Ok(Output::failed(1, "offer 14012345 is no longer available")),
+        _ => panic!("unexpected command: {:?}", cmd.argv),
+    });
+    let ctx = t.ctx().runner(&runner).build();
+    let mut args = UP.to_vec();
+    args.extend(["--offer", "14012345"]);
+    args.push("--json");
+    assert_eq!(main(&ctx, &args), 10, "{}", err(&ctx));
     let object = dict(&out(&ctx));
-    let result = object.get("result").unwrap().as_dict().unwrap();
-    assert_eq!(result.get("dry_run"), Some(&Value::Bool(true)));
-    assert_eq!(result.get("created"), Some(&Value::Bool(false)));
-    assert_eq!(runner.calls().len(), 1);
-    assert!(runner.calls()[0].argv[3].contains("verified=true"));
+    let error = object.get("error").unwrap().as_dict().unwrap();
+    assert_eq!(error.get("code"), Some(&Value::str("no_capacity")));
+    assert!(crate::pyfmt::py_str(error.get("message").unwrap())
+        .contains("offer 14012345 is no longer available"));
 }
 
 #[test]

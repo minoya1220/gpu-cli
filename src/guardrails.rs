@@ -62,6 +62,11 @@ pub(crate) fn nonterminal(ctx: &Ctx, command: &Command, cfg: &Dict) -> Result<()
                     "Choose a TPU zone: pass --zone ZONE (or configure gcp.zone).",
                 ));
             }
+            if !tpu && flags.dry_run && !flags.yes && flags.offer.is_none() {
+                return Err(usage(
+                    "Choose an offer: pass --yes (cheapest) or --offer ID.",
+                ));
+            }
             if !flags.yes && !flags.dry_run {
                 return Err(usage("Non-terminal paid launch requires --yes; use --dry-run to inspect without renting."));
             }

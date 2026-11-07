@@ -483,19 +483,7 @@ fn tpu_listing_uses_cached_slice_prices_and_create_time_without_price_requests()
         assert!(out(&ctx).contains(ID));
         assert_eq!(main(&ctx, &["ls", "--provider", "gcp", "--json"]), 0);
         let listing = json(&out(&ctx));
-        let listed = listing
-            .as_dict()
-            .unwrap()
-            .get("result")
-            .unwrap()
-            .as_dict()
-            .unwrap()
-            .get("instances")
-            .unwrap()
-            .as_list()
-            .unwrap()[0]
-            .as_dict()
-            .unwrap();
+        let listed = listing.as_list().unwrap()[0].as_dict().unwrap();
         assert_eq!(listed.get("id"), Some(&Value::str(ID)));
         assert_eq!(listed.get("duration"), Some(&Value::Int(420)));
         assert_eq!(
@@ -520,19 +508,7 @@ fn unknown_tpu_create_times_stay_unknown_and_v5litepod_has_its_public_name() {
         state.lock().unwrap().nodes.push(n);
         assert_eq!(main(&ctx, &["ls", "--provider", "gcp", "--json"]), 0);
         let listing = json(&out(&ctx));
-        let listed = listing
-            .as_dict()
-            .unwrap()
-            .get("result")
-            .unwrap()
-            .as_dict()
-            .unwrap()
-            .get("instances")
-            .unwrap()
-            .as_list()
-            .unwrap()[0]
-            .as_dict()
-            .unwrap();
+        let listed = listing.as_list().unwrap()[0].as_dict().unwrap();
         assert_eq!(listed.get("gpu_name"), Some(&Value::str("v5e-1")));
         assert!(listed.get("duration").is_none());
         assert!(listed.get("dph_total").is_none());

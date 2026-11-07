@@ -244,7 +244,7 @@ pub fn select_offer(ctx: &Ctx, offers: Vec<Dict>, args: &UpArgs) -> Result<Dict>
                 Error::msg(format!("Offer {wanted} does not match the current search"))
             });
     }
-    if args.yes || (args.dry_run && !ctx.interactive()) {
+    if args.yes {
         return Ok(displayed[0].clone());
     }
     let choices = Choices {

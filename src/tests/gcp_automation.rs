@@ -131,3 +131,16 @@ fn tpu_spend_cap_refuses_before_arming_or_creating() {
         .flatten()
         .any(|a| a == "create" || a == "create-http-task"));
 }
+
+#[test]
+fn tpu_json_launch_without_wait_reports_no_unconfigured_ssh_alias() {
+    let (env, ctx, _runner, _state) = fixture();
+    super::super::gcp_prices::cache(&env);
+    let launch = result(&ctx, UP);
+    assert!(crate::gcp::text(&launch, "id")
+        .unwrap()
+        .starts_with("gcp:test-project:us-east5-b:gpu-"));
+    assert_eq!(launch.get("created"), Some(&Value::Bool(true)));
+    assert_eq!(launch.get("ssh_alias"), Some(&Value::Null));
+    assert!(!env.home.join(".ssh/gpu_gcp_config").exists());
+}

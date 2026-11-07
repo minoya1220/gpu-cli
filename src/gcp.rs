@@ -792,7 +792,7 @@ fn launch_loop(
         crate::guardrails::spending(ctx, cfg, rate, Some(deadline))?;
         ctx.result("provider", Value::str("gcp"));
         ctx.result("id", Value::str(id.cli()));
-        ctx.result("ssh_alias", Value::str(crate::gcp_ssh::alias(&id)));
+        ctx.result("ssh_alias", Value::Null);
         ctx.result("price_per_hour", rate.map_or(Value::Null, Value::Float));
         ctx.result("expires_at", Value::str(deadline.to_string()));
         ctx.result("ready", Value::Bool(false));

@@ -411,7 +411,7 @@ expose tokens.
 
 ## Non-terminal commands and JSON
 
-Non-terminal `up` requires explicit hardware, repository/no-repository, Vast mode or TPU zone, `--yes` (unless `--dry-run`), and `--expire DURATION` or a configured `default_expire` (e.g. `"2h"`). Non-terminal `down` requires an ID and `--yes`; commands never read unanswered prompts.
+Non-terminal `up` requires explicit hardware, repository/no-repository, Vast mode or TPU zone, `--yes` (a Vast `--dry-run` needs `--yes` or `--offer ID` instead), and `--expire DURATION` or a configured `default_expire` (e.g. `"2h"`). Non-terminal `down` requires an ID and `--yes`; commands never read unanswered prompts.
 
 ```sh
 gpu up --no-repo --mode container --gpu 'RTX 4090' --yes --expire 2h --wait --json
@@ -423,12 +423,11 @@ gpu cp 12345678 :/workspace/results ./results
 
 `wait`, `exec` and `cp` support both providers and their existing IDs/SSH aliases. `up --wait` waits for working SSH; `--timeout SECONDS` bounds readiness (default 120, maximum 86400). `exec` and `cp` wait first too; their timeout bounds readiness, not command runtime/transfer time. `exec` closes stdin, allocates no terminal, quotes arguments literally (use `sh -c SCRIPT` for shell syntax), and passes stdout, stderr and the remote exit code through. `cp` requires exactly one `:/absolute/path`, uses batch SFTP (`scp -s` required), and accepts `--recursive`. Neither bypasses SSH host-key checks; configure host trust/keys beforehand.
 
-Every command accepts `--json`: stdout is exactly one object, with progress on stderr:
+Every command except `ls` accepts `--json`: stdout is exactly one object, with progress on stderr:
 `{"command":"wait","ok":true,"result":{"id":"12345678","ready":true,"ssh_alias":"vast-12345678"}}`.
-Failures set `ok:false` and add `error:{code,message,exit_code}`; `result` retains known partial results, including the created ID if expiry/readiness fails. Parse failures use command `"parse"`. Help/version remain text; interactive SSH/Neovim sessions reject JSON (use `exec` instead). Result fields:
+Failures set `ok:false` and add `error:{code,message,exit_code}`; `result` retains known partial results, including the created ID if expiry/readiness fails. Parse failures use command `"parse"`. Help/version remain text; `gpu ls --json` keeps its bare JSON array of credential-redacted instance records (no envelope, errors stay text); interactive SSH/Neovim sessions reject JSON (use `exec` instead). Result fields:
 
-- `up`: `provider`, `id`, `ssh_alias`, `price_per_hour` (USD), `expires_at` (UTC), `created`, `expiry_armed`, `ready`, `dry_run`; dry runs also include `request`. Unknown values are null; check `created` and `expiry_armed` before assuming success.
-- `ls`: `instances` (credential-redacted provider records, full IDs and original numeric precision). **This wraps the previous bare JSON array.**
+- `up`: `provider`, `id`, `ssh_alias`, `price_per_hour` (USD), `expires_at` (UTC), `created`, `expiry_armed`, `ready`, `dry_run`; dry runs also include `request`. Unknown values are null; a TPU `ssh_alias` stays null until `--wait` (or `gpu wait`) configures it. Check `created` and `expiry_armed` before assuming success.
 - `wait`: `id`, `ssh_alias`, `ready`; `exec`/`cp` add `exit_code`, `stdout`, `stderr`; `cp` also returns `source`, `destination`. Captured streams are UTF-8 text (invalid bytes replaced); plain execution preserves bytes.
 - `stop`/`down`: `id`, `state` (`stopped`/`destroyed`). `expire`: `id`, `action`, `expiry:{status,deadlines}` (UTC list).
 - `setup`: `provider`, `project`, `action`, `dry_run`, plus `ready` for a selected provider or `vast_ready`/`gcp_ready` for status. GCP plans also report `queue` and `enable_apis` when applicable.

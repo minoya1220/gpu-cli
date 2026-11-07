@@ -411,15 +411,7 @@ fn test_ls_table_and_json_output() {
     assert!(output.contains("Uptime") && output.contains("2h 02m"));
     assert!(!output.contains("7342"));
     assert_eq!(main(&ctx, &["ls", "--json"]), 0);
-    assert_eq!(
-        dict(&out(&ctx))
-            .get("result")
-            .unwrap()
-            .as_dict()
-            .unwrap()
-            .get("instances"),
-        Some(&json(payload))
-    );
+    assert_eq!(json(&out(&ctx)), json(payload));
     let empty = FakeRunner::new(|_| ok("[]"));
     let ctx = t.ctx().runner(&empty).build();
     assert_eq!(main(&ctx, &["ls"]), 0);

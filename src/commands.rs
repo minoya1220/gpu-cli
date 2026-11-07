@@ -22,10 +22,7 @@ use crate::vast::{find_instance, list_instances};
 pub fn ls(ctx: &Ctx, json: bool) -> Result<()> {
     let raw = run(ctx, &["vastai", "show", "instances", "--raw"], None)?;
     let value = crate::vast::parse_reply(&raw)?;
-    if json && ctx.json() {
-        ctx.result("instances", redact(&value));
-        Ok(())
-    } else if json {
+    if json {
         ctx.println(&pyjson::dumps(&redact(&value), Some(1)))
     } else {
         render_instances(ctx, &value)

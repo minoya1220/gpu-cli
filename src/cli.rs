@@ -248,6 +248,7 @@ pub fn parse(argv: &[String]) -> Parsed {
         }) => {
             if let Command::Ls { json, .. } = &mut command {
                 *json = output_json;
+                return Parsed::Run(Box::new(command));
             }
             if output_json {
                 Parsed::RunJson(Box::new(command))

@@ -125,14 +125,10 @@ pub fn ls(ctx: &Ctx, cfg: &Dict, json: bool, long: bool, only: Option<&str>) -> 
     let (items, failed) = inventory(ctx, cfg, only)?;
     if json {
         let value = Value::List(items.iter().cloned().map(Value::Dict).collect());
-        if ctx.json() {
-            ctx.result("instances", crate::redact::redact(&value));
-        } else {
-            ctx.println(&crate::pyjson::dumps(
-                &crate::redact::redact(&value),
-                Some(1),
-            ))?;
-        }
+        ctx.println(&crate::pyjson::dumps(
+            &crate::redact::redact(&value),
+            Some(1),
+        ))?;
     }
     if !json && (!items.is_empty() || failed.is_empty()) {
         crate::instances::render_table(ctx, &items, long)?;

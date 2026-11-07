@@ -829,12 +829,14 @@ fn test_vast_confirmation_left_restores_offer_and_only_yes_enter_creates() {
     );
     term.wait(on("Offer: RTX 4090"));
     term.wait(shows("id=100"));
-    term.press_until(RIGHT, shows("Type yes:"));
+    // Wait for the whole frame: a read can end before the footer is drawn.
+    term.press_until(RIGHT, |t| {
+        shows("Type yes:")(t) && t.last_line() == "← back"
+    });
     assert_eq!(
         term.title(),
         "Launch RTX 4090 container for gpu-cli at $0.30/hr?"
     );
-    assert_eq!(term.last_line(), "← back");
     assert_eq!(
         term.lines().len(),
         3,
@@ -915,11 +917,13 @@ fn test_tpu_confirmation_left_restores_filtered_zone_in_direct_and_shared_flows(
             term.wait(on("TPU zone"));
         }
         term.press_until("us-east5-b", shows("Filter: us-east5-b"));
-        term.press_until(ENTER, shows("Type yes:"));
+        // Wait for the whole frame: a read can end before the footer is drawn.
+        term.press_until(ENTER, |t| {
+            shows("Type yes:")(t) && t.last_line() == "← back"
+        });
         assert!(term
             .title()
             .starts_with("Launch v6e-1 Spot in us-east5-b for $"));
-        assert_eq!(term.last_line(), "← back");
         assert!(!term
             .lines()
             .iter()

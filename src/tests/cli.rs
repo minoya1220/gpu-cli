@@ -507,7 +507,7 @@ fn test_interactive_gpu_stats_and_offers_share_unverified_filter() {
     launch(&ctx, &args, &defaults(), None).unwrap();
     let output = out(&ctx);
     assert!(!runner.argvs()[0][3].contains("verified=true"));
-    assert!(output.contains("$0.095/hr (2 offers)"));
+    assert!(output.contains("$0.095/hr") && output.contains("2 offers"));
     assert!(output.contains("verification=unverified"));
     assert!(!output.contains("deverified"));
     assert_eq!(dry_run_request(&output)[3], "2");

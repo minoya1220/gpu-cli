@@ -115,6 +115,127 @@ pub fn run(
     }
 }
 
+fn hardware_cells(label: &str) -> Vec<String> {
+    regex::Regex::new(r" {2,}")
+        .unwrap()
+        .split(label)
+        .map(String::from)
+        .collect()
+}
+
+fn assert_hardware_grid(labels: &[String]) {
+    assert!(labels.len() >= 2, "{labels:?}");
+    let columns = labels
+        .iter()
+        .map(|label| {
+            assert_eq!(hardware_cells(label).len(), 4, "{label:?}");
+            let spot = label.find("Spot ").expect("Spot column");
+            let count = label.rfind("  ").expect("offers column") + 2;
+            [
+                label[..spot].chars().count(),
+                label[..count].chars().count(),
+            ]
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        columns.iter().all(|cols| *cols == columns[0]),
+        "misaligned: {labels:?}"
+    );
+}
+
+#[test]
+fn hardware_cells_keep_offer_totals_and_do_not_invent_vast_spot_quotes() {
+    let stats = [
+        ("RTX 5090".into(), (0.441, 64)),
+        ("H100 SXM".into(), (2.0, 3)),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        crate::offers::model_columns("RTX 5090", &stats, "…"),
+        ["RTX 5090", "$0.441/hr", "Spot -", "64 offers"]
+    );
+    assert_eq!(
+        crate::offers::model_columns("missing", &stats, "…"),
+        ["missing", "…", "Spot -", "-"]
+    );
+    assert_eq!(
+        crate::offers::category_columns(
+            "All",
+            &["RTX 5090".into(), "H100 SXM".into()],
+            &stats,
+            "-"
+        ),
+        ["All", "from $0.441/hr", "Spot -", "67 offers"]
+    );
+}
+
+#[test]
+fn hardware_grid_aligns_recents_categories_search_and_models_without_new_jobs() {
+    let env = TestEnv::new();
+    let gate = Gate::default();
+    let search = Arc::new(FakeSearch {
+        stats_gate: Some(gate.clone()),
+        ..Default::default()
+    });
+    let blocked = gate.clone();
+    let rates = Job::new(move || {
+        assert!(blocked.wait());
+        Ok(Arc::new(super::gcp_prices::prices()))
+    });
+    let flow = LaunchWizard::new(
+        &env.env(),
+        WizardOptions {
+            repos: Job::new(|| panic!("no-repo must not request repositories")),
+            search: Some(search.clone()),
+            models: MODELS.map(String::from).to_vec(),
+            recent_gpus: vec!["RTX 4090".into()],
+            choose_offer: true,
+            tpu_setup_error: None,
+            tpu_transition: None,
+            tpu_prices: Some(rates),
+            tpu_cached_prices: None,
+            tpu_types: Vec::new(),
+            tpu_catalog: None,
+            owner: "example".into(),
+        },
+    );
+    let result = run(
+        &flow,
+        Picks::new(Some(Repo::NoRepo), Some("container"), None),
+        move |keys| {
+            assert_hardware_grid(&keys.labels());
+            assert!(
+                keys.press_until(DOWN, |s| s
+                    .body
+                    .iter()
+                    .any(|l| l.starts_with('›') && l.contains("Datacenter")))
+                    < quick()
+            );
+            gate.set();
+            keys.wait(|s| {
+                s.labels.iter().any(|l| l.contains("Spot $0.750/hr"))
+                    && s.labels.iter().any(|l| l.contains("from $1.735/hr"))
+            });
+            assert_hardware_grid(&keys.labels());
+            keys.type_text("0");
+            let labels = keys.labels();
+            assert!(labels.iter().any(|l| l.starts_with("RTX 4090")));
+            assert!(labels.iter().any(|l| l.starts_with("TPU ")));
+            assert_hardware_grid(&labels);
+            keys.press_until(BACK, |s| s.title == "GPU" && s.filter.is_empty());
+            keys.press(DOWN);
+            keys.press_until(RIGHT, on("Datacenter Blackwell/Hopper"));
+            assert_hardware_grid(&keys.labels());
+            keys.press_until(BACK, on("GPU"));
+            keys.press(CTRL_C);
+        },
+    );
+    assert_eq!(result, Outcome::Cancelled(130));
+    assert_eq!(search.stats_calls(), ["container"]);
+    assert!(search.offer_calls().is_empty());
+}
+
 #[test]
 fn metadata_jobs_are_running_on_repository_and_reused_through_tpu_capacity() {
     use crate::picker::JobState;
@@ -546,7 +667,7 @@ fn test_auto_prices_are_shared_by_gpu_screens_and_loaded_once_per_mode() {
         keys.wait_for("container prices", || {
             watched.stats_calls() == ["container"]
         });
-        keys.wait(|s| s.labels.join(" ").contains("(1 model, from $1.735/hr)"));
+        keys.wait(|s| s.labels.join(" ").contains("from $1.735/hr"));
         keys.press_until(RIGHT, on("Datacenter Blackwell/Hopper"));
         labels.lock().unwrap().extend(keys.labels());
         keys.press_until(BACK, on("GPU"));
@@ -567,9 +688,17 @@ fn test_auto_prices_are_shared_by_gpu_screens_and_loaded_once_per_mode() {
         cloud: None,
     };
     assert_eq!(result, Outcome::Done(expected));
+    let labels = gpu_labels.lock().unwrap();
+    assert_hardware_grid(&labels);
     assert_eq!(
-        *gpu_labels.lock().unwrap(),
-        ["B200  $1.735/hr (1 offer)", "H100 SXM  -"]
+        labels
+            .iter()
+            .map(|label| hardware_cells(label))
+            .collect::<Vec<_>>(),
+        [
+            vec!["B200", "$1.735/hr", "Spot -", "1 offer"],
+            vec!["H100 SXM", "-", "Spot -", "-"],
+        ]
     );
 }
 

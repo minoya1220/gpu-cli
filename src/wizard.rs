@@ -8,7 +8,8 @@ use std::sync::Arc;
 use crate::ctx::{Ctx, Env};
 use crate::error::{Error, Result};
 use crate::offers::{
-    category_label, group_by_category, model_label, offer_rows, OfferSearch, Stats, NO_OFFERS,
+    category_columns, group_by_category, hardware_labels, model_columns, offer_rows,
+    HardwareColumns, OfferSearch, Stats, NO_OFFERS,
 };
 use crate::picker::{pick, AnyJob, Job, JobState, Next, Opt, PickValue, Screen};
 use crate::pyjson::Dict;
@@ -94,6 +95,25 @@ impl Search for OfferSearch {
 pub type CloudTransition = Rc<dyn Fn(LaunchWizard, Picks) -> Next<Choice, Picks>>;
 
 type WizardScreen = Screen<Choice, Picks>;
+
+fn hardware_options(rows: Vec<(Choice, HardwareColumns)>, query: Option<&str>) -> Vec<Opt<Choice>> {
+    let needle = query.map(crate::pyfmt::casefold);
+    // Measure visible matches together, not hidden long model names. The picker
+    // repeats the same casefolded match, preserving its normal filter semantics.
+    let (values, cells): (Vec<_>, Vec<_>) = rows
+        .into_iter()
+        .filter(|(_, cells)| {
+            needle
+                .as_ref()
+                .is_none_or(|needle| crate::pyfmt::casefold(&cells.join("  ")).contains(needle))
+        })
+        .unzip();
+    values
+        .into_iter()
+        .zip(hardware_labels(&cells))
+        .map(|(value, label)| Opt::new(value, label))
+        .collect()
+}
 type Step = Next<Choice, Picks>;
 
 struct State {
@@ -479,28 +499,28 @@ impl LaunchWizard {
                 .or_else(|| self.state.tpu_cached_prices.clone())
         }
     }
-    fn price_suffix(state: JobState) -> &'static str {
+    fn price_placeholder(state: JobState) -> &'static str {
         if matches!(state, JobState::Idle | JobState::Running) {
-            "  …"
+            "…"
         } else {
-            "  -"
+            "-"
         }
     }
-    fn tpu_options(&self, shortcuts: Vec<String>) -> Vec<Opt<Choice>> {
+    fn tpu_rows(&self, shortcuts: Vec<String>) -> Vec<(Choice, HardwareColumns)> {
         let values = std::iter::once(None)
             .chain(shortcuts.into_iter().map(Some))
             .collect::<Vec<_>>();
         let prices = self.tpu_prices();
         let types = self.tpu_types();
-        let cells = values
-            .iter()
+        values
+            .into_iter()
             .map(|value| {
                 let name = value
                     .as_ref()
                     .map(|t| format!("TPU {t}"))
                     .unwrap_or_else(|| TPU_CATEGORY.into());
                 let [demand, spot] = if let Some(p) = &prices {
-                    let (members, minimum) = match value {
+                    let (members, minimum) = match &value {
                         Some(t) if t.contains('-') => (vec![t.clone()], false),
                         Some(g) => (crate::gcp_types::members(&types, g), true),
                         None => (types.clone(), true),
@@ -510,7 +530,7 @@ impl LaunchWizard {
                         minimum,
                     )
                 } else if self.state.tpu_setup_error.is_some() {
-                    ["needs gpu setup".into(), String::new()]
+                    ["needs gpu setup".into(), "Spot -".into()]
                 } else {
                     let pending = matches!(
                         self.state.tpu_prices.state(),
@@ -519,24 +539,9 @@ impl LaunchWizard {
                     let value = if pending { "…" } else { "-" };
                     [value.into(), format!("Spot {value}")]
                 };
-                [name, demand, spot]
-            })
-            .collect::<Vec<_>>();
-        let labels = crate::offers::aligned_rows(
-            &cells,
-            [
-                crate::offers::Column::Left,
-                crate::offers::Column::Left,
-                crate::offers::Column::Plain,
-            ],
-        );
-        values
-            .into_iter()
-            .zip(labels)
-            .map(|(value, label)| {
-                Opt::new(
+                (
                     Choice::Tpu(value.map(TpuChoice::Type).unwrap_or(TpuChoice::ChooseType)),
-                    label.trim_end().to_string(),
+                    [name, demand, spot, "-".into()],
                 )
             })
             .collect()
@@ -553,23 +558,21 @@ impl LaunchWizard {
             move || {
                 let stats = prices.result().unwrap_or_default();
                 let status = prices.state();
-                let mut options = Vec::new();
+                let pending = Self::price_placeholder(status);
+                let mut rows = Vec::new();
                 for model in &opts.state.recent_gpus {
-                    let mut label = format!("Recent: {}", model_label(model, &stats));
-                    if !stats.contains_key(model) {
-                        label.push_str(Self::price_suffix(status));
-                    }
-                    options.push(Opt::new(Choice::Gpu(model.clone()), label));
+                    let mut cells = model_columns(model, &stats, pending);
+                    cells[0] = format!("Recent: {model}");
+                    rows.push((Choice::Gpu(model.clone()), cells));
                 }
                 for (category, models) in &opts.state.categories {
-                    let mut label = category_label(category, models, &stats);
-                    if !models.iter().any(|m| stats.contains_key(m)) {
-                        label.push_str(Self::price_suffix(status));
-                    }
-                    options.push(Opt::new(Choice::Category(category.clone()), label));
+                    rows.push((
+                        Choice::Category(category.clone()),
+                        category_columns(category, models, &stats, pending),
+                    ));
                 }
-                options.extend(opts.tpu_options(Vec::new()));
-                options
+                rows.extend(opts.tpu_rows(Vec::new()));
+                hardware_options(rows, None)
             }
         };
         let searching = {
@@ -577,16 +580,15 @@ impl LaunchWizard {
             move |query: &str| {
                 let stats = prices.result().unwrap_or_default();
                 let status = prices.state();
-                let mut options = search
+                let mut rows = search
                     .state
                     .models
                     .iter()
-                    .map(|m| {
-                        let mut label = model_label(m, &stats);
-                        if !stats.contains_key(m) {
-                            label.push_str(Self::price_suffix(status));
-                        }
-                        Opt::new(Choice::Gpu(m.clone()), label)
+                    .map(|model| {
+                        (
+                            Choice::Gpu(model.clone()),
+                            model_columns(model, &stats, Self::price_placeholder(status)),
+                        )
                     })
                     .collect::<Vec<_>>();
 
@@ -596,8 +598,8 @@ impl LaunchWizard {
                 } else {
                     crate::gcp_types::generations(&types)
                 };
-                options.extend(search.tpu_options(values));
-                options
+                rows.extend(search.tpu_rows(values));
+                hardware_options(rows, Some(query))
             }
         };
         let follow = picks.clone();
@@ -680,16 +682,16 @@ impl LaunchWizard {
                 .find(|(n, _)| *n == name)
                 .map(|(_, m)| m.clone())
                 .unwrap_or_default();
-            members
+            let rows = members
                 .iter()
                 .map(|gpu| {
-                    let mut label = model_label(gpu, &stats);
-                    if !stats.contains_key(gpu) {
-                        label.push_str(Self::price_suffix(stats_job.state()));
-                    }
-                    Opt::new(Choice::Gpu(gpu.clone()), label)
+                    (
+                        Choice::Gpu(gpu.clone()),
+                        model_columns(gpu, &stats, Self::price_placeholder(stats_job.state())),
+                    )
                 })
-                .collect()
+                .collect();
+            hardware_options(rows, None)
         };
         let wizard = self.clone();
         let select = move |choice: Choice| match choice {

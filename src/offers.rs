@@ -288,6 +288,67 @@ pub(crate) fn aligned_rows<const N: usize>(
         .collect()
 }
 
+/// Hardware discovery uses one four-column grid across providers. Vast Spot
+/// remains unquoted until the separate interruptible UI work is approved.
+pub(crate) type HardwareColumns = [String; 4];
+
+pub(crate) fn hardware_labels(rows: &[HardwareColumns]) -> Vec<String> {
+    aligned_rows(
+        rows,
+        [Column::Left, Column::Right, Column::Left, Column::Plain],
+    )
+    .into_iter()
+    .map(|label| label.trim_end().to_string())
+    .collect()
+}
+
+pub(crate) fn model_columns(model: &str, stats: &Stats, pending: &str) -> HardwareColumns {
+    let price = stats
+        .get(model)
+        .map(|(price, _)| *price)
+        .filter(|price| price.is_finite() && *price >= 0.0);
+    [
+        model.into(),
+        price
+            .map(|price| format!("${}/hr", fixed(price, 3)))
+            .unwrap_or_else(|| pending.into()),
+        "Spot -".into(),
+        stats
+            .get(model)
+            .map(|(_, count)| plural(*count, "offer"))
+            .unwrap_or_else(|| "-".into()),
+    ]
+}
+
+pub(crate) fn category_columns(
+    category: &str,
+    models: &[String],
+    stats: &Stats,
+    pending: &str,
+) -> HardwareColumns {
+    let values = models
+        .iter()
+        .filter_map(|model| stats.get(model))
+        .collect::<Vec<_>>();
+    let cheapest = values
+        .iter()
+        .map(|(price, _)| *price)
+        .filter(|price| price.is_finite() && *price >= 0.0)
+        .min_by(f64::total_cmp);
+    [
+        category.into(),
+        cheapest
+            .map(|price| format!("from ${}/hr", fixed(price, 3)))
+            .unwrap_or_else(|| pending.into()),
+        "Spot -".into(),
+        if values.is_empty() {
+            "-".into()
+        } else {
+            plural(values.iter().map(|(_, count)| count).sum(), "offer")
+        },
+    ]
+}
+
 pub fn model_label(model: &str, stats: &Stats) -> String {
     match stats.get(model) {
         None => model.to_string(),

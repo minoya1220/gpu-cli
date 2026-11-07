@@ -38,7 +38,7 @@ In the terminal picker:
 - Choose **No repository** or **Clone from URL...** without waiting for GitHub. Paste a URL or `owner/name`, then Enter. Backspace edits; arrows select or go back, not move the text cursor.
 - Press → to retry a failed offer load; Ctrl-R retries repositories. Enter still submits the **Clone from URL** repository text box and TPU destruction-duration text box; line-based prompts/confirmations also keep Enter. With piped input, the CLI uses numbered line prompts instead.
 
-Offers are sorted cheapest first and show hourly price, reliability, verification, ID, and location. Up to ten are shown. Recent successful choices appear first; cancellations and dry runs do not change history.
+GPU and TPU rows share aligned name, price, Spot and offer-count columns. `-` means unquoted, not unsupported; Vast's Spot column is not quoted yet. Offers are sorted cheapest first and show hourly price, reliability, verification, ID, and location. Up to ten are shown. Recent successful choices appear first; cancellations and dry runs do not change history.
 
 ### Launch with flags
 

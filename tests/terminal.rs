@@ -804,6 +804,72 @@ printf 'test-token\n'
 }
 
 #[test]
+fn test_gpu_picker_measures_vast_and_tpu_rows_in_the_same_four_columns() {
+    let sandbox = Sandbox::new();
+    sandbox.gcp_lifecycle();
+    sandbox.stub(
+        "vastai",
+        &common::FAKE_CLI
+            .replace("offer 100 \"RTX 4090\" 0.3", "offer 100 \"H100 NVL\" 0.441")
+            .replace("offer 101 \"Tesla T4\" 0.4", "offer 101 \"Titan V\" 2.0"),
+    );
+    let history = sandbox.history_path();
+    std::fs::create_dir_all(history.parent().unwrap()).unwrap();
+    std::fs::write(
+        &history,
+        r#"{"gpu":["H100 NVL","Titan V"],"gcp_zone:test-project":["us-east5-b"]}"#,
+    )
+    .unwrap();
+    let mut term = Terminal::start(
+        &sandbox,
+        &["up", "--no-repo", "--expire", "2h", "--dry-run"],
+    );
+    term.wait(on("Mode"));
+    term.press_until(RIGHT, on("GPU"));
+    term.wait(shows("$0.441/hr"));
+    term.wait(shows("Spot $0.750/hr"));
+    let assert_grid = |term: &Terminal| {
+        let labels = term
+            .lines()
+            .into_iter()
+            .filter_map(|line| line.split_once(". ").map(|(_, label)| label.to_string()))
+            .collect::<Vec<_>>();
+        assert!(labels.len() > 2, "{labels:?}");
+        let gaps = regex::Regex::new(r" {2,}").unwrap();
+        let columns = labels
+            .iter()
+            .map(|label| {
+                assert_eq!(gaps.split(label).count(), 4, "{label:?}");
+                [
+                    label[..label.find("Spot ").unwrap()].chars().count(),
+                    label[..label.rfind("  ").unwrap() + 2].chars().count(),
+                ]
+            })
+            .collect::<Vec<_>>();
+        assert!(columns.iter().all(|col| *col == columns[0]), "{labels:?}");
+        assert_aligned(term, "Spot ");
+        // Rates are right-aligned: a two-digit dollar amount starts one cell
+        // earlier, but its decimal places and /hr suffix share the same columns.
+        assert_aligned(term, "/hr");
+    };
+    assert!(shows("Recent: H100 NVL")(&term));
+    assert_grid(&term);
+    term.press_until("v", shows("Filter: v"));
+    term.wait(shows("TPU v6e"));
+    assert!(shows("H100 NVL")(&term));
+    assert!(shows("Titan V")(&term));
+    assert_grid(&term);
+    assert!(term.lines().iter().any(|line| line.contains("H100 NVL")
+        && line.contains("Spot -")
+        && line.contains("1 offer")));
+    term.press("\x03");
+    assert_eq!(term.exit_status(), 130);
+    assert!(!sandbox.calls().iter().any(|call| call
+        .iter()
+        .any(|a| a == "create" || a == "create-http-task" || a == "--interruptible")));
+}
+
+#[test]
 fn test_ls_is_one_compact_aligned_table_in_a_real_terminal() {
     let sandbox = Sandbox::new();
     sandbox.mixed_listing();

@@ -1,4 +1,4 @@
-//! Discovery is project-scoped, cached for 15 minutes, and fetched with one
+//! Discovery is project-scoped, retained for offline use, and fetched with one
 //! parallel curl process rather than a Python/gcloud process per location.
 //! v1 locations matches gcloud; v2 locations omits v4-only zones.
 //! Launch preflight still checks its selected zone fresh before confirmation.
@@ -64,7 +64,7 @@ fn file(project: &str) -> String {
     format!("tpu-catalog-{project}.json")
 }
 fn cached(ctx: &Ctx, project: &str) -> Option<Vec<Zone>> {
-    let data = gcp_http::read_cache(ctx, &file(project), 900)?;
+    let data = gcp_http::read_cache(ctx, &file(project), i64::MAX)?;
     let rows = data.get("zones")?.as_list()?;
     rows.iter()
         .map(|v| {
@@ -95,11 +95,9 @@ pub fn cached_types(ctx: &Ctx, project: &str, zone: &str) -> Result<Vec<String>>
     }
     types(ctx, project, zone)
 }
-fn discover(ctx: &Ctx, project: &str) -> Result<Vec<Zone>> {
+pub fn refresh(ctx: &Ctx, project: &str) -> Result<Vec<Zone>> {
+    ctx.require_gcloud()?;
     let _flight = ctx.gcp_catalog_lock.lock().map_err(|_| invalid())?;
-    if let Some(zones) = cached(ctx, project) {
-        return Ok(zones);
-    }
     if !gcp::component(project) {
         return Err(invalid());
     }
@@ -188,7 +186,8 @@ pub fn types_job(ctx: &Ctx, cfg: &Dict) -> crate::picker::Job<Vec<String>> {
         let project = gcp::Settings::load(&cfg)
             .map_err(|e| e.text().to_string())?
             .project;
-        zones(&worker, &project, None)
+        refresh(&worker, &project)
+            .or_else(|error| cached(&worker, &project).ok_or(error))
             .map(|zs| {
                 let mut types = zs.into_iter().flat_map(|z| z.types).collect::<Vec<_>>();
                 types.sort();
@@ -203,7 +202,10 @@ pub fn zones(ctx: &Ctx, project: &str, tpu: Option<&str>) -> Result<Vec<Zone>> {
     if !gcp::component(project) {
         return Err(invalid());
     }
-    let mut result = discover(ctx, project)?;
+    let mut result = match cached(ctx, project) {
+        Some(zones) => zones,
+        None => refresh(ctx, project)?,
+    };
     let wanted = tpu.map(canonical);
     result.retain(|z| !z.types.is_empty() && wanted.as_ref().is_none_or(|t| z.types.contains(t)));
     crate::gcp_geo::order(&ctx.env, &mut result, |z| &z.name);
@@ -227,12 +229,13 @@ pub fn verify(ctx: &Ctx, project: &str, zone: &str, tpu: &str) -> Result<()> {
         return Ok(());
     }
     // A stale discovery entry must not recommend the just-rejected zone.
-    let path = ctx
-        .env
-        .xdg("XDG_CACHE_HOME", ".cache")
-        .join("gpu")
-        .join(file(project));
-    let _ = std::fs::remove_file(path);
+    if let Some(mut data) = gcp_http::read_cache(ctx, &file(project), i64::MAX) {
+        if let Some(Value::List(mut zones)) = data.get("zones").cloned() {
+            zones.retain(|v| v.as_dict().and_then(|d| gcp::text(d, "name")) != Some(zone));
+            data.insert("zones", Value::List(zones));
+        }
+        gcp_http::write_cache(ctx, &file(project), data);
+    }
     let alternatives = known(ctx, project, Some(tpu))
         .into_iter()
         .filter(|z| z.name != zone)
@@ -267,6 +270,57 @@ pub fn verify(ctx: &Ctx, project: &str, zone: &str, tpu: &str) -> Result<()> {
 mod tests {
     use super::*;
     use crate::testing::*;
+    #[test]
+    fn launch_jobs_refresh_even_new_caches_and_keep_offline_choices() {
+        use crate::picker::{testing::*, JobState, Next, Opt, Outcome, Screen};
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let env = TestEnv::new();
+        let count = Arc::new(AtomicUsize::new(0));
+        let shared = count.clone();
+        let runner = crate::tests::gcp_transport::runner(move |cmd| {
+            if cmd.argv[3] == "locations" {
+                let n = shared.fetch_add(1, Ordering::SeqCst);
+                if n >= 2 {
+                    return Ok(crate::process::Output::failed(1, "offline"));
+                }
+                return ok(r#"[{"locationId":"us-east5-b"}]"#);
+            }
+            ok(&format!(
+                r#"[{{"type":"v6e-{}"}}]"#,
+                shared.load(Ordering::SeqCst)
+            ))
+        });
+        let ctx = env.ctx().runner(&runner).build().for_gcp_setup();
+        let cfg = dict(
+            r#"{"gcp":{"project":"test-project","setup":{"version":1,"project":"test-project"}}}"#,
+        );
+        for expected in ["v6e-1", "v6e-2", "v6e-2"] {
+            let job = types_job(&ctx, &cfg);
+            let rows = job.clone();
+            let observer = job.observer();
+            let screen = Screen::new(
+                "types",
+                move || {
+                    rows.result()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|s| Opt::new(s.clone(), s))
+                        .collect()
+                },
+                Next::Done,
+            )
+            .load(job);
+            let result = drive(screen, move |keys| {
+                keys.wait(|_| observer.state() == JobState::Done);
+                keys.press(RIGHT);
+            });
+            assert_eq!(result, Outcome::Done(expected.to_string()));
+        }
+        assert_eq!(count.load(Ordering::SeqCst), 3);
+    }
     #[test]
     fn empty_locations_are_not_offered_and_type_filtering_uses_live_catalogs() {
         let env = TestEnv::new();

@@ -12,6 +12,16 @@ use crate::ctx::{Clock, Console, Ctx, Env, Ui};
 use crate::process::{Cmd, Output, RunError, Runner};
 use crate::pyjson::{self, Dict, Value};
 
+/// Seed a setup-complete test's offline facts, not the production catalog.
+pub fn tpu_facts(ctx: &Ctx) {
+    let data = dict(include_str!("../tests/common/tpu_facts.json"));
+    for name in ["tpu-catalog-test-project.json", "tpu-sku-facts.json"] {
+        if crate::gcp_http::read_cache(ctx, name, i64::MAX).is_none() {
+            crate::gcp_http::write_cache(ctx, name, data.clone());
+        }
+    }
+}
+
 type Handler = Box<dyn Fn(&Cmd) -> Result<Output, RunError> + Send + Sync>;
 
 /// Answers commands with a handler and records them. A handler panics on a

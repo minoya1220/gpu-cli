@@ -1,24 +1,13 @@
-//! Generated, non-price facts seed every screen. Live cache entries override
-//! known zones and extend types/SKU metadata; paid preflight is always live.
+//! Non-price TPU facts fetched during setup and refreshed during launch.
+//! Cached facts remain usable offline; paid preflight is always live.
 use crate::{
     ctx::Ctx,
     error::{Error, Result},
     gcp,
     gcp_catalog::Zone,
     gcp_http,
-    pyjson::{self, Dict, Value},
+    pyjson::{Dict, Value},
 };
-use std::{collections::BTreeMap, sync::OnceLock};
-fn bundled() -> &'static Dict {
-    static DATA: OnceLock<Dict> = OnceLock::new();
-    DATA.get_or_init(|| {
-        pyjson::loads(include_str!("data/tpu_facts.json"))
-            .expect("generated TPU facts JSON")
-            .as_dict()
-            .expect("TPU facts object")
-            .clone()
-    })
-}
 fn rows(d: &Dict, key: &str) -> Vec<Dict> {
     d.get(key)
         .cloned()
@@ -44,20 +33,14 @@ fn parse_zones(data: &Dict) -> Vec<Zone> {
         .collect()
 }
 pub fn known_zones(ctx: &Ctx, project: &str) -> Vec<Zone> {
-    let mut zones = parse_zones(bundled())
-        .into_iter()
-        .map(|z| (z.name.clone(), z))
-        .collect::<BTreeMap<_, _>>();
     if gcp::component(project) {
         if let Some(cache) =
             gcp_http::read_cache(ctx, &format!("tpu-catalog-{project}.json"), i64::MAX)
         {
-            for zone in parse_zones(&cache) {
-                zones.insert(zone.name.clone(), zone);
-            }
+            return parse_zones(&cache);
         }
     }
-    zones.into_values().collect()
+    Vec::new()
 }
 pub fn known_types(ctx: &Ctx, project: &str, zone: Option<&str>) -> Vec<String> {
     let mut types = known_zones(ctx, project)
@@ -70,24 +53,9 @@ pub fn known_types(ctx: &Ctx, project: &str, zone: Option<&str>) -> Vec<String> 
     types
 }
 pub fn skus(ctx: &Ctx) -> Vec<Dict> {
-    let mut skus = rows(bundled(), "skus")
-        .into_iter()
-        .filter_map(|mut s| {
-            let id = gcp::text(&s, "id")?.to_string();
-            // Only bundled rows omit generation; runtime cache values remain authoritative.
-            let generation = sku_generation(&s).map(Value::str).unwrap_or(Value::Null);
-            s.insert("generation", generation);
-            Some((id, s))
-        })
-        .collect::<BTreeMap<_, _>>();
-    if let Some(data) = gcp_http::read_cache(ctx, "tpu-sku-facts.json", i64::MAX) {
-        for sku in rows(&data, "skus") {
-            if let Some(id) = gcp::text(&sku, "id").filter(|s| gcp::component(s)) {
-                skus.insert(id.into(), sku);
-            }
-        }
-    }
-    skus.into_values().collect()
+    gcp_http::read_cache(ctx, "tpu-sku-facts.json", i64::MAX)
+        .map(|data| rows(&data, "skus"))
+        .unwrap_or_default()
 }
 pub fn generation(text: &str) -> Option<&'static str> {
     let s = text
@@ -181,16 +149,6 @@ pub fn refresh_skus(ctx: &Ctx, project: &str) -> Result<()> {
         .gcp_sku_lock
         .lock()
         .map_err(|_| Error::msg("Catalog refresh unavailable."))?;
-    if gcp_http::read_cache(ctx, "tpu-sku-facts.json", 30 * 86400).is_some() {
-        return Ok(());
-    }
-    let generated =
-        gcp::text(bundled(), "generated_at").and_then(|s| s.parse::<jiff::Timestamp>().ok());
-    if generated
-        .is_some_and(|t| (0..30 * 86400).contains(&(ctx.clock.now().as_second() - t.as_second())))
-    {
-        return Ok(());
-    }
     let listed = gcp_http::pages(
         ctx,
         project,
@@ -234,6 +192,9 @@ pub fn refresh_skus(ctx: &Ctx, project: &str) -> Result<()> {
         );
         services.push(Value::Dict(d));
     }
+    if skus.is_empty() {
+        return Err(gcp::bad_reply());
+    }
     let mut cache = Dict::new();
     cache.insert("services", Value::List(services));
     cache.insert("skus", Value::List(skus));
@@ -245,17 +206,49 @@ mod tests {
     use super::*;
     use crate::testing::*;
     #[test]
-    fn bundled_generation_is_derived_but_cached_generation_is_preserved() {
+    fn every_refresh_fetches_metadata_and_failure_keeps_offline_facts() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let env = TestEnv::new();
+        std::fs::create_dir_all(env.config.join("gpu")).unwrap();
+        std::fs::write(
+            env.config.join("gpu/config.json"),
+            r#"{"gcp":{"project":"test-project","setup":{"version":1,"project":"test-project"}}}"#,
+        )
+        .unwrap();
+        let round = Arc::new(AtomicUsize::new(0));
+        let counter = round.clone();
+        let runner = FakeRunner::new(move |cmd| {
+            if cmd.program() == "gcloud" {
+                return ok("test-token");
+            }
+            crate::tests::gcp_transport::curl(cmd, |url| {
+                if url.contains("/skus?") {
+                    let n = counter.load(Ordering::SeqCst);
+                    (200, format!(r#"{{"skus":[{{"skuId":"sku-{n}","description":"TPU v6e chip","category":{{"resourceGroup":"TPU","usageType":"OnDemand"}},"serviceRegions":["us-east5"]}}]}}"#))
+                } else {
+                    let n = counter.fetch_add(1, Ordering::SeqCst);
+                    if n >= 2 { return (503, "{}".into()); }
+                    (200, r#"{"services":[{"name":"services/test-service","displayName":"Cloud TPU"}]}"#.into())
+                }
+            }).unwrap()
+        });
+        let ctx = env.ctx().runner(&runner).build();
+        for id in ["sku-1", "sku-2"] {
+            refresh_skus(&ctx, "test-project").unwrap();
+            assert_eq!(gcp::text(&skus(&ctx)[0], "id"), Some(id));
+        }
+        assert!(refresh_skus(&ctx, "test-project").is_err());
+        assert_eq!(gcp::text(&skus(&ctx)[0], "id"), Some("sku-2"));
+    }
+    #[test]
+    fn cached_sku_metadata_is_preserved() {
         let env = TestEnv::new();
         let ctx = env.ctx().build();
-        let bundled = skus(&ctx);
-        for sku in &bundled {
-            assert_eq!(
-                sku.get("generation"),
-                Some(&sku_generation(sku).map(Value::str).unwrap_or(Value::Null))
-            );
-        }
-        let mut cached = bundled[0].clone();
+        assert!(skus(&ctx).is_empty());
+        let mut cached = dict(r#"{"id":"test-sku"}"#);
         cached.insert("generation", Value::str("hand-edited-generation"));
         let id = gcp::text(&cached, "id").unwrap().to_string();
         let mut data = Dict::new();
@@ -269,22 +262,10 @@ mod tests {
         );
     }
     #[test]
-    fn generated_snapshot_has_facts_not_prices_and_cache_overrides_known_zones() {
-        let text = include_str!("data/tpu_facts.json");
-        for forbidden in [
-            "unitPrice",
-            "tieredRates",
-            "pricingInfo",
-            "Authorization",
-            "gcp-sandbox",
-        ] {
-            assert!(!text.contains(forbidden), "{forbidden}");
-        }
-        assert!(rows(bundled(), "zones").len() > 20);
-        assert!(rows(bundled(), "skus").len() > 100);
+    fn only_cached_zones_are_offered() {
         let env = TestEnv::new();
         let ctx = env.ctx().build();
-        assert!(!known_types(&ctx, "test-project", None).is_empty());
+        assert!(known_types(&ctx, "test-project", None).is_empty());
         let mut cache = dict(
             r#"{"zones":[{"name":"us-east5-b","types":[]},{"name":"future-region1-a","types":["v99-1"]}]}"#,
         );
@@ -296,6 +277,6 @@ mod tests {
         );
         cache.insert("zones", Value::Null);
         gcp_http::write_cache(&ctx, "tpu-catalog-test-project.json", cache);
-        assert!(!known_types(&ctx, "test-project", None).is_empty());
+        assert!(known_types(&ctx, "test-project", None).is_empty());
     }
 }

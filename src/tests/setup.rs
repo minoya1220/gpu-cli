@@ -234,7 +234,25 @@ fn fixture() -> (TestEnv, Ctx, Arc<FakeRunner>, Arc<Mutex<State>>) {
             _ => panic!("unexpected cloud operation (no IAM/resource writes allowed): {a:?}"),
         }
     };
-    let runner = super::gcp_transport::runner(move |cmd| {
+    let runner = FakeRunner::new(move |cmd| {
+        if cmd.program() == "curl" {
+            if let crate::process::Input::Text(config) = &cmd.stdin {
+                if config.contains("https://cloudbilling.googleapis.com/v1/services")
+                    || cmd
+                        .argv
+                        .iter()
+                        .any(|a| a.starts_with("https://cloudbilling.googleapis.com/v1/services"))
+                {
+                    return super::gcp_transport::curl(cmd, |url| {
+                        if url.contains("/skus?") {
+                            (200, r#"{"skus":[{"skuId":"test-sku","description":"TPU v6e chip","category":{"usageType":"OnDemand","resourceGroup":"TPU"},"serviceRegions":["us-east5"]}]}"#.into())
+                        } else {
+                            (200, r#"{"services":[{"name":"services/test-service","displayName":"Cloud TPU"}]}"#.into())
+                        }
+                    }).unwrap();
+                }
+            }
+        }
         super::gcp_transport::adapt(cmd, &native).unwrap_or_else(|| native(cmd))
     });
     let ctx = env.ctx().runner(&runner).build();
@@ -743,7 +761,7 @@ fn unset_up_cloud_is_blocked_at_the_single_process_boundary_for_all_commands() {
 }
 
 #[test]
-fn setup_needs_no_zone_and_never_reads_accelerator_catalogs() {
+fn setup_needs_no_zone_and_populates_types_zones_and_sku_cache() {
     let (env, ctx, runner, _state) = fixture();
     assert_eq!(main(&ctx, APPLY), 0, "{}", err(&ctx));
     assert!(cfg(&env)
@@ -753,10 +771,16 @@ fn setup_needs_no_zone_and_never_reads_accelerator_catalogs() {
         .unwrap()
         .get("zone")
         .is_none());
-    assert!(!runner
-        .calls()
-        .iter()
-        .any(|c| c.program() == "curl" || c.argv.iter().any(|a| a == "accelerator-types")));
+    assert!(runner.calls().iter().any(|c| c.program() == "curl"));
+    assert_eq!(
+        crate::gcp_facts::known_types(&ctx, "test-project", Some("us-east5-b")),
+        ["v6e-1"]
+    );
+    assert_eq!(crate::gcp_facts::skus(&ctx).len(), 1);
+    assert_eq!(
+        crate::gcp::text(&crate::gcp_facts::skus(&ctx)[0], "id"),
+        Some("test-sku")
+    );
 }
 #[test]
 fn setup_zone_flag_is_rejected_without_cloud_calls() {

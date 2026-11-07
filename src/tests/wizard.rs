@@ -96,7 +96,7 @@ fn wizard(
             tpu_transition: None,
             tpu_prices: None,
             tpu_cached_prices: None,
-            tpu_types: Vec::new(),
+            tpu_types: vec!["v5e-1".into(), "v6e-1".into()],
             tpu_catalog: None,
             owner: "minoya1220".into(),
         },
@@ -195,7 +195,7 @@ fn hardware_grid_aligns_recents_categories_search_and_models_without_new_jobs() 
             tpu_transition: None,
             tpu_prices: Some(rates),
             tpu_cached_prices: None,
-            tpu_types: Vec::new(),
+            tpu_types: vec!["v6e-1".into()],
             tpu_catalog: None,
             owner: "example".into(),
         },
@@ -759,7 +759,7 @@ fn test_gpu_screen_caps_valid_recents_at_three_and_always_lists_tpus() {
 }
 
 #[test]
-fn test_gpu_search_finds_tpu_category_and_types_without_cloud_config() {
+fn test_gpu_search_finds_cached_tpu_category_and_types() {
     for (query, expected) in [
         ("tpu", TpuChoice::ChooseType),
         ("v5e", TpuChoice::Type("v5e".into())),

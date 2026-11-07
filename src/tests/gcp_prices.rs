@@ -29,6 +29,7 @@ pub(crate) fn prices() -> Prices {
 pub(crate) fn cache(env: &TestEnv) {
     let p = prices();
     let ctx = env.ctx().clock(&FakeClock::at(p.at)).build();
+    tpu_facts(&ctx);
     let entries = crate::gcp_facts::skus(&ctx)
         .into_iter()
         .filter(|m| {
@@ -158,7 +159,7 @@ fn fixture() -> (TestEnv, Ctx, Arc<FakeRunner>) {
             if url.contains("acceleratorTypes") {return (200,r#"{"acceleratorTypes":[{"type":"v6e-1"}]}"#.into());}
             if url.contains("/locations?") {return (200,r#"{"locations":[{"locationId":"us-east5-b"}]}"#.into());}
             let id=url.split("/skus/").nth(1).unwrap().split('/').next().unwrap();
-            let env=TestEnv::new();let probe=env.ctx().build();let meta=crate::gcp_facts::skus(&probe).into_iter().find(|m|crate::gcp::text(m,"id")==Some(id)).unwrap();
+            let env=TestEnv::new();let probe=env.ctx().build();tpu_facts(&probe);let meta=crate::gcp_facts::skus(&probe).into_iter().find(|m|crate::gcp::text(m,"id")==Some(id)).unwrap();
             let spot=crate::gcp_facts::capacity(&meta)==Some(true);
             (200,format!(r#"{{"currencyCode":"USD","rate":{{"unitInfo":{{"unit":"h","unitDescription":"hour","unitQuantity":{{"value":"1"}}}},"tiers":[{{"startAmount":{{"value":"0"}},"listPrice":{{"currencyCode":"USD","units":"{}","nanos":750000000}}}}]}}}}"#,if spot {0} else {2}))
         }).unwrap()
@@ -168,6 +169,7 @@ fn fixture() -> (TestEnv, Ctx, Arc<FakeRunner>) {
         .runner(&runner)
         .clock(&FakeClock::at(prices().at))
         .build();
+    tpu_facts(&ctx);
     (env, ctx, runner)
 }
 #[test]
@@ -242,7 +244,11 @@ fn tpu_prices_load_automatically_and_no_setup_note_is_visible() {
                 tpu_transition: None,
                 tpu_prices: Some(job),
                 tpu_cached_prices: None,
-                tpu_types: Vec::new(),
+                tpu_types: if configured {
+                    vec!["v6e-1".into()]
+                } else {
+                    Vec::new()
+                },
                 tpu_catalog: None,
                 owner: "example".into(),
             },

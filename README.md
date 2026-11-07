@@ -33,7 +33,7 @@ In the terminal picker:
 - Type to filter, use ↑/↓ to move, and → or Enter to select. Backtick does nothing.
 - Press ← to clear the filter, then go back. On the first screen, press twice to quit. Ctrl-C or Ctrl-D quits from any screen; Esc does nothing.
 - The GPU screen shows at most **three Recent** rows, GPU categories, and **TPU (Google Cloud)**. Type `tpu` to find the TPU category, `v5e` for a generation, or `v6e-1` for a full TPU type. TPU discovery is visible even before Google Cloud is configured. Before Google Cloud setup, selecting it keeps a notice pointing to `gpu setup` on screen, including the exact config file path; no Google Cloud command runs and no TPU is created. Press ← to return to the GPU choices, or Ctrl-C to quit.
-- GPU/TPU price and TPU catalog reads start when the launch picker opens, while you choose Repository/Mode, without blocking input. TPU rows need `gpu setup`; cached estimates show their age. Choose a TPU generation, size and priced capacity, then its area and priced zone. Digits filter names; on short, unfiltered lists, 1-9 select directly.
+- GPU/TPU price and TPU catalog reads start when the launch picker opens, while you choose Repository/Mode, without blocking input. Before `gpu setup`, only the TPU category appears and selecting it explains setup; no TPU types or prices are offered. After setup, cached choices appear immediately and refresh in the background; cached estimates show their age. Choose a TPU generation, size and priced capacity, then its area and priced zone. Digits filter names; on short, unfiltered lists, 1-9 select directly.
 - On the Repository screen, **1–7** select the first seven repos, **8** opens **All repositories...** (when there are more than seven), **9** opens **Clone from URL...**, and **0** selects **No repository** at the bottom. Type to filter across all repos, including those not initially shown.
 - Choose **No repository** or **Clone from URL...** without waiting for GitHub. Paste a URL or `owner/name`, then Enter. Backspace edits; arrows select or go back, not move the text cursor.
 - Press → to retry a failed offer load; Ctrl-R retries repositories. Enter submits repository URLs and TPU durations. Paid launch approval needs **yes + Enter**; → never authorizes it. Press ← to restore the previous page, even after typing. Terminal text prompts decode arrow keys without echoing escape codes. Piped input keeps numbered line prompts.
@@ -318,12 +318,14 @@ Vast and TPU prices load **automatically in background Jobs**. Choices accept
 input immediately; `…` becomes a price or `price unavailable`. Ctrl-R retries
 failures; revisiting a screen reuses its Job/cache. There is no F2 step.
 
-`src/data/tpu_facts.json` bundles **no dollar amounts**: zone/type mappings and
-SKU metadata for on-demand/Spot usage. Generations are derived from SKU metadata;
-reviewed region coordinates live in `src/data/gcp_region_locations.csv`.
-Live caches extend types and override known zones. Project catalogs refresh
-in the background after setup (15-minute cache); SKU metadata lasts 30 days.
-A stale snapshot can never bypass live paid-launch preflight.
+`gpu setup` fetches TPU types, zones and SKU IDs into the local cache.
+Each `gpu up` with the launch picker open refreshes those facts in background
+Jobs while cached choices are shown instantly. Failed refreshes retain the last
+cache for offline browsing; facts have no age-based refresh interval.
+`gpu ls`, `gpu edit` and `gpu down` do not refresh facts. Nothing runs when the
+CLI is not running. No TPU catalog is bundled with the binary; the reviewed
+region coordinates in `src/data/gcp_region_locations.csv` remain for nearest-zone
+ordering. Cached facts can never bypass live paid-launch preflight.
 
 Dollar values come from Google's authenticated [public SKU price API](https://cloud.google.com/billing/docs/reference/pricing-api/rest/v1beta/skus.price/get),
 using known [Catalog SKU IDs](https://cloud.google.com/billing/v1/how-tos/catalog-api).
@@ -340,17 +342,9 @@ curl on stdin, never argv, logs or caches. User curl config, proxies and redirec
 are disabled. Rerun old setup to explicitly enable Cloud Billing; ordinary
 commands never enable it or grant access silently.
 
-To regenerate facts (read-only; requires completed setup and Python 3):
-
-```sh
-python3 tools/update_tpu_facts.py --project PROJECT
-```
-
-The script queries TPU/Billing metadata, strips prices/account details and unused
-fields, and writes one compact record per line. Offline input
-is supported with `--input FILE`. It uses v1 location discovery (matching gcloud;
-v2 omits the v4-only zone), then v2 accelerator types. Review the diff before
-committing. A refresh failure leaves the existing snapshot usable.
+Fact discovery uses v1 locations (matching gcloud; v2 omits the v4-only zone),
+then v2 accelerator types and Billing SKU metadata. Only public metadata is
+persisted; no price values or tokens go into the fact cache.
 
 ### Expiry: works with laptop and VM offline
 

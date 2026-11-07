@@ -593,6 +593,9 @@ fn setup_gcp(ctx: &Ctx, cfg: &Dict, flags: &SetupFlags) -> Result<()> {
         ctx.println("Reused queue: gpu-expiry (unchanged).")?;
     }
     plan.queue()?.check(ctx)?;
+    ctx.println("Fetching TPU types, zones and SKU IDs...")?;
+    crate::gcp_catalog::refresh(ctx, &plan.project)?;
+    crate::gcp_facts::refresh_skus(ctx, &plan.project)?;
     plan.version = 1;
     save_config(ctx, Some(plan.config()))?;
     ctx.println("Google Cloud  ✓ set up\nNext: gpu up --provider gcp")

@@ -267,14 +267,16 @@ pub(crate) struct Types {
 }
 impl Types {
     fn names(&self) -> Vec<String> {
-        let mut names = self.initial.clone();
-        names.extend(
-            self.catalog
-                .result()
-                .unwrap_or_default()
-                .into_iter()
-                .map(crate::gcp_types::public),
-        );
+        let mut names = self
+            .catalog
+            .result()
+            .map(|types| {
+                types
+                    .into_iter()
+                    .map(crate::gcp_types::public)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|| self.initial.clone());
         names.sort();
         names.dedup();
         names
@@ -298,9 +300,10 @@ fn type_screen(
     data: Option<Types>,
 ) -> Screen<String, Selection> {
     let data = data.unwrap_or_else(|| {
-        let mut initial = crate::gcp_facts::known_types(&ctx, &settings.project, None);
-        initial.extend(crate::wizard::TPU_TYPES.iter().map(|s| s.to_string()));
-        initial = initial.into_iter().map(crate::gcp_types::public).collect();
+        let initial = crate::gcp_facts::known_types(&ctx, &settings.project, None)
+            .into_iter()
+            .map(crate::gcp_types::public)
+            .collect();
         Types {
             initial,
             catalog: crate::gcp_catalog::types_job(&ctx, &cfg),
@@ -742,6 +745,28 @@ fn repository_wizard(ctx: &Ctx, cfg: &Dict) -> Result<crate::wizard::LaunchWizar
     ))
 }
 
+fn launch_next(
+    ctx: &Ctx,
+    settings: &Settings,
+    cfg: &Dict,
+    selected: Selection,
+) -> Next<String, Selection> {
+    let type_selected = selected.tpu.is_some();
+    let duration_only = type_selected && selected.spot.is_some() && selected.zone.is_some();
+    let zone = selected.zone.clone();
+    let next = next_with(ctx.clone(), settings.clone(), cfg.clone(), selected, None);
+    match next {
+        Next::Screen(mut screen) if type_selected => {
+            screen = screen.background(crate::gcp_catalog::types_job(ctx, cfg));
+            if duration_only {
+                screen = screen.prices(crate::gcp_prices::job_at(ctx, cfg, zone.as_deref()));
+            }
+            Next::Screen(screen)
+        }
+        other => other,
+    }
+}
+
 pub fn choose(
     ctx: &Ctx,
     flags: &UpFlags,
@@ -751,10 +776,7 @@ pub fn choose(
 ) -> Result<Picks> {
     let selected = initial_selection(ctx, flags, settings, deadline);
     let selected = if ctx.interactive() {
-        crate::picker::resolve(
-            ctx,
-            next_with(ctx.clone(), settings.clone(), cfg.clone(), selected, None),
-        )?
+        crate::picker::resolve(ctx, launch_next(ctx, settings, cfg, selected))?
     } else {
         selected
     };
@@ -780,12 +802,11 @@ pub(crate) fn choose_confirmed(
 ) -> Result<crate::gcp::Prepared> {
     use crate::wizard::Choice;
     use std::rc::Rc;
-    let first = next_with(
-        ctx.clone(),
-        settings.clone(),
-        cfg.clone(),
+    let first = launch_next(
+        ctx,
+        settings,
+        cfg,
         initial_selection(ctx, flags, settings, deadline),
-        None,
     );
     let worker = ctx.clone();
     let flags = flags.clone();

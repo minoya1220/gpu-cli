@@ -17,12 +17,7 @@ use crate::repos::{load_cached_repos, resolve_repo, Repo};
 
 pub const MODES: [&str; 2] = ["container", "vm"];
 
-/// Offline discovery hints, not a capacity/zone catalog. Selecting the category
-/// loads Google's live catalog later; direct type matches carry the choice over.
-pub const TPU_TYPES: [&str; 10] = [
-    "v5e-1", "v5e-4", "v5e-8", "v6e-1", "v6e-4", "v6e-8", "v5p-8", "v4-8", "v3-8", "v2-8",
-];
-pub const TPU_CATEGORY: &str = "TPU (Google Cloud)";
+pub const TPU_CATEGORY: &str = "TPU";
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum TpuChoice {
@@ -460,11 +455,15 @@ impl LaunchWizard {
     }
 
     fn tpu_types(&self) -> Vec<String> {
-        let mut types = self.state.tpu_types.clone();
-        types.extend(TPU_TYPES.iter().map(|s| s.to_string()));
-        if let Some(job) = &self.state.tpu_catalog {
-            types.extend(job.result().unwrap_or_default());
+        if self.state.tpu_setup_error.is_some() {
+            return Vec::new();
         }
+        let mut types = self
+            .state
+            .tpu_catalog
+            .as_ref()
+            .and_then(Job::result)
+            .unwrap_or_else(|| self.state.tpu_types.clone());
         types = types
             .into_iter()
             .map(|s| {
@@ -480,17 +479,16 @@ impl LaunchWizard {
     pub(crate) fn tpu_data(&self) -> crate::gcp_wizard::Types {
         crate::gcp_wizard::Types {
             initial: self.tpu_types(),
-            catalog: self
-                .state
-                .tpu_catalog
-                .clone()
-                .unwrap_or_else(|| Job::new(|| Ok(Vec::new()))),
+            catalog: self.state.tpu_catalog.clone().unwrap_or_else(|| {
+                let types = self.tpu_types();
+                Job::new(move || Ok(types.clone()))
+            }),
             rates: self.state.tpu_prices.clone(),
             cached: self.state.tpu_cached_prices.clone(),
         }
     }
     fn tpu_prices(&self) -> Option<Arc<crate::gcp_prices::Prices>> {
-        if self.state.tpu_prices.state() == JobState::Failed {
+        if self.state.tpu_setup_error.is_some() {
             None
         } else {
             self.state
@@ -507,6 +505,11 @@ impl LaunchWizard {
         }
     }
     fn tpu_rows(&self, shortcuts: Vec<String>) -> Vec<(Choice, HardwareColumns)> {
+        let shortcuts = if self.state.tpu_setup_error.is_some() {
+            Vec::new()
+        } else {
+            shortcuts
+        };
         let values = std::iter::once(None)
             .chain(shortcuts.into_iter().map(Some))
             .collect::<Vec<_>>();

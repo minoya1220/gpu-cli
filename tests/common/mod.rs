@@ -99,7 +99,21 @@ impl Sandbox {
         if prices {
             std::fs::write(self.root.join("gcp-prices"), "").unwrap();
         }
-        let data = gpu::pyjson::loads(include_str!("../../src/data/tpu_facts.json")).unwrap();
+        let data = gpu::pyjson::loads(include_str!("tpu_facts.json")).unwrap();
+        let cache = self.root.join("cache/gpu");
+        std::fs::create_dir_all(&cache).unwrap();
+        let mut facts = data.as_dict().unwrap().clone();
+        facts.insert(
+            "at",
+            gpu::pyjson::Value::Int(jiff::Timestamp::now().as_second()),
+        );
+        for file in ["tpu-catalog-test-project.json", "tpu-sku-facts.json"] {
+            std::fs::write(
+                cache.join(file),
+                gpu::pyjson::dumps(&gpu::pyjson::Value::Dict(facts.clone()), None),
+            )
+            .unwrap();
+        }
         let spot=data.as_dict().unwrap().get("skus").unwrap().as_list().unwrap().iter().filter_map(gpu::pyjson::Value::as_dict).find(|d|matches!(d.get("description"),Some(gpu::pyjson::Value::Str(s)) if s=="TpuV6e attached to Spot Preemptible VMs running in Columbus")).unwrap();
         let gpu::pyjson::Value::Str(id) = spot.get("id").unwrap() else {
             panic!("SKU id")

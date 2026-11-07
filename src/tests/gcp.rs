@@ -155,7 +155,7 @@ fn fixture() -> (TestEnv, Ctx, Arc<FakeRunner>, Arc<Mutex<State>>) {
         }
         assert_eq!(a[3], "tpu-vm");
         match a[4] {
-            "accelerator-types" => if state.empty_types { ok("[]") } else { ok(r#"[{"type":"v6e-1"}]"#) },
+            "accelerator-types" => if state.empty_types { ok("[]") } else { ok(r#"[{"type":"v6e-1"},{"type":"v5p-8"},{"type":"v5p-16"}]"#) },
             "list" if state.fail_presence => Ok(Output::failed(1,"PERMISSION_DENIED")),
             "list" => ok(&list(if ["us-east5-b","-"].contains(&arg(cmd,"zone").as_str()) {state.nodes.clone()} else {Vec::new()})),
             "describe" if state.fail_presence => Ok(Output::failed(1,"PERMISSION_DENIED: secret")),
@@ -195,6 +195,7 @@ fn fixture() -> (TestEnv, Ctx, Arc<FakeRunner>, Arc<Mutex<State>>) {
         .runner(&runner)
         .clock(&FakeClock::at("2026-11-03T00:00:00Z".parse().unwrap()))
         .build();
+    tpu_facts(&ctx);
     (env, ctx, runner, state)
 }
 
@@ -1886,7 +1887,7 @@ fn mapped_cloud_completion_still_waits_for_cached_repository_validation() {
             )),
             tpu_prices: None,
             tpu_cached_prices: None,
-            tpu_types: Vec::new(),
+            tpu_types: crate::gcp_facts::known_types(&ctx, "test-project", None),
             tpu_catalog: None,
             owner: "owner".into(),
         },

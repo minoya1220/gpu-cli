@@ -594,13 +594,12 @@ pub(crate) fn job_at(ctx: &Ctx, cfg: &Dict, zone: Option<&str>) -> Job<std::sync
             return Err("needs gpu setup".into());
         }
         let settings = gcp::Settings::load(&cfg).map_err(|e| e.text().to_string())?;
+        // Refresh during this launch only; failures retain the last offline facts.
+        let _ = crate::gcp_facts::refresh_skus(&worker, &settings.project);
         let zone = explicit
             .clone()
             .or_else(|| crate::gcp_preferences::preview(&worker, &settings))
             .ok_or("No known TPU pricing region.")?;
-        // Rare metadata refresh is nonfatal: known SKU IDs can still return
-        // authoritative current rates. No API is enabled implicitly.
-        let _ = crate::gcp_facts::refresh_skus(&worker, &settings.project);
         load(&worker, &cfg, &zone)
             .map(std::sync::Arc::new)
             .map_err(|e| e.text().to_string())

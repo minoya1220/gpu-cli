@@ -496,7 +496,8 @@ printf 'private-test-token\n'
             &["up", "--no-repo", "--mode", "container", "--dry-run"],
         );
         term.wait(on("GPU"));
-        term.press_until("v6e-1", shows("Filter: v6e-1"));
+        let query = if configured { "v6e-1" } else { "tpu" };
+        term.press_until(query, |t| t.line(1) == format!("Filter: {query}"));
         assert!(!term.last_line().contains("F2"));
         if configured {
             term.wait(shows("Spot $0.750/hr"));
@@ -520,7 +521,8 @@ printf 'private-test-token\n'
 
 #[test]
 fn test_tpu_without_config_keeps_setup_visible_and_returns_to_gpu_choices() {
-    for (repo_key, query) in [("0", "tpu"), ("1", "v5e")] {
+    for repo_key in ["0", "1"] {
+        let query = "tpu";
         let sandbox = Sandbox::new();
         // Match the owner's bare invocation, not --no-repo or a flags-only
         // dry run. PATH stubs forbid every real lifecycle operation.
@@ -528,8 +530,20 @@ fn test_tpu_without_config_keeps_setup_visible_and_returns_to_gpu_choices() {
         term.wait(shows("gpu-kernels"));
         term.press_until(repo_key, on("Mode"));
         term.press_until("1", on("GPU"));
-        assert!(shows("TPU (Google Cloud)")(&term));
+        assert!(shows("needs gpu setup")(&term));
+        // No types or prices are offered before setup, even with type filtering.
+        term.press_until("v5e", shows("Filter: v5e"));
+        term.wait(shows("No matches"));
+        term.press_until(BACK, |t| !t.line(1).starts_with("Filter:"));
         term.press_until(query, |t| t.line(1) == format!("Filter: {query}"));
+        let rows = term
+            .lines()
+            .into_iter()
+            .filter(|l| l.contains(". TPU"))
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(!rows[0].contains('$'));
+        assert!(!rows[0].contains("TPU v"));
         term.press_until(RIGHT, shows("Google Cloud is not set up"));
         assert!(term.running(), "setup must remain visible until dismissed");
         let screen = term.lines().join("\n");
@@ -592,7 +606,7 @@ esac
         let mut term = Terminal::start(&sandbox, &args);
         term.wait(on("Mode")); // no provider picker, even with GCP configured
         term.press_until("1", on("GPU"));
-        assert!(shows("TPU (Google Cloud)")(&term));
+        assert!(shows("TPU")(&term));
         term.press_until(query, |t| t.line(1) == format!("Filter: {query}"));
         if query == "tpu" {
             term.press_until(RIGHT, on("TPU generation"));
@@ -1539,8 +1553,7 @@ fn test_enter_submits_repository_url_and_tpu_duration_text_boxes() {
             "--dry-run",
         ],
     );
-    duration.wait(on("Destroy after (e.g. 2h)"));
-    assert_eq!(duration.last_line(), "← back");
+    duration.wait(|t| on("Destroy after (e.g. 2h)")(t) && t.last_line() == "← back");
     assert!(shows("30m, 2h or 1d")(&duration));
     assert!(!duration
         .lines()
@@ -1555,7 +1568,10 @@ fn test_enter_submits_repository_url_and_tpu_duration_text_boxes() {
         .output_text()
         .contains("DRY RUN: no TPU or expiry task created"));
     assert!(!duration.output_text().contains("^[["));
-    assert!(sandbox.calls().is_empty());
+    assert!(sandbox
+        .calls()
+        .iter()
+        .all(|a| a[0] == "curl" || (a[0] == "gcloud" && a[1] == "auth")));
 }
 
 #[test]

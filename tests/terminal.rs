@@ -1507,8 +1507,10 @@ fn test_enter_submits_repository_url_and_tpu_duration_text_boxes() {
     let sandbox = Sandbox::new();
     let mut repo = Terminal::start(&sandbox, &["up", "--dry-run"]);
     repo.wait(shows("Clone from URL..."));
-    repo.press_until("9", on("Clone from URL"));
-    assert_eq!(repo.last_line(), "← back");
+    // Wait for the whole frame: a read can end before the footer is drawn.
+    repo.press_until("9", |t| {
+        on("Clone from URL")(t) && t.last_line() == "← back"
+    });
     assert!(!repo
         .lines()
         .iter()
@@ -1539,8 +1541,7 @@ fn test_enter_submits_repository_url_and_tpu_duration_text_boxes() {
             "--dry-run",
         ],
     );
-    duration.wait(on("Destroy after (e.g. 2h)"));
-    assert_eq!(duration.last_line(), "← back");
+    duration.wait(|t| on("Destroy after (e.g. 2h)")(t) && t.last_line() == "← back");
     assert!(shows("30m, 2h or 1d")(&duration));
     assert!(!duration
         .lines()

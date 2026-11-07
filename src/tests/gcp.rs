@@ -974,6 +974,14 @@ fn expiry_entry_has_duration_help_validation_and_back_to_capacity() {
     // The fixture allows token auth but denies the two Billing reads.
     let calls = runner.calls();
     assert_eq!(calls.len(), 3, "actual calls: {:?}", runner.argvs());
+    // The SKU refresh runs beside pricing from cached SKUs, so the services
+    // read and the batch price read may start in either order.
+    let parallel = |c: &crate::process::Cmd| c.argv.iter().any(|a| a == "--parallel");
+    let (refresh, batch) = if parallel(&calls[1]) {
+        (&calls[2], &calls[1])
+    } else {
+        (&calls[1], &calls[2])
+    };
     assert_eq!(
         strs(&calls[0].argv),
         [
@@ -997,7 +1005,7 @@ fn expiry_entry_has_duration_help_validation_and_back_to_capacity() {
         "15",
     ];
     assert_eq!(
-        strs(&calls[1].argv),
+        strs(&refresh.argv),
         [
             curl.as_slice(),
             &[
@@ -1011,7 +1019,7 @@ fn expiry_entry_has_duration_help_validation_and_back_to_capacity() {
         .concat()
     );
     assert_eq!(
-        strs(&calls[2].argv),
+        strs(&batch.argv),
         [
             curl.as_slice(),
             &[
@@ -1026,7 +1034,7 @@ fn expiry_entry_has_duration_help_validation_and_back_to_capacity() {
         ]
         .concat()
     );
-    let crate::process::Input::Text(config) = &calls[2].stdin else {
+    let crate::process::Input::Text(config) = &batch.stdin else {
         panic!("missing batch price URLs")
     };
     let urls = config

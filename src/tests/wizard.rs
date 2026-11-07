@@ -399,7 +399,8 @@ fn prefetch_without_google_setup_never_calls_cloud_even_after_opening_gpu() {
         },
     );
     let result = run(&flow, Picks::default(), move |keys| {
-        keys.wait(on("Repository"));
+        // Digits quick-select only once the repository list has loaded.
+        keys.wait(|s| s.title == "Repository" && s.labels.contains(&"No repository".to_string()));
         assert_eq!(price_state.state(), crate::picker::JobState::Idle);
         assert_eq!(catalog_state.state(), crate::picker::JobState::Idle);
         keys.press_until("0", on("Mode"));

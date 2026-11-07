@@ -15,6 +15,39 @@ fn configured() -> Sandbox {
 }
 
 #[test]
+fn mixed_listing_full_ids_json_precision_and_short_id_resolution_use_only_stubs() {
+    let s = Sandbox::new();
+    s.mixed_listing();
+    let short = s.command(&["ls"]).output().unwrap();
+    assert!(short.status.success());
+    assert_eq!(
+        String::from_utf8(short.stdout).unwrap(),
+        concat!(
+            "ID          Provider  Type      Status    Price     Uptime\n",
+            "30306428    vast      RTX 4090  created   $0.10/hr  5m\n",
+            "gpu-uwhcp7  gcp       v5e-1     deleting  $0.36/hr  7m\n",
+        )
+    );
+    assert!(short.stderr.is_empty());
+    assert_eq!(s.calls().len(), 4);
+    let long = s.command(&["ls", "--long"]).output().unwrap();
+    assert!(long.status.success());
+    assert!(String::from_utf8_lossy(&long.stdout)
+        .contains("gcp:test-project:us-east5-b:gpu-1794014955-uwhcp7"));
+    let json = s.command(&["ls", "--json"]).output().unwrap();
+    assert!(json.status.success());
+    let stdout = String::from_utf8(json.stdout).unwrap();
+    assert!(stdout.contains("0.10188888888888889"));
+    assert!(stdout.contains("gcp:test-project:us-east5-b:gpu-1794014955-uwhcp7"));
+    assert_eq!(s.calls().len(), 12);
+    let ssh = s.command(&["ssh", "gpu-uwhcp7"]).output().unwrap();
+    assert!(ssh.status.success());
+    assert!(String::from_utf8_lossy(&ssh.stdout)
+        .contains("ssh gpu-1794014955-uwhcp7 --project=test-project --zone=us-east5-b"));
+    assert_eq!(s.calls().len(), 14);
+}
+
+#[test]
 fn tpu_waits_emit_one_plain_stderr_line_when_redirected() {
     let s = Sandbox::new();
     s.gcp_lifecycle();

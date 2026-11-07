@@ -33,6 +33,9 @@ pub enum Command {
         /// print raw JSON for scripts
         #[arg(long)]
         json: bool,
+        /// Show full provider-qualified IDs
+        #[arg(long)]
+        long: bool,
         /// Limit listing to one provider
         #[arg(long, value_parser = ["vast", "gcp"])]
         provider: Option<String>,
@@ -69,7 +72,7 @@ pub enum Command {
         after_help = "Examples: gpu expire 2h; gpu expire 12345678 6:30pm; gpu expire 12345678 cancel; gpu expire show"
     )]
     Expire {
-        /// Optional Vast ID or gcp:PROJECT:ZONE:NAME, then deadline, cancel, or show
+        /// Optional instance ID (short TPU name or full ID), then deadline, cancel, or show
         #[arg(value_name = "ID/WHEN", num_args = 0..)]
         expiry_args: Vec<String>,
     },

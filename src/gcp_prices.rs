@@ -362,6 +362,37 @@ fn prices(
         unavailable,
     }
 }
+/// Price estimates for inventory, from one local snapshot and no requests.
+pub(crate) fn cached_project(
+    ctx: &Ctx,
+    project: &str,
+) -> std::collections::BTreeMap<String, Prices> {
+    if ctx.require_gcloud().is_err() {
+        return Default::default();
+    }
+    let entries = entries(ctx, project);
+    let regions = entries
+        .values()
+        .flat_map(|e| {
+            e.sku
+                .get("serviceRegions")
+                .and_then(Value::as_list)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    regions
+        .into_iter()
+        .map(|region| {
+            (
+                region.to_string(),
+                prices(ctx, region.to_string(), &entries, true, None),
+            )
+        })
+        .collect()
+}
+
 pub fn cached(ctx: &Ctx, cfg: &Dict, zone: &str) -> Option<std::sync::Arc<Prices>> {
     if !crate::setup::gcp_ready(cfg) {
         return None;

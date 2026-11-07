@@ -9,6 +9,7 @@ mod gcp;
 mod gcp_prices;
 mod instances;
 mod lifecycle;
+mod listing;
 mod picker;
 mod repo_cache;
 mod repos;

@@ -71,7 +71,7 @@ gpu edit 12345678               # reuse the last editor, or choose one
 gpu edit 12345678 --editor code # cursor, code, zed, or nvim
 ```
 
-Omit the ID to pick an instance, even if only one exists. `gpu ls --json` prints credential-redacted JSON for scripts. `gpu cursor ID` is an alias for `gpu edit ID --editor cursor`.
+Omit the ID to pick an instance, even if only one exists. `gpu ls` shows one aligned table with provider, type, lowercase status, hourly price and uptime. TPU IDs are shortened when unambiguous. `gpu ls --long` keeps full IDs; `gpu ls --json` prints credential-redacted JSON with full IDs and original numeric precision. `gpu cursor ID` is an alias for `gpu edit ID --editor cursor`.
 
 After an interactive launch, choose an editor or **Don't open**. `gpu edit` waits up to 120 seconds for the instance and SSH. It opens `/workspace/<repo>` from the instance label, or `/workspace` without a repository. Non-interactive first use needs `--editor`.
 
@@ -261,8 +261,12 @@ v2/v3/v4 `tpu-ubuntu2204-base`, v5e `v2-alpha-tpuv5-lite`, v5p `v2-alpha-tpuv5`,
 v6e `v2-alpha-tpuv6e`. `v5e-N` aliases `v5litepod-N`. Use `--runtime IMAGE` to
 override or support a new generation; old saved `gcp.runtime` is ignored.
 
-Copy the returned `gcp:PROJECT:ZONE:NAME` ID exactly; embedded scope protects
-against later config changes. Omit IDs to pick interactively.
+Short TPU IDs from `gpu ls`, such as `gpu-uwhcp7`, work with `ssh`, `edit`,
+`cursor`, `stop`, `down` and `expire`. They resolve against a fresh inventory of
+the **configured project**. Ambiguous IDs fail without acting; the table falls
+back to a longer, unique name or full ID. Full `gcp:PROJECT:ZONE:NAME` IDs from
+`gpu ls --long` or `--json` retain their embedded scope after config changes and
+skip this lookup. Omit IDs to pick interactively.
 
 ```sh
 gpu ssh gcp:PROJECT:ZONE:NAME --exec
@@ -275,7 +279,10 @@ gpu down gcp:PROJECT:ZONE:NAME --yes       # deletes node + boot disk
 inventory runs concurrently with the same in-memory OAuth token; orphan cleanup
 reuses that node snapshot, not a GET per task. Partial/failed reads exit nonzero,
 not “empty account.” Combined JSON adds `provider`; Vast-only JSON stays unchanged.
-Unknown price/uptime are not invented. Separate disks/addresses may still bill.
+TPU prices are cached compute estimates for the node's type and capacity mode,
+with no extra price requests during listing. TPU uptime is age since creation,
+including stopped time, not billable runtime. Missing prices/timestamps show `-`.
+Separate disks/addresses may still bill.
 
 A known create rejection plus authenticated not-found removes its timer;
 ambiguous/time-out results keep it. `ls`, TPU `up`, `down` and `expire` reconcile

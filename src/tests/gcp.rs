@@ -428,9 +428,11 @@ fn lists_are_provider_labelled_and_gcp_only_does_not_require_vast() {
     state.lock().unwrap().nodes.push(node(false));
     assert_eq!(main(&ctx, &["ls"]), 0, "{}", err(&ctx));
     let printed = out(&ctx);
-    assert!(printed.contains("Vast.ai GPUs"));
-    assert!(printed.contains("Google Cloud TPUs"));
-    assert!(printed.contains(ID));
+    assert!(printed.contains("Provider"));
+    assert!(printed.contains("vast") && printed.contains("gcp"));
+    assert!(printed.contains("test-tpu"));
+    assert!(!printed.contains(ID));
+    assert_eq!(printed.lines().count(), 3);
     assert!(!printed.contains("not-for-output"));
     let start = runner.calls().len();
     assert_eq!(main(&ctx, &["ls", "--json", "--provider", "gcp"]), 0);
@@ -446,8 +448,150 @@ fn unavailable_vast_does_not_hide_tpus_but_listing_is_nonzero() {
     state.lock().unwrap().vast_fail = true;
     state.lock().unwrap().nodes.push(node(false));
     assert_eq!(main(&ctx, &["ls"]), 1);
-    assert!(out(&ctx).contains(ID));
+    assert!(out(&ctx).contains("test-tpu"));
     assert!(err(&ctx).contains("gpu ls --provider vast"));
+}
+
+#[test]
+fn tpu_listing_uses_cached_slice_prices_and_create_time_without_price_requests() {
+    for spot in [false, true] {
+        let (env, ctx, runner, state) = fixture();
+        super::gcp_prices::cache(&env);
+        let mut n = node(spot);
+        n.insert("createTime", Value::str("2026-11-02T23:53:00Z"));
+        state.lock().unwrap().nodes.push(n);
+        assert_eq!(main(&ctx, &["ls", "--provider", "gcp"]), 0, "{}", err(&ctx));
+        let output = out(&ctx);
+        assert!(
+            output.contains(if spot { "$0.75/hr" } else { "$2.75/hr" }),
+            "{output}"
+        );
+        assert!(
+            output.contains("ready") && output.contains("7m"),
+            "{output}"
+        );
+        assert!(!output.contains(ID));
+        assert_eq!(
+            runner.calls().len(),
+            3,
+            "listing must keep its constant inventory-only call count"
+        );
+        assert_eq!(main(&ctx, &["ls", "--provider", "gcp", "--long"]), 0);
+        assert!(out(&ctx).contains(ID));
+        assert_eq!(main(&ctx, &["ls", "--provider", "gcp", "--json"]), 0);
+        let listing = json(&out(&ctx));
+        let listed = listing.as_list().unwrap()[0].as_dict().unwrap();
+        assert_eq!(listed.get("id"), Some(&Value::str(ID)));
+        assert_eq!(listed.get("duration"), Some(&Value::Int(420)));
+        assert_eq!(
+            listed.get("dph_total"),
+            Some(&Value::Float(if spot { 0.75 } else { 2.75 }))
+        );
+        assert!(!runner
+            .argvs()
+            .iter()
+            .flatten()
+            .any(|a| a.contains("cloudbilling")));
+    }
+}
+
+#[test]
+fn unknown_tpu_create_times_stay_unknown_and_v5litepod_has_its_public_name() {
+    for created in ["bad timestamp", "2026-11-04T00:00:00Z"] {
+        let (_env, ctx, _, state) = fixture();
+        let mut n = node(false);
+        n.insert("createTime", Value::str(created));
+        n.insert("acceleratorType", Value::str("v5litepod-1"));
+        state.lock().unwrap().nodes.push(n);
+        assert_eq!(main(&ctx, &["ls", "--provider", "gcp", "--json"]), 0);
+        let listing = json(&out(&ctx));
+        let listed = listing.as_list().unwrap()[0].as_dict().unwrap();
+        assert_eq!(listed.get("gpu_name"), Some(&Value::str("v5e-1")));
+        assert!(listed.get("duration").is_none());
+        assert!(listed.get("dph_total").is_none());
+    }
+}
+
+#[test]
+fn short_tpu_ids_resolve_freshly_for_ssh_edit_expire_stop_and_down() {
+    let (env, ctx, runner, state) = fixture();
+    env.executable("code", "#!/bin/sh\nexit 0\n");
+    env.executable("cursor", "#!/bin/sh\nexit 0\n");
+    let mut n = node(false);
+    n.insert(
+        "name",
+        Value::str("projects/test-project/locations/us-east5-b/nodes/gpu-123-uwhcp7"),
+    );
+    state.lock().unwrap().nodes.push(n);
+    for args in [
+        vec!["ssh", "gpu-uwhcp7"],
+        vec!["edit", "gpu-uwhcp7", "--editor", "code"],
+        vec!["cursor", "gpu-uwhcp7"],
+        vec!["expire", "gpu-uwhcp7", "2h"],
+        vec!["stop", "gpu-uwhcp7"],
+        vec!["down", "gpu-uwhcp7", "--yes"],
+    ] {
+        assert_eq!(main(&ctx, &args), 0, "{args:?}: {}", err(&ctx));
+        let _ = out(&ctx);
+    }
+    assert!(state.lock().unwrap().nodes.is_empty());
+    assert!(state.lock().unwrap().tasks.is_empty());
+    assert_eq!(main(&ctx, &["ssh", "gpu-uwhcp7"]), 1);
+    assert!(err(&ctx).contains("was not found in test-project"));
+    assert!(runner.argvs().iter().all(|a| a[0] != "vastai"));
+    assert!(runner
+        .argvs()
+        .iter()
+        .any(|a| a.get(4).is_some_and(|s| s == "delete")
+            && a.get(5).is_some_and(|s| s == "gpu-123-uwhcp7")));
+}
+
+#[test]
+fn ambiguous_short_ids_never_pick_a_node_or_mutate_and_full_ids_still_work() {
+    let (_env, ctx, runner, state) = fixture();
+    for (zone, name) in [
+        ("us-east5-b", "gpu-100-same"),
+        ("us-central1-a", "gpu-200-same"),
+    ] {
+        let mut n = node(false);
+        n.insert(
+            "name",
+            Value::str(format!(
+                "projects/test-project/locations/{zone}/nodes/{name}"
+            )),
+        );
+        state.lock().unwrap().nodes.push(n);
+    }
+    assert_eq!(main(&ctx, &["down", "gpu-same", "--yes"]), 1);
+    let error = err(&ctx);
+    assert!(error.contains("ambiguous") && error.contains("gpu ls --provider gcp --long"));
+    assert_eq!(state.lock().unwrap().nodes.len(), 2);
+    assert!(runner
+        .argvs()
+        .iter()
+        .all(|a| a[0] == "curl" || a.get(1).is_some_and(|s| s == "auth")));
+    let before = runner.calls().len();
+    assert_eq!(
+        main(
+            &ctx,
+            &["ssh", "gcp:test-project:us-central1-a:gpu-200-same"]
+        ),
+        0
+    );
+    assert!(out(&ctx).contains("--zone=us-central1-a"));
+    assert_eq!(runner.calls().len(), before, "full IDs bypass alias lookup");
+    assert_eq!(main(&ctx, &["ssh", "gpu-100-same"]), 0);
+    assert!(out(&ctx).contains("ssh gpu-100-same"));
+}
+
+#[test]
+fn short_tpu_names_before_setup_never_run_gcloud() {
+    let env = TestEnv::new();
+    let runner = FakeRunner::forbid();
+    let ctx = env.ctx().runner(&runner).build();
+    assert_eq!(main(&ctx, &["ssh", "gpu-short"]), 1);
+    assert!(err(&ctx).contains("Next: gpu setup"));
+    assert!(runner.calls().is_empty());
 }
 
 #[test]

@@ -24,7 +24,7 @@ To regenerate, check out 5767d70, run the reference with `uv`, and call the same
 | `startup_scripts.json` | `cli.startup_script` | repositories x modes x two configs, exact scripts |
 | `requests.json` | `cli.Vast.request` | offers x modes x bid x disk x configs (script replaced by a marker; checked against `startup_scripts`) |
 | `offer_queries.json` | `offers.OfferSearch.query` | flag combinations x mode x GPU |
-| `ls.json` | `cli.render_instances`, `ls --json` | payloads with odd types, table text and redacted JSON |
+| `ls.json` | `ls --json` | payloads with odd types and redacted JSON (historical Python table text is no longer asserted) |
 | `uptime.json`, `instance_labels.json`, `offer_labels.json`, `gpu_models.json` | `instances`, `offers` | labels, aligned rows, categories over the bundled model list |
 | `parse_when.json` | `expiry.parse_when` | inputs x fixed "now" values x zones (UTC, America/New_York, Europe/London, Australia/Lord_Howe), result or error |
 | `line_prompts.json` | `cli.choose`, `cli.choose_gpu` | stdin answers and history in, stdout transcript and result out |

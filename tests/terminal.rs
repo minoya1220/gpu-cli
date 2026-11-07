@@ -804,6 +804,32 @@ printf 'test-token\n'
 }
 
 #[test]
+fn test_ls_is_one_compact_aligned_table_in_a_real_terminal() {
+    let sandbox = Sandbox::new();
+    sandbox.mixed_listing();
+    let mut term = Terminal::start(&sandbox, &["ls"]);
+    assert_eq!(term.exit_status(), 0, "{}", term.output_text());
+    assert_eq!(
+        term.lines(),
+        [
+            "ID          Provider  Type      Status    Price     Uptime",
+            "30306428    vast      RTX 4090  created   $0.10/hr  5m",
+            "gpu-uwhcp7  gcp       v5e-1     deleting  $0.36/hr  7m",
+        ]
+    );
+    assert_aligned(&term, "$");
+    assert_eq!(sandbox.calls().len(), 4, "no extra price/catalog reads");
+    let mut ssh = Terminal::start(&sandbox, &["ssh", "gpu-uwhcp7"]);
+    assert_eq!(ssh.exit_status(), 0, "{}", ssh.output_text());
+    assert!(ssh.output_text().contains("ssh gpu-1794014955-uwhcp7"));
+    assert_eq!(
+        sandbox.calls().len(),
+        6,
+        "short ID lookup needs only token + node inventory"
+    );
+}
+
+#[test]
 fn test_tpu_size_and_capacity_prices_numbers_and_enter_in_real_terminal() {
     for size_key in [ENTER, "2"] {
         let sandbox = Sandbox::new();

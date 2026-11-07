@@ -39,6 +39,23 @@ impl TpuId {
     pub fn cli(&self) -> String {
         format!("gcp:{}:{}:{}", self.project, self.zone, self.name)
     }
+    /// gpu up names include a timestamp; the random suffix is enough for a
+    /// compact candidate. Inventory must still prove that candidate is unique.
+    pub(crate) fn short_name(&self) -> String {
+        if let Some((epoch, suffix)) = self
+            .name
+            .strip_prefix("gpu-")
+            .and_then(|s| s.split_once('-'))
+        {
+            if !epoch.is_empty() && epoch.bytes().all(|b| b.is_ascii_digit()) && component(suffix) {
+                return format!("gpu-{suffix}");
+            }
+        }
+        self.name.clone()
+    }
+    pub(crate) fn matches_short(&self, value: &str) -> bool {
+        value == self.name || value == self.short_name()
+    }
     pub fn resource(&self) -> String {
         format!(
             "projects/{}/locations/{}/nodes/{}",
@@ -356,6 +373,10 @@ pub fn all_nodes(ctx: &Ctx, project: &str) -> Result<Vec<Dict>> {
     }
     Err(bad_reply())
 }
+pub(crate) fn vm_node(node: &Dict) -> bool {
+    !text(node, "apiVersion").is_some_and(|v| v.starts_with("V1") || v == "API_VERSION_UNSPECIFIED")
+}
+
 pub fn list(ctx: &Ctx, settings: &Settings) -> Result<Vec<Dict>> {
     let queue = crate::gcp_expiry::Queue::load(settings)?;
     // Independent reads share one OAuth token and run concurrently. An
@@ -369,12 +390,13 @@ pub fn list(ctx: &Ctx, settings: &Settings) -> Result<Vec<Dict>> {
     });
     let nodes = nodes?;
     queue.reconcile_inventory(ctx, &nodes, tasks?)?;
+    // One local cache read for all regions. Listing must not start price or
+    // catalog requests, regardless of the number of instances.
+    let prices = crate::gcp_prices::cached_project(ctx, &settings.project);
+    let now = ctx.clock.now();
     nodes
         .iter()
-        .filter(|n| {
-            !text(n, "apiVersion")
-                .is_some_and(|v| v.starts_with("V1") || v == "API_VERSION_UNSPECIFIED")
-        })
+        .filter(|node| vm_node(node))
         .map(|node| {
             let id = node_id(node, &settings.project)?;
             let mut item = Dict::new();
@@ -382,13 +404,41 @@ pub fn list(ctx: &Ctx, settings: &Settings) -> Result<Vec<Dict>> {
             item.insert("provider", Value::str("gcp"));
             item.insert(
                 "gpu_name",
-                Value::str(text(node, "acceleratorType").unwrap_or("TPU")),
+                Value::str(crate::gcp_types::public(
+                    text(node, "acceleratorType").unwrap_or("TPU").into(),
+                )),
             );
             item.insert(
                 "actual_status",
                 Value::str(text(node, "state").unwrap_or("UNKNOWN")),
             );
             item.insert("label", Value::str("no-repo"));
+            if let Some(created) =
+                text(node, "createTime").and_then(|s| s.parse::<Timestamp>().ok())
+            {
+                item.insert("create_time", Value::str(created.to_string()));
+                if let Some(seconds) = now
+                    .as_second()
+                    .checked_sub(created.as_second())
+                    .filter(|_| created <= now)
+                {
+                    item.insert("duration", Value::Int(seconds));
+                }
+            }
+            let spot = node
+                .get("schedulingConfig")
+                .and_then(Value::as_dict)
+                .is_some_and(|schedule| {
+                    ["spot", "preemptible"]
+                        .iter()
+                        .any(|key| schedule.get(key) == Some(&Value::Bool(true)))
+                });
+            if let Some(hourly) = crate::gcp_geo::region(&id.zone)
+                .and_then(|region| prices.get(region))
+                .and_then(|price| price.hourly(text(node, "acceleratorType").unwrap_or(""), spot))
+            {
+                item.insert("dph_total", Value::Float(hourly));
+            }
             Ok(item)
         })
         .collect()

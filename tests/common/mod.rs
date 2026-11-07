@@ -130,6 +130,23 @@ impl Sandbox {
         }
     }
 
+    /// Representative mixed listing, including a local price snapshot. Every
+    /// request still goes to the existing forbidden-by-default PATH stubs.
+    pub fn mixed_listing(&self) {
+        self.gcp_lifecycle();
+        let now = jiff::Timestamp::now();
+        let created = now.checked_sub(jiff::Span::new().minutes(7)).unwrap();
+        self.gcp_reads(&format!(r#"[{{"name":"projects/test-project/locations/us-east5-b/nodes/gpu-1794014955-uwhcp7","acceleratorType":"v5litepod-1","state":"DELETING","createTime":"{created}","schedulingConfig":{{"spot":true}}}}]"#), true);
+        let cache = self.root.join("cache/gpu");
+        std::fs::create_dir_all(&cache).unwrap();
+        let at = now.as_second() - 1;
+        std::fs::write(cache.join("tpu-prices-test-project.json"), format!(r#"{{"at":{at},"entries":[{{"id":"test-v5e-spot","at":{at},"sku":{{"description":"TPU v5 Lite Pod chip Spot","category":{{"usageType":"Preemptible"}},"serviceRegions":["us-east5"],"pricingInfo":[{{"effectiveTime":"2026-01-01T00:00:00Z","pricingExpression":{{"usageUnit":"chip.h","tieredRates":[{{"unitPrice":{{"currencyCode":"USD","nanos":359000000}}}}]}}}}]}}}}]}}"#)).unwrap();
+        self.stub("vastai", &FAKE_CLI.replace(
+            "case \"$tool $1 $2\" in",
+            "case \"$tool $1 $2\" in\n    \"vastai show instances\") echo '[{\"id\":30306428,\"gpu_name\":\"RTX 4090\",\"actual_status\":\"created\",\"dph_total\":0.10188888888888889,\"duration\":300}]' ;;",
+        ));
+    }
+
     pub fn env(&self) -> Vec<(String, String)> {
         let path = |p: &Path| p.to_string_lossy().into_owned();
         vec![

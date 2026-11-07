@@ -159,7 +159,11 @@ fn dispatch(ctx: &Ctx, command: Command) -> Result<()> {
             }
             launch::launch(ctx, &up_args(flags), &cfg, up_deadline)
         }
-        Command::Ls { json, provider } => provider::ls(ctx, &cfg, json, provider.as_deref()),
+        Command::Ls {
+            json,
+            long,
+            provider,
+        } => provider::ls(ctx, &cfg, json, long, provider.as_deref()),
         Command::Expire { .. } => {
             let (id, action, deadline) = expire_plan.expect("parsed above");
             let Some(id) = provider::selected_id(ctx, &cfg, id.as_deref(), "expire")? else {

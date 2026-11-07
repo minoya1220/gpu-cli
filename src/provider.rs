@@ -1,5 +1,5 @@
-//! Provider routing. Numeric legacy IDs remain Vast IDs; cloud IDs are fully
-//! qualified, so changing config cannot redirect a destructive command.
+//! Provider routing. Numeric IDs remain Vast IDs. Full cloud IDs carry their
+//! scope; short TPU names require a fresh, unambiguous configured-project lookup.
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use crate::pyjson::{Dict, Value};
@@ -57,8 +57,34 @@ pub fn selected_id(
     id: Option<&str>,
     action: &str,
 ) -> Result<Option<String>> {
-    if id.is_some() || !crate::setup::gcp_ready(cfg) {
-        return crate::commands::selected_id(ctx, id, action);
+    if let Some(id) = id {
+        if !short_candidate(id) {
+            return Ok(Some(id.into()));
+        }
+        ctx.require_gcloud()?;
+        let settings = crate::gcp::Settings::load(cfg)?;
+        let nodes = crate::gcp::all_nodes(ctx, &settings.project)?;
+        let matched = nodes
+            .iter()
+            .filter(|node| crate::gcp::vm_node(node))
+            .map(|node| crate::gcp::node_id(node, &settings.project))
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .filter(|tpu| tpu.matches_short(id))
+            .collect::<Vec<_>>();
+        return match matched.as_slice() {
+            [tpu] => Ok(Some(tpu.cli())),
+            [] => Err(Error::msg(format!(
+                "TPU {id} was not found in {}. Next: gpu ls --provider gcp",
+                settings.project
+            ))),
+            _ => Err(Error::msg(format!(
+                "TPU ID {id} is ambiguous. Use a full ID. Next: gpu ls --provider gcp --long"
+            ))),
+        };
+    }
+    if !crate::setup::gcp_ready(cfg) {
+        return crate::commands::selected_id(ctx, None, action);
     }
     let (items, failed) = inventory(ctx, cfg, None)?;
     if !failed.is_empty() {
@@ -73,7 +99,11 @@ pub fn selected_id(
     crate::instances::select_instance(ctx, &items, action)
 }
 
-pub fn ls(ctx: &Ctx, cfg: &Dict, json: bool, only: Option<&str>) -> Result<()> {
+pub(crate) fn short_candidate(id: &str) -> bool {
+    crate::gcp::component(id) && id.as_bytes()[0].is_ascii_alphabetic()
+}
+
+pub fn ls(ctx: &Ctx, cfg: &Dict, json: bool, long: bool, only: Option<&str>) -> Result<()> {
     if only != Some("gcp") && (only == Some("vast") || !crate::setup::gcp_ready(cfg)) {
         return crate::commands::ls(ctx, json);
     }
@@ -85,29 +115,8 @@ pub fn ls(ctx: &Ctx, cfg: &Dict, json: bool, only: Option<&str>) -> Result<()> {
             Some(1),
         ))?;
     }
-    for (provider, label) in [("vast", "Vast.ai GPUs"), ("gcp", "Google Cloud TPUs")] {
-        if json {
-            break;
-        }
-        if failed.iter().any(|p| label.starts_with(p)) {
-            ctx.println(&format!("{label}: unavailable (not an empty list)"))?;
-            continue;
-        }
-        if only.is_some_and(|p| p != provider) {
-            continue;
-        }
-        ctx.println(label)?;
-        let group = items
-            .iter()
-            .filter(|i| i.get("provider") == Some(&Value::str(provider)))
-            .cloned()
-            .map(Value::Dict)
-            .collect();
-        crate::commands::render_instances_with_accelerator(
-            ctx,
-            &Value::List(group),
-            if provider == "gcp" { "TPU" } else { "GPU" },
-        )?;
+    if !json && (!items.is_empty() || failed.is_empty()) {
+        crate::instances::render_table(ctx, &items, long)?;
     }
     if !failed.is_empty() {
         let provider = if failed[0] == "Vast.ai" {

@@ -493,4 +493,4 @@ Paid, destructive acceptance checks are manual only. Use disposable container an
 4. Test a local clock deadline, then cancel it.
 5. Reboot with an armed deadline and verify the timer is inactive. Never expose credentials while investigating.
 
-Exit codes: 0 for success or declining a confirmation; 1 for errors, picker quit, or confirmation EOF; 130 for Ctrl-C; 2 for usage errors. Errors use credential-redacted `gpu: <message>` on stderr. Dry runs print JSON argument arrays, not shell commands. Preserve table and JSON formats used by scripts.
+Exit codes: 0 for success or declining a confirmation; 1 for other errors, picker quit, or confirmation EOF; 130 for Ctrl-C; see [Non-terminal commands and JSON](#non-terminal-commands-and-json) for usage and provider-specific codes. Errors use credential-redacted `gpu: <message>` on stderr. Dry runs print JSON argument arrays, not shell commands. Preserve table and JSON formats used by scripts.

@@ -34,6 +34,9 @@ pub struct Cmd {
     pub normalize_newlines: bool,
     /// Binary stdout destination (archives and byte-exact log chunks).
     pub stdout_file: Option<std::path::PathBuf>,
+    /// A new process group: terminal Ctrl-C then reaches only the CLI, which
+    /// decides whether to cancel the child.
+    pub process_group: bool,
 }
 
 impl Cmd {
@@ -45,6 +48,7 @@ impl Cmd {
             timeout: None,
             normalize_newlines: true,
             stdout_file: None,
+            process_group: false,
         }
     }
 
@@ -70,6 +74,11 @@ impl Cmd {
 
     pub fn stdout_file(mut self, path: impl Into<std::path::PathBuf>) -> Cmd {
         self.stdout_file = Some(path.into());
+        self
+    }
+
+    pub fn process_group(mut self) -> Cmd {
+        self.process_group = true;
         self
     }
 
@@ -226,10 +235,13 @@ impl RealRunner {
         cmd: &Cmd,
         cancellation: Option<(&std::sync::atomic::AtomicUsize, usize)>,
     ) -> std::result::Result<Output, RunError> {
-        use std::os::unix::process::ExitStatusExt;
+        use std::os::unix::process::{CommandExt, ExitStatusExt};
 
         let mut command = Command::new(cmd.program());
         command.args(&cmd.argv[1..]);
+        if cmd.process_group {
+            command.process_group(0);
+        }
         command.stdin(match cmd.stdin {
             Input::Null => Stdio::null(),
             Input::Inherit => Stdio::inherit(),

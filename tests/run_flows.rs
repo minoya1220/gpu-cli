@@ -214,3 +214,90 @@ esac
         "{text}"
     );
 }
+
+#[test]
+fn interrupt_before_create_cancels_at_once_without_cleanup() {
+    let s = sandbox();
+    s.stub(
+        "vastai",
+        r#"#!/bin/sh
+case "$1 $2" in
+ 'search offers') echo $$ >"$HOME/search-pid"; touch "$HOME/searching"; exec sleep 120;;
+ *) touch "$HOME/unexpected"; exit 97;;
+esac
+"#,
+    );
+    let mut child = s
+        .command(&[
+            "run", "--gpu", "RTX 4090", "--expire", "30m", "--yes", "--", "python", "train.py",
+        ])
+        .current_dir(s.root.join("project"))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_file(&s, "searching", &mut child);
+    let started = Instant::now();
+    signal(&child, rustix::process::Signal::INT);
+    let output = child.wait_with_output().unwrap();
+    let pid: i32 = std::fs::read_to_string(s.home.join("search-pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let _ = rustix::process::kill_process(
+        rustix::process::Pid::from_raw(pid).unwrap(),
+        rustix::process::Signal::KILL,
+    );
+    assert_eq!(output.status.code(), Some(130));
+    assert!(started.elapsed() < Duration::from_secs(10));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("Stopping job"), "{stderr}");
+    assert!(!s.home.join("unexpected").exists());
+}
+
+#[test]
+fn terminal_interrupts_to_the_foreground_group_do_not_kill_cleanup() {
+    use std::os::unix::process::CommandExt;
+    let s = sandbox();
+    s.stub(
+        "vastai",
+        r#"#!/bin/sh
+case "$1 $2" in
+ 'search offers') printf '[{"id":100,"gpu_name":"RTX 4090","dph_total":0.3,"num_gpus":1,"reliability":0.99}]\n';;
+ 'create instance') printf '{"success":true,"new_contract":123}\n';;
+ 'show instances') if [ -e "$HOME/destroyed" ]; then echo '[]'; else echo '[{"id":123,"actual_status":"running","ssh_host":"fake","ssh_port":1234}]'; fi;;
+ 'destroy instance') touch "$HOME/cleanup"; while [ ! -e "$HOME/proceed" ]; do sleep 0.05; done; touch "$HOME/destroyed"; echo ok;;
+ *) exit 97;;
+esac
+"#,
+    );
+    // Its own group stands in for the terminal's foreground process group.
+    let mut child = s
+        .command(&[
+            "run", "--gpu", "RTX 4090", "--expire", "30m", "--yes", "--json", "--", "python",
+            "train.py",
+        ])
+        .current_dir(s.root.join("project"))
+        .process_group(0)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let group = rustix::process::Pid::from_raw(child.id() as i32).unwrap();
+    wait_file(&s, "following", &mut child);
+    rustix::process::kill_process_group(group, rustix::process::Signal::INT).unwrap();
+    wait_file(&s, "cleanup", &mut child);
+    rustix::process::kill_process_group(group, rustix::process::Signal::INT).unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    std::fs::write(s.home.join("proceed"), "").unwrap();
+    let output = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(130), "{stderr}");
+    let result = pyjson::loads(&String::from_utf8(output.stdout).unwrap()).unwrap();
+    assert_eq!(
+        result.get("result").unwrap().get("destroyed"),
+        Some(&Value::Bool(true))
+    );
+    assert!(s.home.join("destroyed").exists());
+}

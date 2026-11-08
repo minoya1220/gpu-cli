@@ -472,9 +472,16 @@ impl Ctx {
         Ok(())
     }
 
+    /// During a cooperative run, terminal Ctrl-C must not kill cleanup
+    /// children; transfers are cancelled deliberately by `transfer`.
+    fn isolate(&self, cmd: &Cmd) -> Option<Cmd> {
+        self.cooperative().then(|| cmd.clone().process_group())
+    }
+
     pub fn run(&self, cmd: &Cmd) -> std::result::Result<Output, RunError> {
         self.authorize(cmd.program())?;
-        self.runner.run(cmd)
+        let isolated = self.isolate(cmd);
+        self.runner.run(isolated.as_ref().unwrap_or(cmd))
     }
 
     pub(crate) fn transfer(
@@ -483,8 +490,12 @@ impl Ctx {
         threshold: usize,
     ) -> std::result::Result<Output, RunError> {
         self.authorize(cmd.program())?;
-        self.runner
-            .run_cancellable(cmd, &self.interrupts, threshold)
+        let isolated = self.isolate(cmd);
+        self.runner.run_cancellable(
+            isolated.as_ref().unwrap_or(cmd),
+            &self.interrupts,
+            threshold,
+        )
     }
 
     pub fn exec(&self, argv: &[String]) -> String {

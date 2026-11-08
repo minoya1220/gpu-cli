@@ -47,12 +47,22 @@ supervise() {
     wait "$child" || rc=$?
     [ -f "$ROOT/phase" ] && read -r phase <"$ROOT/phase"
     [ "$timed" = 1 ] && rc=17
-    # Publish only after the log is complete. Linger cannot extend the boot deadline.
-    publish "$phase" "$rc" "$timed"
+    # Shorten to linger before publishing, so an attached CLI that sees the
+    # final status can re-arm the full deadline for its download. Linger
+    # cannot extend the boot deadline.
     end=$(( $(date +%s) + LINGER ))
     [ "$end" -gt "$DEADLINE" ] && end=$DEADLINE
     bash "$ROOT/expiry-hook.sh" "$end" >/dev/null 2>&1 || true
     rm -f "$ROOT/config"  # discard forwarded secrets after the task ends
+    # Publish only after the log is complete.
+    publish "$phase" "$rc" "$timed"
+}
+
+# Forwarded exports enter this shell's environment, never a child's argv.
+# Positional parameters cannot be clobbered by forwarded variable names.
+forwarded() {
+    eval "$1"
+    exec bash -c "$2"
 }
 
 task() {
@@ -62,8 +72,13 @@ task() {
     export GPU_RUN_OUTPUTS="$JOBDIR/$OUTPUTS"
     mkdir -p "$GPU_RUN_OUTPUTS" || exit 1
     printf 'setup\n' >"$ROOT/phase"
+    # Onstart installs uv; the supervisor's job deadline bounds this wait.
+    if [ ! -e "$HOME/.works" ]; then
+        printf 'Waiting for instance startup to finish.\n'
+        while [ ! -e "$HOME/.works" ]; do sleep 1; done
+    fi
     if [ -n "$SETUP" ]; then
-        bash -c "$FORWARDED"$'\n'"$SETUP" || exit $?
+        ( forwarded "$FORWARDED" "$SETUP" ) || exit $?
     fi
     if [ -d .venv ]; then
         export VIRTUAL_ENV="$PWD/.venv" PATH="$PWD/.venv/bin:$PATH"
@@ -71,7 +86,7 @@ task() {
     printf 'job\n' >"$ROOT/phase"
     # exec preserves the job PID; the supervisor's token remains in the
     # enclosing task's argv until the command starts. Keep this shell as leader.
-    bash -c "$FORWARDED"$'\n''if [ -d .venv ]; then export VIRTUAL_ENV="$PWD/.venv" PATH="$PWD/.venv/bin:$PATH"; fi'$'\n'"$COMMAND" &
+    ( forwarded "$FORWARDED" 'if [ -d .venv ]; then export VIRTUAL_ENV="$PWD/.venv" PATH="$PWD/.venv/bin:$PATH"; fi'$'\n'"$COMMAND" ) &
     wait $!
 }
 

@@ -25,9 +25,10 @@ check() { if ! "$@"; then echo "FAIL: $*" >&2; exit 1; fi; }
 
 launch() {
     local token=$1 command=$2 setup=${3:-} limit=${4:-60}
+    local forwarded=${5:-'export TEST_SECRET="secret value"'}
     local dir="$TMP/work/$token" deadline=$(( $(date +%s) + 120 ))
     mkdir -p "$dir"
-    GPU_RUN_CONFIG=$(printf 'JOBDIR=%q\nOUTPUTS=outputs\nSETUP=%q\nCOMMAND=%q\nDEADLINE=%s\nJOB_DEADLINE=%s\nLINGER=30\nFORWARDED=%q\n' "$dir" "$setup" "$command" "$deadline" "$(( $(date +%s) + limit ))" 'export TEST_SECRET="secret value"')
+    GPU_RUN_CONFIG=$(printf 'JOBDIR=%q\nOUTPUTS=outputs\nSETUP=%q\nCOMMAND=%q\nDEADLINE=%s\nJOB_DEADLINE=%s\nLINGER=30\nFORWARDED=%q\n' "$dir" "$setup" "$command" "$deadline" "$(( $(date +%s) + limit ))" "$forwarded")
     GPU_RUN_HOOK=$(printf 'printf "%%s" "$1" >%q\n' "$TMP/hook-$token")
     # Feed a separate bash, just like SSH stdin; it exits immediately after start.
     { printf 'GPU_RUN_SOURCE=%q\nGPU_RUN_CONFIG=%q\nGPU_RUN_HOOK=%q\n' "$GPU_RUN_SOURCE" "$GPU_RUN_CONFIG" "$GPU_RUN_HOOK"; cat "$SOURCE"; } |
@@ -44,13 +45,30 @@ wait_done() {
     echo "did not finish: $token" >&2; exit 1
 }
 
+status_of() { env GPU_RUN_LIBRARY=0 bash "$SOURCE" status "$TMP/state/$1" "$1"; }
+
+# Setup waits for onstart (uv install) to finish, bounded by the job deadline.
+launch notready 'echo ran'
+sleep 1.5
+check test "$(status_of notready | cut -f2)" = -
+check test "$(cat "$TMP/state/notready/log")" = 'Waiting for instance startup to finish.'
+launch neverready 'echo ran' '' 1
+status=$(wait_done neverready)
+check test "$(printf '%s' "$status" | cut -f2)" = 17
+check test "$(cat "$TMP/state/neverready/log")" = 'Waiting for instance startup to finish.'
+touch "$HOME/.works"
+status=$(wait_done notready)
+check test "$(printf '%s' "$status" | cut -f2)" = 0
+check test "$(tail -n 1 "$TMP/state/notready/log")" = ran
+passed=$((passed+2))
+
 launch success 'printf "%s\n" "$TEST_SECRET"; printf result >"$GPU_RUN_OUTPUTS/result"'
 status=$(wait_done success)
 check test "$(printf '%s' "$status" | cut -f2)" = 0
 check test "$(cat "$TMP/state/success/log")" = 'secret value'
 check test "$(cat "$TMP/work/success/outputs/result")" = result
-# The local SSH-like process is already gone; linger still runs remotely.
-for i in $(seq 1 50); do [ -f "$TMP/hook-success" ] && break; sleep 0.1; done
+# Linger is armed before the final status is visible, so an attached CLI
+# re-arming the full deadline for its download always runs after it.
 check test -f "$TMP/hook-success"
 hook=$(cat "$TMP/hook-success")
 check test "$hook" -le "$(( $(date +%s) + 30 ))"
@@ -79,6 +97,25 @@ launch cancelled 'echo before; sleep 120'
 env GPU_RUN_LIBRARY=0 bash "$SOURCE" stop "$TMP/state/cancelled" cancelled
 status=$(wait_done cancelled)
 check test "$(printf '%s' "$status" | cut -f2)" != 0
+passed=$((passed+1))
+
+# Forwarded values reach setup and the job via the environment, never argv.
+scan='found=0; for f in /proc/[0-9]*/cmdline; do while IFS= read -r -d "" a; do case $a in *"$TEST_SECRET"*) found=1;; esac; done 2>/dev/null <"$f"; done; printf "%s:%s" "$found" "$TEST_SECRET"'
+launch argv "$scan >\"\$GPU_RUN_OUTPUTS/job\"" "$scan >\"\$GPU_RUN_OUTPUTS/setup\""
+status=$(wait_done argv)
+check test "$(printf '%s' "$status" | cut -f2)" = 0
+check test "$(cat "$TMP/work/argv/outputs/setup")" = '0:secret value'
+check test "$(cat "$TMP/work/argv/outputs/job")" = '0:secret value'
+passed=$((passed+1))
+
+# Forwarded names that match runner internals do not change the runner.
+launch overlap 'printf "%s" "$COMMAND" >"$GPU_RUN_OUTPUTS/seen"' 'printf "%s" "$SETUP" >setup-seen' 60 \
+    "export COMMAND=clobbered SETUP=clobbered JOBDIR=/nonexistent ROOT=/nonexistent TOKEN=bad FORWARDED=bad"
+status=$(wait_done overlap)
+check test "$(printf '%s' "$status" | cut -f1)" = job
+check test "$(printf '%s' "$status" | cut -f2)" = 0
+check test "$(cat "$TMP/work/overlap/outputs/seen")" = clobbered
+check test "$(cat "$TMP/work/overlap/setup-seen")" = clobbered
 passed=$((passed+1))
 
 # A second start with the same run ID must not launch duplicate work.

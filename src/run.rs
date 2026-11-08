@@ -155,7 +155,6 @@ fn choose(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, args: &UpArgs) -> Result<Dict
 
 /// `cwd` is explicit so all file tests are isolated without process-wide chdir.
 pub fn run(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> {
-    ctx.begin_run();
     let outcome = run_inner(ctx, flags, cfg, cwd);
     ctx.end_run();
     outcome
@@ -268,7 +267,6 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
             Value::str(&setup)
         },
     );
-    ctx.check_cancelled()?;
     let offer = choose(ctx, flags, &cfg, &args)?;
     let rate = offer_price(&offer)?;
     if !rate.is_finite() || rate < 0.0 {
@@ -307,12 +305,13 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
     {
         return Err(Error::Cancelled(130));
     }
-    ctx.check_cancelled()?;
     if ctx.clock.now().as_second() >= deadline.as_second() - DOWNLOAD_RESERVE {
         return Err(Error::Usage(
             "Not enough time remains before expiry; choose a longer --expire.".into(),
         ));
     }
+    // Before create, Ctrl-C cancels at once: nothing has been rented yet.
+    ctx.begin_run();
     ctx.set_interrupt_notice(Some(format!(
         "Vast may have created an instance; boot expiry is {deadline}. Check: gpu ls"
     )));
@@ -452,6 +451,13 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
                 if let Some(status) = parse_status(&out.stdout) {
                     let _ = finish_log(ctx, &alias, &root, &local, status.size);
                 }
+            }
+            // The finished job shortened expiry to linger; an attached
+            // download keeps the original deadline.
+            if crate::expiry::manage_expiry(ctx, &alias, &id, "arm", Some(deadline)).is_err() {
+                let _ = ctx.eprintln(&format!(
+                    "Could not restore expiry to {deadline}; downloading anyway."
+                ));
             }
             phase(ctx, "download");
             let downloaded = download(ctx, &alias, &jobdir, &flags.outputs, &local, deadline);

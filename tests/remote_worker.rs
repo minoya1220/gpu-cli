@@ -15,7 +15,7 @@ fn remote_run_suite() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("6 passed, 0 failed"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("10 passed, 0 failed"));
 }
 
 #[cfg(target_os = "linux")]

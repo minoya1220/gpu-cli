@@ -260,3 +260,27 @@ fn invalid_preflight_never_searches_or_creates() {
         assert!(super::run::run(&ctx, &f, &crate::config::defaults(), &env.root).is_err());
     }
 }
+
+#[test]
+fn attached_download_restores_the_full_deadline_after_the_linger_hook() {
+    let (code, _, _, calls) = flow(End::Success);
+    assert_eq!(code, 0);
+    let arms: Vec<_> = calls
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| matches!(&c.stdin, Input::Text(t) if t.starts_with("GPU_EXPIRE_SOURCE=")))
+        .collect();
+    assert_eq!(arms.len(), 2);
+    assert_eq!(arms[0].1.argv, arms[1].1.argv);
+    let position = |prefix: &str| {
+        calls
+            .iter()
+            .position(|c| c.program() == "ssh" && c.argv.last().unwrap().starts_with(prefix))
+            .unwrap()
+    };
+    let finished = calls
+        .iter()
+        .rposition(|c| c.program() == "ssh" && c.argv.last().unwrap().contains(" status "))
+        .unwrap();
+    assert!(finished < arms[1].0 && arms[1].0 < position("tar -C "));
+}

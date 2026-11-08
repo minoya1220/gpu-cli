@@ -111,11 +111,27 @@ pub fn wait_for_lifecycle(ctx: &Ctx, instance_id: &str, action: &str, timeout: f
 
 /// Poll Vast and SSH until ready; shared by all editor launchers and expiry.
 pub fn wait_for_ssh(ctx: &Ctx, instance_id: &str, timeout: f64) -> Result<(String, String)> {
+    wait_for_ssh_with_hint(
+        ctx,
+        instance_id,
+        timeout,
+        &format!("Next: gpu wait {instance_id} --timeout 120"),
+    )
+}
+
+/// Callers that own a temporary instance must not suggest reconnecting after
+/// their cleanup has destroyed it. Keep the readiness diagnostic shared.
+pub(crate) fn wait_for_ssh_with_hint(
+    ctx: &Ctx,
+    instance_id: &str,
+    timeout: f64,
+    hint: &str,
+) -> Result<(String, String)> {
     let deadline = ctx.clock.monotonic() + timeout;
     let mut reason = "instance not running".to_string();
     let timed_out = |reason: &str| {
         Error::status(crate::error::ExitCode::WaitTimeout, format!(
-            "Timed out waiting for instance {instance_id} to run and answer SSH after {}s ({reason}). Next: gpu wait {instance_id} --timeout 120", general(timeout)
+            "Timed out waiting for instance {instance_id} to run and answer SSH after {}s ({reason}). {hint}", general(timeout)
         ))
     };
     ctx.progress(&format!(

@@ -112,6 +112,13 @@ fn args(flags: &RunFlags) -> UpArgs {
 
 fn choose(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, args: &UpArgs) -> Result<Dict> {
     let search = OfferSearch::new(Vast::new(ctx), args, cfg)?;
+    if flags.offer.is_some() {
+        return crate::launch::select_offer(
+            ctx,
+            search.offers("container", flags.gpu.as_deref())?,
+            args,
+        );
+    }
     if ctx.interactive() {
         let wizard = crate::wizard::LaunchWizard::new(
             &ctx.env,
@@ -188,9 +195,9 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
             "--outputs must be a relative directory without . or .. components.".into(),
         ));
     }
-    if !ctx.interactive() && flags.gpu.is_none() {
+    if !ctx.interactive() && flags.gpu.is_none() && flags.offer.is_none() {
         return Err(Error::Usage(
-            "Non-terminal gpu run requires --gpu MODEL.".into(),
+            "Non-terminal gpu run requires --gpu MODEL or --offer ID.".into(),
         ));
     }
     if !ctx.interactive() && !flags.yes && !flags.dry_run {
@@ -348,7 +355,18 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
         ctx.check_cancelled()?;
         let remaining =
             (deadline.as_second() - DOWNLOAD_RESERVE - ctx.clock.now().as_second()) as f64;
-        let (alias, _) = crate::commands::wait_for_ssh(ctx, &id, flags.timeout.min(remaining))?;
+        let wait_timeout = flags.timeout.min(remaining.max(0.0));
+        let cap = if remaining < flags.timeout {
+            let message = format!("SSH wait limited to {}s by --expire (requested --timeout {}s; 10m reserved for results). Use a longer --expire to allow more boot time.", crate::pyfmt::general(wait_timeout), crate::pyfmt::general(flags.timeout));
+            ctx.eprintln(&message)?;
+            message + " "
+        } else {
+            String::new()
+        };
+        let hint = format!(
+            "{cap}Next: retry gpu run with a longer --expire/--timeout or another --offer."
+        );
+        let (alias, _) = crate::commands::wait_for_ssh_with_hint(ctx, &id, wait_timeout, &hint)?;
         crate::expiry::manage_expiry(ctx, &alias, &id, "arm", Some(deadline))?;
         ctx.result("expiry_armed", Value::Bool(true));
         let target = format!("/workspace/gpu-run-{run_id}");
@@ -484,6 +502,9 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
     } else {
         ctx.result("destroyed", Value::Bool(true));
         ctx.set_interrupt_notice(None);
+        if let Err(Error::Status(ExitCode::WaitTimeout, message)) = &mut outcome {
+            *message = format!("Instance {id} was destroyed. {message}");
+        }
         if ctx.interrupts() > 0 {
             outcome = Err(Error::Cancelled(130));
         }

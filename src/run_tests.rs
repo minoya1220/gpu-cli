@@ -31,9 +31,15 @@ enum End {
     ArmFailure,
     Reconnect,
     DownloadFailure,
+    WaitTimeout,
+    WaitTimeoutCleanupFailure,
 }
 
 fn flow(end: End) -> (i32, Value, String, Vec<Cmd>) {
+    flow_with_flags(end, flags(&["--env", "TOKEN"]))
+}
+
+fn flow_with_flags(end: End, flags: RunFlags) -> (i32, Value, String, Vec<Cmd>) {
     let env = TestEnv::new();
     let cwd = env.root.join("project");
     std::fs::create_dir(&cwd).unwrap();
@@ -66,6 +72,8 @@ fn flow(end: End) -> (i32, Value, String, Vec<Cmd>) {
                 ["show", "instances"] => {
                     if *destroyed.lock().unwrap() {
                         testing::ok("[]")
+                    } else if matches!(end, End::WaitTimeout | End::WaitTimeoutCleanupFailure) {
+                        testing::ok(r#"[{"id":123,"actual_status":"loading"}]"#)
                     } else {
                         testing::ok(
                             r#"[{"id":123,"actual_status":"running","ssh_host":"fake","ssh_port":1234}]"#,
@@ -73,7 +81,7 @@ fn flow(end: End) -> (i32, Value, String, Vec<Cmd>) {
                     }
                 }
                 ["destroy", "instance"] => {
-                    if matches!(end, End::CleanupFailure) {
+                    if matches!(end, End::CleanupFailure | End::WaitTimeoutCleanupFailure) {
                         return testing::status(1);
                     }
                     *destroyed.lock().unwrap() = true;
@@ -176,12 +184,7 @@ fn flow(end: End) -> (i32, Value, String, Vec<Cmd>) {
     builder.env = builder.env.with("TOKEN", "test-secret");
     let ctx = builder.build().for_command(true);
     *holder.lock().unwrap() = Some(ctx.clone());
-    let outcome = super::run::run(
-        &ctx,
-        &flags(&["--env", "TOKEN"]),
-        &crate::config::defaults(),
-        &cwd,
-    );
+    let outcome = super::run::run(&ctx, &flags, &crate::config::defaults(), &cwd);
     let code = outcome.as_ref().err().map_or(0, |e| e.exit_code());
     let result = crate::output::envelope(&ctx, "run", &outcome);
     let dir = cwd.join("gpu-runs/20261107T120000Z-123");
@@ -190,7 +193,7 @@ fn flow(end: End) -> (i32, Value, String, Vec<Cmd>) {
         result
     );
     let r = result.get("result").unwrap();
-    if !matches!(end, End::CleanupFailure) {
+    if !matches!(end, End::CleanupFailure | End::WaitTimeoutCleanupFailure) {
         assert_eq!(r.get("destroyed"), Some(&Value::Bool(true)));
     }
     if matches!(
@@ -236,6 +239,92 @@ fn job_endings_always_download_then_verify_destroy() {
             "instances".into()
         ])));
     }
+}
+
+#[test]
+fn readiness_timeout_after_verified_cleanup_suggests_retry_not_reconnecting() {
+    let (code, result, _, _) = flow_with_flags(
+        End::WaitTimeout,
+        flags(&["--env", "TOKEN", "--timeout", "2"]),
+    );
+    assert_eq!(code, 14);
+    let error = result.get("error").unwrap();
+    assert_eq!(error.get("code"), Some(&Value::str("wait_timeout")));
+    let message = error.get("message").unwrap().as_str().unwrap();
+    assert!(message.contains("Instance 123 was destroyed."), "{message}");
+    assert!(message.contains("Next: retry gpu run"), "{message}");
+    assert!(!message.contains("gpu wait"), "{message}");
+    assert!(!message.contains("limited to"), "{message}");
+    assert_eq!(
+        result.get("result").unwrap().get("destroyed"),
+        Some(&Value::Bool(true))
+    );
+    // An unverified destroy still takes precedence and must not claim success.
+    let (code, result, _, _) = flow_with_flags(
+        End::WaitTimeoutCleanupFailure,
+        flags(&["--env", "TOKEN", "--timeout", "2"]),
+    );
+    assert_eq!(code, 19);
+    assert!(!result
+        .get("error")
+        .unwrap()
+        .get("message")
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .contains("was destroyed"));
+}
+
+#[test]
+fn expiry_limited_readiness_reports_the_cap_before_wait_and_in_the_error() {
+    let (code, result, stderr, _) = flow_with_flags(
+        End::WaitTimeout,
+        flags(&["--env", "TOKEN", "--expire", "15m"]),
+    );
+    assert_eq!(code, 14);
+    let message = result
+        .get("error")
+        .unwrap()
+        .get("message")
+        .unwrap()
+        .as_str()
+        .unwrap();
+    for text in [
+        "SSH wait limited to 300s by --expire",
+        "requested --timeout 600s",
+        "10m reserved for results",
+        "Use a longer --expire",
+    ] {
+        assert!(message.contains(text), "{message}");
+        assert!(stderr.contains(text), "{stderr}");
+    }
+}
+
+#[test]
+fn nonterminal_explicit_offer_supplies_hardware_without_a_gpu_flag() {
+    let mut args = flags(&["--env", "TOKEN"]);
+    args.gpu = None;
+    args.offer = Some(100);
+    let (code, result, _, calls) = flow_with_flags(End::Success, args);
+    assert_eq!(code, 0);
+    assert_eq!(
+        result.get("result").unwrap().get("gpu"),
+        Some(&Value::str("RTX 4090"))
+    );
+    let search = calls
+        .iter()
+        .find(|cmd| {
+            cmd.argv
+                .starts_with(&["vastai".into(), "search".into(), "offers".into()])
+        })
+        .unwrap();
+    assert!(!search.argv[3].contains("gpu_name="));
+    assert!(calls.iter().any(|cmd| cmd.argv.starts_with(&[
+        "vastai".into(),
+        "create".into(),
+        "instance".into(),
+        "100".into()
+    ])));
 }
 
 #[test]

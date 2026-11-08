@@ -255,7 +255,7 @@ pub fn select_offer(ctx: &Ctx, offers: Vec<Dict>, args: &UpArgs) -> Result<Dict>
     choose(ctx, &choices, "Offer", None, None)
 }
 
-fn created_id(response: &Dict) -> Option<String> {
+pub(crate) fn created_id(response: &Dict) -> Option<String> {
     response.get("new_contract").map(py_str).filter(|id| {
         !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()) && id.bytes().any(|b| b != b'0')
     })

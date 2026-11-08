@@ -14,6 +14,9 @@ pub enum ExitCode {
     WaitTimeout = 14,
     SpendLimit = 15,
     NotFound = 16,
+    JobTimeout = 17,
+    InstanceLost = 18,
+    CleanupUnverified = 19,
 }
 
 impl ExitCode {
@@ -26,6 +29,9 @@ impl ExitCode {
             Self::WaitTimeout => "wait_timeout",
             Self::SpendLimit => "spend_limit",
             Self::NotFound => "not_found",
+            Self::JobTimeout => "job_timeout",
+            Self::InstanceLost => "instance_lost",
+            Self::CleanupUnverified => "cleanup_unverified",
         }
     }
 }

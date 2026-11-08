@@ -38,12 +38,18 @@ pub mod pyjson;
 pub mod redact;
 pub mod remote;
 pub mod repos;
+pub mod run;
+mod run_files;
 pub mod setup;
 pub mod ssh_config;
 pub mod startup;
 pub mod vast;
 pub mod wizard;
 
+#[cfg(test)]
+mod run_files_tests;
+#[cfg(test)]
+mod run_tests;
 #[cfg(test)]
 mod testing;
 #[cfg(test)]
@@ -181,6 +187,7 @@ fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
     guardrails::nonterminal(ctx, &command, &cfg)?;
     match command {
         Command::Setup(flags) => setup::run(ctx, &cfg, &flags),
+        Command::Run(flags) => run::run(ctx, &flags, &cfg, &std::env::current_dir()?),
         Command::Wait { id, timeout } => {
             let id = provider::selected_id(ctx, &cfg, Some(&id), "wait")?.expect("explicit id");
             remote::wait(ctx, &id, timeout).map(|_| ())

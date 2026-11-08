@@ -61,6 +61,28 @@ fn base64(bytes: &[u8]) -> String {
     text
 }
 
+/// Minimal job image startup: no GitHub auth, cloning, or apt work.
+pub fn run_script(deadline: Timestamp) -> Result<String> {
+    let mut lines = vec!["#!/bin/bash".to_string()];
+    lines.extend(expiry_guard(deadline));
+    lines.extend(
+        [
+            "touch /root/.no_auto_tmux",
+            "mkdir -p /workspace",
+            "export PATH=\"/root/.local/bin:$PATH\"",
+            "command -v uv >/dev/null 2>&1 || (curl -LsSf https://astral.sh/uv/install.sh | sh)",
+            "touch /root/.works",
+            "entrypoint.sh",
+        ]
+        .map(String::from),
+    );
+    let script = lines.join("\n") + "\n";
+    if script.len() > ONSTART_LIMIT {
+        return Err(Error::msg("Job startup exceeds Vast's onstart limit."));
+    }
+    Ok(script)
+}
+
 fn git_identity(cfg: &Dict, key: &str) -> Result<String> {
     let value = config::get(cfg, key)?;
     shell_quote_value(value).map_err(|_| {

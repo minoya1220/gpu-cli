@@ -61,6 +61,29 @@ Use `--dry-run` instead of `--yes` to print the exact JSON argument-array reques
 
 Private GitHub repos need `GH_TOKEN` configured in the Vast account environment before launch. `gpu` does not upload your local GitHub token or personal Vast API key. Do not put secrets in the config file.
 
+## Run a one-shot job (Vast containers)
+
+```sh
+gpu run --gpu 'RTX 4090' --expire 30m -- python train.py
+gpu run --gpu 'RTX 4090' --expire 2h --image pytorch/pytorch:2.8.0-cuda12.9-cudnn9-runtime \
+  --no-setup --env HF_TOKEN --yes --json -- python train.py
+gpu run --gpu 'RTX 4090' --expire 30m --dry-run -- python bench.py
+```
+
+`run` rents a fresh, non-interruptible container, uploads your working tree, runs the job, fetches results, then **destroys and verifies disappearance**. It requires `--expire` (or configured `default_expire`) and, without a terminal, `--gpu` and `--yes` (except dry runs). The terminal picker skips repository/mode selection. `--max-price`, configured `max_session_spend`, `--offer`, `--num-gpus`, `--disk`, `--reliability` and `--unverified` work as for `up`. `--timeout` defaults to 600 seconds and bounds SSH readiness only.
+
+- **Upload:** git-tracked plus untracked/non-ignored files from the repo root, including uncommitted edits. The command runs in the matching subdirectory. Submodules are refused. Outside git, upload the current directory excluding `.venv`, `venv`, `__pycache__`, `node_modules` and `.DS_Store`. Always exclude `.git` and `gpu-runs/`. `.env*` files being sent produce a warning; check your ignores before renting. `--max-upload 1G` is the default; the file list, archive, size cap and variable names are checked before paid calls.
+- **Setup:** first match: `uv.lock` → `uv sync --frozen`; `pyproject.toml` → `uv sync`; `requirements.txt` → `uv venv --system-site-packages .venv && uv pip install -r requirements.txt`; otherwise nothing. Override with `--setup CMD` or skip with `--no-setup`. The job uses `.venv/bin` first when present. Prefer an image with CUDA/torch already installed; system-site packages are importable, but uv may still resolve/install requirements again. Use `--no-setup` or explicit `--setup` to control this.
+- **Secrets:** repeat `--env NAME` to forward a local variable over SSH stdin, never argv or Vast metadata. The job's own output is not secret-filtered. Arguments are quoted literally, like `exec`; use `-- sh -c '...'` for shell syntax.
+- **Results:** write to `outputs/` (or `--outputs RELATIVE_DIR`), also exported as `GPU_RUN_OUTPUTS`. Results land under `./gpu-runs/<UTC timestamp>-<instance id>/` with `log.txt` and `result.json`. Add `gpu-runs/` to `.gitignore` yourself. Downloads do not overwrite your project's own outputs; result links/devices and escaping archive paths are refused.
+- **Reconnect:** the remote job is detached from SSH. The CLI polls byte-exact log chunks and resumes from the last received byte after a disconnect; no local daemon runs after exit. With `--json`, live logs go to stderr and stdout is one JSON envelope, with a final 4 KiB log tail and partial result fields.
+- **Lifetime:** the boot guard carries the hard machine deadline before SSH, and SSH verifies/arms the full timer as a second layer. Expiry includes boot/upload/download; reserve 10 minutes for fetching results, so `--expire` must exceed 10m. On unattended completion, a remote hook shortens expiry to finish + `--linger` (default 30m), never beyond the original ceiling. Host failure/stopping can kill all in-instance guards and leave storage billing; check `gpu ls` / `gpu down ID --yes`. This is why interruptible instances are not offered.
+- **Interrupt:** first Ctrl-C (also HUP/TERM) stops the process group, downloads partial outputs, then destroys/verifies. Second skips/aborts download but still destroys. Third exits immediately and prints the instance ID, boot deadline and manual cleanup command. SIGKILL/laptop loss leave only the boot/linger backstops; outputs are lost when destruction occurs. `--detach`, `logs` and `attach` are not part of phase 1.
+
+Job exit codes pass through (`remote_exit` in JSON). **17** `job_timeout`, **18** `instance_lost`, **19** `cleanup_unverified` (possible billing leak; run `gpu down ID --yes`), **130** interrupted after cleanup. Unverified destruction wins over a job's successful exit. `result.phase` identifies launch/upload/setup/job/download/cleanup/done; `result.json` uses the same envelope as stdout.
+
+Build checks: [Vast's base Dockerfile](https://github.com/vast-ai/base-image/blob/main/Dockerfile) installs uv into `/usr/local/bin`; a fallback installer handles other images. Its [entrypoint](https://github.com/vast-ai/base-image/blob/main/ROOT/opt/instance-tools/bin/entrypoint.sh) delegates to the default/custom boot script rather than waiting on portal ports itself; custom images must provide compatible SSH/onstart behavior. Local uv 0.10.4 experiments confirmed that system-site imports alone do **not** guarantee dependency reuse during resolution (an offline reinstall of an already-present requirement was refused). No GPU rental is used in these checks.
+
 ## Connect and edit
 
 ```sh
@@ -435,7 +458,7 @@ Failures set `ok:false` and add `error:{code,message,exit_code}`; `result` retai
 - `setup`: `provider`, `project`, `action`, `dry_run`, plus `ready` for a selected provider or `vast_ready`/`gcp_ready` for status. GCP plans also report `queue` and `enable_apis` when applicable.
 - `ssh`: `id`, `ssh_command`; `edit`/`cursor`: `id`, `ssh_alias`, `directory`, `editor`.
 
-Exit codes: **0** success, **1** other failure, **2** usage/missing flags, **10** no capacity, including a Vast offer that cannot start now (change model/zone), **11** over max price (raise limit/change hardware), **12** not set up (`gpu setup`), **13** authentication expired (sign in again), **14** readiness timeout (inspect state/retry with a longer timeout), **15** spending guardrail (shorten expiry/choose cheaper hardware/change cap), **16** `not_found` (refresh IDs with `gpu ls`). `exec`/`cp` preserve the subprocess status, which may overlap these codes; JSON distinguishes `remote_exit`. No automatic destroy is attempted after a launch failure.
+Exit codes: **0** success, **1** other failure, **2** usage/missing flags, **10** no capacity, including a Vast offer that cannot start now (change model/zone), **11** over max price (raise limit/change hardware), **12** not set up (`gpu setup`), **13** authentication expired (sign in again), **14** readiness timeout (inspect state/retry with a longer timeout), **15** spending guardrail (shorten expiry/choose cheaper hardware/change cap), **16** `not_found` (refresh IDs with `gpu ls`). `exec`/`cp`/`run` preserve the job/subprocess status, which may overlap these codes; JSON distinguishes `remote_exit`. `run` also uses **17** `job_timeout`, **18** `instance_lost`, **19** `cleanup_unverified`. Unlike `up`, `run` attempts verified destruction after any failure once its created ID is known.
 
 Optional config `max_session_spend` is off by default. A positive USD amount caps **one launch's estimated compute spend** through its expiry; an unknown price/deadline refuses. It is not a daily/account budget or billing guarantee: storage, network, price changes and failed expiry can cost extra. All existing expiry safety limits still apply.
 

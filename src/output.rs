@@ -10,7 +10,7 @@ pub(crate) struct CommandOutput {
     pub ssh_timeout: Option<f64>,
 }
 
-pub(crate) fn finish(ctx: &Ctx, command: &str, outcome: &Result<()>) -> Result<()> {
+pub(crate) fn envelope(ctx: &Ctx, command: &str, outcome: &Result<()>) -> Value {
     let mut object = Dict::new();
     object.insert("command", Value::str(command));
     object.insert("ok", Value::Bool(outcome.is_ok()));
@@ -25,10 +25,14 @@ pub(crate) fn finish(ctx: &Ctx, command: &str, outcome: &Result<()>) -> Result<(
         detail.insert("exit_code", Value::Int(error.exit_code().into()));
         object.insert("error", Value::Dict(detail));
     }
+    Value::Dict(object)
+}
+
+pub(crate) fn finish(ctx: &Ctx, command: &str, outcome: &Result<()>) -> Result<()> {
     // Remote stdout/stderr are caller data, not provider API responses. They
     // deliberately pass through unchanged. Provider data is redacted at source.
     ctx.console
-        .println(&pyjson::dumps(&Value::Dict(object), None))
+        .println(&pyjson::dumps(&envelope(ctx, command, outcome), None))
 }
 
 pub(crate) fn usage(text: impl Into<String>) -> Error {

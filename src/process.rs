@@ -18,6 +18,8 @@ pub enum Input {
     Inherit,
     /// Text written to the child's stdin, then closed.
     Text(String),
+    /// Stream a file without loading an archive into memory.
+    File(std::path::PathBuf),
 }
 
 /// One process to run: argv plus how to connect it.
@@ -30,6 +32,8 @@ pub struct Cmd {
     pub timeout: Option<f64>,
     /// Python-compatible text mode by default; remote command data opts out.
     pub normalize_newlines: bool,
+    /// Binary stdout destination (archives and byte-exact log chunks).
+    pub stdout_file: Option<std::path::PathBuf>,
 }
 
 impl Cmd {
@@ -40,6 +44,7 @@ impl Cmd {
             capture: true,
             timeout: None,
             normalize_newlines: true,
+            stdout_file: None,
         }
     }
 
@@ -60,6 +65,11 @@ impl Cmd {
 
     pub fn raw_output(mut self) -> Cmd {
         self.normalize_newlines = false;
+        self
+    }
+
+    pub fn stdout_file(mut self, path: impl Into<std::path::PathBuf>) -> Cmd {
+        self.stdout_file = Some(path.into());
         self
     }
 
@@ -126,6 +136,16 @@ impl RunError {
 pub trait Runner: Send + Sync {
     fn run(&self, cmd: &Cmd) -> std::result::Result<Output, RunError>;
 
+    /// Transfers can be interrupted without cancelling subsequent cleanup.
+    fn run_cancellable(
+        &self,
+        cmd: &Cmd,
+        _count: &std::sync::atomic::AtomicUsize,
+        _threshold: usize,
+    ) -> std::result::Result<Output, RunError> {
+        self.run(cmd)
+    }
+
     /// Replace the current process (`os.execvp`); returns only on failure.
     fn exec(&self, argv: &[String]) -> String;
 }
@@ -179,15 +199,20 @@ fn collect(
 fn wait(
     child: &mut Child,
     deadline: Option<Instant>,
+    cancellation: Option<(&std::sync::atomic::AtomicUsize, usize)>,
 ) -> std::io::Result<Option<std::process::ExitStatus>> {
-    let Some(deadline) = deadline else {
+    if deadline.is_none() && cancellation.is_none() {
         return child.wait().map(Some);
-    };
+    }
     loop {
         if let Some(status) = child.try_wait()? {
             return Ok(Some(status));
         }
-        if Instant::now() >= deadline {
+        if deadline.is_some_and(|at| Instant::now() >= at)
+            || cancellation.is_some_and(|(count, threshold)| {
+                count.load(std::sync::atomic::Ordering::SeqCst) >= threshold
+            })
+        {
             let _ = child.kill();
             let _ = child.wait();
             return Ok(None);
@@ -196,8 +221,11 @@ fn wait(
     }
 }
 
-impl Runner for RealRunner {
-    fn run(&self, cmd: &Cmd) -> std::result::Result<Output, RunError> {
+impl RealRunner {
+    fn execute(
+        cmd: &Cmd,
+        cancellation: Option<(&std::sync::atomic::AtomicUsize, usize)>,
+    ) -> std::result::Result<Output, RunError> {
         use std::os::unix::process::ExitStatusExt;
 
         let mut command = Command::new(cmd.program());
@@ -206,9 +234,17 @@ impl Runner for RealRunner {
             Input::Null => Stdio::null(),
             Input::Inherit => Stdio::inherit(),
             Input::Text(_) => Stdio::piped(),
+            Input::File(ref path) => {
+                Stdio::from(std::fs::File::open(path).map_err(|err| RunError::Os(err.to_string()))?)
+            }
         });
         if cmd.capture {
             command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        }
+        if let Some(path) = &cmd.stdout_file {
+            command.stdout(Stdio::from(
+                std::fs::File::create(path).map_err(|err| RunError::Os(err.to_string()))?,
+            ));
         }
         let mut child = command.spawn().map_err(|err| match err.kind() {
             std::io::ErrorKind::NotFound => RunError::NotFound,
@@ -226,7 +262,7 @@ impl Runner for RealRunner {
         // Read both pipes on threads so a large output cannot deadlock.
         let stdout = drain(child.stdout.take());
         let stderr = drain(child.stderr.take());
-        let status = wait(&mut child, deadline)
+        let status = wait(&mut child, deadline, cancellation)
             .map_err(|e| RunError::Os(e.to_string()))?
             .ok_or(RunError::TimedOut)?;
         let stdout = collect(stdout, deadline, cmd.normalize_newlines).ok_or(RunError::TimedOut)?;
@@ -239,6 +275,21 @@ impl Runner for RealRunner {
             stdout,
             stderr,
         })
+    }
+}
+
+impl Runner for RealRunner {
+    fn run(&self, cmd: &Cmd) -> std::result::Result<Output, RunError> {
+        Self::execute(cmd, None)
+    }
+
+    fn run_cancellable(
+        &self,
+        cmd: &Cmd,
+        count: &std::sync::atomic::AtomicUsize,
+        threshold: usize,
+    ) -> std::result::Result<Output, RunError> {
+        Self::execute(cmd, Some((count, threshold)))
     }
 
     fn exec(&self, argv: &[String]) -> String {

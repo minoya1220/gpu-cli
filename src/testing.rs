@@ -275,6 +275,10 @@ pub fn ok(stdout: &str) -> Result<Output, RunError> {
     Ok(Output::ok(stdout))
 }
 
+pub fn status(code: i32) -> Result<Output, RunError> {
+    Ok(Output::status(code))
+}
+
 pub fn strs(argv: &[String]) -> Vec<&str> {
     argv.iter().map(String::as_str).collect()
 }

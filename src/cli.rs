@@ -32,6 +32,8 @@ pub enum Command {
     Setup(SetupFlags),
     /// Launch a GPU or TPU workspace with an optional repository
     Up(UpFlags),
+    /// Run a one-shot job on a fresh Vast container, fetch results, then destroy it
+    Run(RunFlags),
     /// List rented instances
     Ls {
         /// Filled from the global JSON flag
@@ -114,6 +116,7 @@ impl Command {
         match self {
             Self::Setup(_) => "setup",
             Self::Up(_) => "up",
+            Self::Run(_) => "run",
             Self::Ls { .. } => "ls",
             Self::Wait { .. } => "wait",
             Self::Exec { .. } => "exec",
@@ -211,6 +214,52 @@ pub struct UpFlags {
     /// include verified, unverified, and deverified hosts
     #[arg(long)]
     pub unverified: bool,
+}
+
+#[derive(clap::Args, Clone, Debug)]
+pub struct RunFlags {
+    #[arg(long)]
+    pub gpu: Option<String>,
+    #[arg(long, default_value_t = 1)]
+    pub num_gpus: i64,
+    #[arg(long)]
+    pub max_price: Option<f64>,
+    #[arg(long)]
+    pub offer: Option<i64>,
+    #[arg(long)]
+    pub disk: Option<i64>,
+    #[arg(long)]
+    pub reliability: Option<f64>,
+    #[arg(long)]
+    pub unverified: bool,
+    #[arg(long)]
+    pub yes: bool,
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Required lifetime ceiling including boot, upload and download
+    #[arg(long, value_name = "DURATION")]
+    pub expire: Option<String>,
+    /// SSH readiness timeout, not job runtime
+    #[arg(long, default_value = "600", value_parser = positive_seconds)]
+    pub timeout: f64,
+    #[arg(long)]
+    pub image: Option<String>,
+    #[arg(long, conflicts_with = "no_setup")]
+    pub setup: Option<String>,
+    #[arg(long)]
+    pub no_setup: bool,
+    /// Results directory relative to the job's working directory
+    #[arg(long, default_value = "outputs")]
+    pub outputs: String,
+    /// Forward a local variable over SSH stdin, never Vast metadata
+    #[arg(long = "env", value_name = "NAME")]
+    pub env: Vec<String>,
+    #[arg(long, default_value = "1G")]
+    pub max_upload: String,
+    #[arg(long, default_value = "30m")]
+    pub linger: String,
+    #[arg(required = true, last = true, num_args = 1..)]
+    pub command: Vec<String>,
 }
 
 fn positive_seconds(s: &str) -> std::result::Result<f64, String> {

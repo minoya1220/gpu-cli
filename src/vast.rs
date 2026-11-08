@@ -97,6 +97,42 @@ impl Vast {
 pub fn request(offer: &Dict, args: &RequestArgs, cfg: &Dict) -> Result<Vec<Value>> {
     let mode = args.mode;
     let script = startup_script(args.repo, mode, cfg, args.deadline)?;
+    let label = resolve_repo(args.repo.as_arg(), &py_str(config::get(cfg, "owner")?))?.1;
+    request_script(offer, args, cfg, script, label)
+}
+
+/// Job startup shares the exact create flags, but never clones a repository.
+pub fn run_request(
+    offer: &Dict,
+    disk: Option<i64>,
+    cfg: &Dict,
+    deadline: Timestamp,
+    label: String,
+) -> Result<Vec<Value>> {
+    let args = RequestArgs {
+        repo: &Repo::NoRepo,
+        mode: "container",
+        interruptible: false,
+        disk,
+        deadline: Some(deadline),
+    };
+    request_script(
+        offer,
+        &args,
+        cfg,
+        crate::startup::run_script(deadline)?,
+        label,
+    )
+}
+
+fn request_script(
+    offer: &Dict,
+    args: &RequestArgs,
+    cfg: &Dict,
+    script: String,
+    label: String,
+) -> Result<Vec<Value>> {
+    let mode = args.mode;
     let none = Value::Null;
     let (key, price) = if args.interruptible {
         ("min_bid", offer.get("min_bid").unwrap_or(&none))
@@ -128,7 +164,7 @@ pub fn request(offer: &Dict, args: &RequestArgs, cfg: &Dict) -> Result<Vec<Value
         // stopped instance that can still bill storage.
         Value::str("--cancel-unavail"),
         Value::str("--label"),
-        Value::Str(resolve_repo(args.repo.as_arg(), &py_str(config::get(cfg, "owner")?))?.1),
+        Value::Str(label),
     ];
     if mode == "container" {
         command.extend([Value::str("--env"), Value::str(CONTAINER_ENV)]);

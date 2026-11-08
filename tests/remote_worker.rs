@@ -3,6 +3,23 @@
 
 #[cfg(target_os = "linux")]
 #[test]
+fn remote_run_suite() {
+    let script = concat!(env!("CARGO_MANIFEST_DIR"), "/remote/test_run_remote.sh");
+    let output = std::process::Command::new("bash")
+        .arg(script)
+        .output()
+        .expect("run bash");
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("6 passed, 0 failed"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn remote_worker_suite() {
     let script = concat!(env!("CARGO_MANIFEST_DIR"), "/remote/test_expiry_remote.sh");
     let output = std::process::Command::new("bash")

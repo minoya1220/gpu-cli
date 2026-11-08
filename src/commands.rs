@@ -123,6 +123,7 @@ pub fn wait_for_ssh(ctx: &Ctx, instance_id: &str, timeout: f64) -> Result<(Strin
         general(timeout)
     ))?;
     loop {
+        ctx.check_cancelled()?;
         let remaining = deadline - ctx.clock.monotonic();
         if remaining <= 0.0 {
             return Err(timed_out(&reason));

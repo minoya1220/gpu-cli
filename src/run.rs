@@ -112,13 +112,6 @@ fn args(flags: &RunFlags) -> UpArgs {
 
 fn choose(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, args: &UpArgs) -> Result<Dict> {
     let search = OfferSearch::new(Vast::new(ctx), args, cfg)?;
-    if flags.offer.is_some() {
-        return crate::launch::select_offer(
-            ctx,
-            search.offers("container", flags.gpu.as_deref())?,
-            args,
-        );
-    }
     if ctx.interactive() {
         let wizard = crate::wizard::LaunchWizard::new(
             &ctx.env,
@@ -195,9 +188,9 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
             "--outputs must be a relative directory without . or .. components.".into(),
         ));
     }
-    if !ctx.interactive() && flags.gpu.is_none() && flags.offer.is_none() {
+    if !ctx.interactive() && flags.gpu.is_none() {
         return Err(Error::Usage(
-            "Non-terminal gpu run requires --gpu MODEL or --offer ID.".into(),
+            "Non-terminal gpu run requires --gpu MODEL.".into(),
         ));
     }
     if !ctx.interactive() && !flags.yes && !flags.dry_run {
@@ -384,6 +377,8 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
             shell_quote(&target),
             shell_quote(&target)
         );
+        let remaining =
+            (deadline.as_second() - DOWNLOAD_RESERVE - ctx.clock.now().as_second()).max(1) as f64;
         checked_transfer(
             ctx,
             &ssh(&alias, &command, remaining).stdin(Input::File(upload.archive.path().into())),
@@ -436,24 +431,28 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
         outcome = Err(Error::Cancelled(130));
     }
     if let Some((alias, root, jobdir)) = paths {
+        let status = || {
+            checked(
+                ctx,
+                &ssh(&alias, &control(&root, &run_id, "status"), 5.0),
+                "Status unavailable.",
+            )
+            .ok()
+            .and_then(|out| parse_status(&out.stdout))
+        };
+        let mut last = None;
         if outcome.is_err() {
             let _ = checked(
                 ctx,
                 &ssh(&alias, &control(&root, &run_id, "stop"), 10.0),
                 "Stop unverified.",
             );
-            // Let TERM/KILL finish and flush the log before downloading partial results.
+            // The supervisor runs the linger hook before publishing the final
+            // status; wait through transient SSH failures until it is seen.
             let until = ctx.clock.monotonic() + 35.0;
             while ctx.interrupts() < 2 && ctx.clock.monotonic() < until {
-                if let Ok(out) = checked(
-                    ctx,
-                    &ssh(&alias, &control(&root, &run_id, "status"), 5.0),
-                    "Status unavailable.",
-                ) {
-                    if parse_status(&out.stdout).is_some_and(|s| s.exit.is_some()) {
-                        break;
-                    }
-                } else {
+                if let Some(s) = status().filter(|s| s.exit.is_some()) {
+                    last = Some(s);
                     break;
                 }
                 ctx.clock.sleep(1.0);
@@ -461,14 +460,8 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
         }
         if ctx.interrupts() < 2 {
             // Fetch bytes written during cancellation/TERM grace, too.
-            if let Ok(out) = checked(
-                ctx,
-                &ssh(&alias, &control(&root, &run_id, "status"), 5.0),
-                "Status unavailable.",
-            ) {
-                if let Some(status) = parse_status(&out.stdout) {
-                    let _ = finish_log(ctx, &alias, &root, &local, status.size);
-                }
+            if let Some(status) = last.or_else(status) {
+                let _ = finish_log(ctx, &alias, &root, &local, status.size);
             }
             // The finished job shortened expiry to linger; an attached
             // download keeps the original deadline.
@@ -722,7 +715,7 @@ fn download(
         2,
         "Results download failed; instance will still be destroyed.",
     )?;
-    let bytes = run_files::unpack(archive.path(), local, Path::new(outputs))?;
+    let bytes = run_files::unpack(ctx, archive.path(), local, Path::new(outputs))?;
     ctx.result("downloaded_bytes", Value::Int(bytes as i64));
     ctx.result(
         "outputs_dir",

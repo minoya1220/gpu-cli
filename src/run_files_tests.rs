@@ -89,20 +89,117 @@ fn outside_git_excludes_builtin_trees_and_warns_about_dotenv() {
 }
 
 #[test]
-fn results_cannot_escape_or_overwrite_through_links() {
+fn results_keep_inner_symlinks_and_skip_escaping_links_without_aborting() {
     let env = TestEnv::new();
+    let ctx = env.ctx().build();
+    let archive = env.root.join("results.tar");
+    let mut tar = tar::Builder::new(fs::File::create(&archive).unwrap());
+    let link = |tar: &mut tar::Builder<fs::File>, kind, name: &str, target: &str| {
+        let mut header = tar::Header::new_gnu();
+        header.set_mode(0o777);
+        header.set_size(0);
+        header.set_entry_type(kind);
+        header.set_link_name(target).unwrap();
+        header.set_cksum();
+        tar.append_data(&mut header, name, &b""[..]).unwrap();
+    };
+    let file = |tar: &mut tar::Builder<fs::File>, name: &str, data: &[u8]| {
+        let mut header = tar::Header::new_gnu();
+        header.set_mode(0o600);
+        header.set_size(data.len() as u64);
+        header.set_cksum();
+        tar.append_data(&mut header, name, data).unwrap();
+    };
+    file(&mut tar, "outputs/epoch=3.ckpt", b"weights");
+    link(
+        &mut tar,
+        tar::EntryType::Symlink,
+        "outputs/last.ckpt",
+        "epoch=3.ckpt",
+    );
+    link(
+        &mut tar,
+        tar::EntryType::Symlink,
+        "outputs/sub/best",
+        "../epoch=3.ckpt",
+    );
+    link(
+        &mut tar,
+        tar::EntryType::Symlink,
+        "outputs/absolute",
+        "/tmp",
+    );
+    link(
+        &mut tar,
+        tar::EntryType::Symlink,
+        "outputs/escape",
+        "../../secret",
+    );
+    link(
+        &mut tar,
+        tar::EntryType::Symlink,
+        "outputs/sibling",
+        "../project",
+    );
+    link(
+        &mut tar,
+        tar::EntryType::Link,
+        "outputs/hard",
+        "outputs/epoch=3.ckpt",
+    );
+    file(&mut tar, "outputs/escape/after.txt", b"after");
+    tar.finish().unwrap();
+    let dest = env.root.join("dest");
+    fs::create_dir(&dest).unwrap();
+    run_files::unpack(&ctx, &archive, &dest, Path::new("outputs")).unwrap();
+    assert_eq!(
+        fs::read(dest.join("outputs/last.ckpt")).unwrap(),
+        b"weights"
+    );
+    assert_eq!(fs::read(dest.join("outputs/sub/best")).unwrap(), b"weights");
+    assert_eq!(
+        fs::read_link(dest.join("outputs/last.ckpt")).unwrap(),
+        Path::new("epoch=3.ckpt")
+    );
+    for skipped in ["absolute", "sibling", "hard"] {
+        assert!(fs::symlink_metadata(dest.join("outputs").join(skipped)).is_err());
+    }
+    assert!(!fs::symlink_metadata(dest.join("outputs/escape"))
+        .unwrap()
+        .is_symlink());
+    assert_eq!(
+        fs::read(dest.join("outputs/escape/after.txt")).unwrap(),
+        b"after"
+    );
+    let warnings = crate::testing::err(&ctx);
+    for name in ["absolute", "escape", "sibling", "hard"] {
+        assert_eq!(
+            warnings
+                .lines()
+                .filter(|l| l.starts_with(&format!("WARNING: skipping outputs/{name} ")))
+                .count(),
+            1,
+            "{warnings}"
+        );
+    }
+}
+
+#[test]
+fn results_with_unsafe_paths_are_still_refused() {
+    let env = TestEnv::new();
+    let ctx = env.ctx().build();
     let archive = env.root.join("results.tar");
     let mut tar = tar::Builder::new(fs::File::create(&archive).unwrap());
     let mut header = tar::Header::new_gnu();
-    header.set_mode(0o777);
-    header.set_size(0);
-    header.set_entry_type(tar::EntryType::Symlink);
-    header.set_link_name("/tmp").unwrap();
+    header.set_mode(0o600);
+    header.set_size(1);
     header.set_cksum();
-    tar.append_data(&mut header, "outputs/link", &b""[..])
+    tar.append_data(&mut header, "elsewhere/x", &b"x"[..])
         .unwrap();
     tar.finish().unwrap();
     fs::create_dir(env.root.join("dest")).unwrap();
-    assert!(run_files::unpack(&archive, &env.root.join("dest"), Path::new("outputs")).is_err());
-    assert!(!env.root.join("dest/outputs/link").exists());
+    assert!(
+        run_files::unpack(&ctx, &archive, &env.root.join("dest"), Path::new("outputs")).is_err()
+    );
+    assert!(!env.root.join("dest/elsewhere").exists());
 }

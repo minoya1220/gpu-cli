@@ -26,6 +26,7 @@ enum End {
     Lost,
     CleanupFailure,
     Cancel,
+    CancelFlakyStatus,
     CancelTwice,
     UploadFailure,
     ArmFailure,
@@ -122,7 +123,7 @@ fn flow_with_flags(end: End, flags: RunFlags) -> (i32, Value, String, Vec<Cmd>) 
                     };
                     assert!(payload.contains("test-secret"));
                     assert!(payload.contains("uv venv --system-site-packages"));
-                    if matches!(end, End::Cancel | End::CancelTwice) {
+                    if matches!(end, End::Cancel | End::CancelFlakyStatus | End::CancelTwice) {
                         let lock = holder2.lock().unwrap();
                         let ctx = lock.as_ref().unwrap();
                         ctx.interrupt();
@@ -141,6 +142,13 @@ fn flow_with_flags(end: End, flags: RunFlags) -> (i32, Value, String, Vec<Cmd>) 
                             *destroyed.lock().unwrap() = true;
                         }
                         return testing::status(255);
+                    }
+                    if matches!(end, End::CancelFlakyStatus) && *n <= 2 {
+                        return if *n == 1 {
+                            testing::status(255)
+                        } else {
+                            testing::ok("job\t-\t0\t12\n")
+                        };
                     }
                     let (code, timed) = match end {
                         End::Failure => (7, 0),
@@ -198,7 +206,12 @@ fn flow_with_flags(end: End, flags: RunFlags) -> (i32, Value, String, Vec<Cmd>) 
     }
     if matches!(
         end,
-        End::Success | End::Failure | End::Timeout | End::Cancel | End::Reconnect
+        End::Success
+            | End::Failure
+            | End::Timeout
+            | End::Cancel
+            | End::CancelFlakyStatus
+            | End::Reconnect
     ) {
         assert_eq!(
             std::fs::read(dir.join("outputs/result.txt")).unwrap(),
@@ -226,6 +239,7 @@ fn job_endings_always_download_then_verify_destroy() {
         (End::Lost, 18),
         (End::CleanupFailure, 19),
         (End::Cancel, 130),
+        (End::CancelFlakyStatus, 130),
         (End::CancelTwice, 130),
         (End::UploadFailure, 1),
         (End::ArmFailure, 1),
@@ -301,30 +315,21 @@ fn expiry_limited_readiness_reports_the_cap_before_wait_and_in_the_error() {
 }
 
 #[test]
-fn nonterminal_explicit_offer_supplies_hardware_without_a_gpu_flag() {
-    let mut args = flags(&["--env", "TOKEN"]);
+fn nonterminal_run_requires_gpu_even_with_an_explicit_offer() {
+    let env = TestEnv::new();
+    let runner = FakeRunner::new(|cmd| panic!("unexpected {:?}", cmd.argv));
+    let ctx = env.ctx().runner(&runner).build();
+    let mut args = flags(&[]);
     args.gpu = None;
     args.offer = Some(100);
-    let (code, result, _, calls) = flow_with_flags(End::Success, args);
-    assert_eq!(code, 0);
-    assert_eq!(
-        result.get("result").unwrap().get("gpu"),
-        Some(&Value::str("RTX 4090"))
+    let error = super::run::run(&ctx, &args, &crate::config::defaults(), &env.root).unwrap_err();
+    assert_eq!(error.exit_code(), 2);
+    assert!(
+        error.text().contains("requires --gpu MODEL"),
+        "{}",
+        error.text()
     );
-    let search = calls
-        .iter()
-        .find(|cmd| {
-            cmd.argv
-                .starts_with(&["vastai".into(), "search".into(), "offers".into()])
-        })
-        .unwrap();
-    assert!(!search.argv[3].contains("gpu_name="));
-    assert!(calls.iter().any(|cmd| cmd.argv.starts_with(&[
-        "vastai".into(),
-        "create".into(),
-        "instance".into(),
-        "100".into()
-    ])));
+    assert!(runner.calls().is_empty());
 }
 
 #[test]
@@ -372,4 +377,21 @@ fn attached_download_restores_the_full_deadline_after_the_linger_hook() {
         .rposition(|c| c.program() == "ssh" && c.argv.last().unwrap().contains(" status "))
         .unwrap();
     assert!(finished < arms[1].0 && arms[1].0 < position("tar -C "));
+}
+
+#[test]
+fn cancelled_download_rearms_only_after_the_final_status_despite_status_failures() {
+    let (code, _, _, calls) = flow(End::CancelFlakyStatus);
+    assert_eq!(code, 130);
+    let status = |c: &Cmd| c.program() == "ssh" && c.argv.last().unwrap().contains(" status ");
+    let rearm = calls
+        .iter()
+        .rposition(|c| matches!(&c.stdin, Input::Text(t) if t.starts_with("GPU_EXPIRE_SOURCE=")))
+        .unwrap();
+    assert_eq!(calls[..rearm].iter().filter(|c| status(c)).count(), 3);
+    let download = calls
+        .iter()
+        .position(|c| c.program() == "ssh" && c.argv.last().unwrap().starts_with("tar -C "))
+        .unwrap();
+    assert!(rearm < download);
 }

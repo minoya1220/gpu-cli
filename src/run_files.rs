@@ -210,7 +210,9 @@ pub(crate) fn prepare(ctx: &Ctx, cwd: &Path, cap: u64) -> Result<Upload> {
 
 /// tar's unpack_in rejects traversal and symlink-parent escapes. Restrict the
 /// archive to the declared output subtree, and never materialize special files.
-pub(crate) fn unpack(path: &Path, dest: &Path, outputs: &Path) -> Result<u64> {
+/// Only symlinks whose relative target stays inside the outputs are recreated;
+/// other links and special entries are skipped with a warning.
+pub(crate) fn unpack(ctx: &Ctx, path: &Path, dest: &Path, outputs: &Path) -> Result<u64> {
     let mut archive = tar::Archive::new(fs::File::open(path)?);
     let mut bytes = 0u64;
     for entry in archive.entries()? {
@@ -223,10 +225,18 @@ pub(crate) fn unpack(path: &Path, dest: &Path, outputs: &Path) -> Result<u64> {
             )));
         }
         let kind = entry.header().entry_type();
-        if !kind.is_file() && !kind.is_dir() {
-            return Err(Error::msg(
-                "Results may contain only regular files/directories, not links or devices.",
-            ));
+        let kept = kind.is_file()
+            || kind.is_dir()
+            || (kind.is_symlink()
+                && entry
+                    .link_name()?
+                    .is_some_and(|target| link_inside(&name, &target, outputs)));
+        if !kept {
+            ctx.eprintln(&format!(
+                "WARNING: skipping {} (only regular files, directories and symlinks inside the outputs are downloaded).",
+                name.display()
+            ))?;
+            continue;
         }
         bytes = bytes.saturating_add(entry.size());
         if !entry.unpack_in(dest)? {
@@ -234,6 +244,29 @@ pub(crate) fn unpack(path: &Path, dest: &Path, outputs: &Path) -> Result<u64> {
         }
     }
     Ok(bytes)
+}
+
+fn link_inside(name: &Path, target: &Path, outputs: &Path) -> bool {
+    if target.as_os_str().is_empty() {
+        return false;
+    }
+    let mut resolved: Vec<_> = name
+        .parent()
+        .map(|p| p.components().collect())
+        .unwrap_or_default();
+    for part in target.components() {
+        match part {
+            Component::Normal(_) => resolved.push(part),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if resolved.pop().is_none() {
+                    return false;
+                }
+            }
+            Component::RootDir | Component::Prefix(_) => return false,
+        }
+    }
+    resolved.iter().collect::<PathBuf>().starts_with(outputs)
 }
 
 pub(crate) fn tail(path: &Path) -> Result<String> {

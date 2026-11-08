@@ -248,8 +248,8 @@ pub(crate) fn unpack(ctx: &Ctx, path: &Path, dest: &Path, outputs: &Path) -> Res
 
 /// Resolve against the extracted tree: earlier links are followed on disk,
 /// `..` must leave an existing real directory (the link's parents are created
-/// first), and existing paths are never
-/// replaced by a link, so later entries cannot change what was checked.
+/// first), and existing paths are never replaced by a link, so later entries
+/// cannot change what was checked.
 fn link_inside(dest: &Path, name: &Path, target: &Path, outputs: &Path) -> bool {
     let parent = name.parent().unwrap_or(Path::new(""));
     if target.as_os_str().is_empty()

@@ -230,7 +230,7 @@ pub(crate) fn unpack(ctx: &Ctx, path: &Path, dest: &Path, outputs: &Path) -> Res
             || (kind.is_symlink()
                 && entry
                     .link_name()?
-                    .is_some_and(|target| link_inside(&name, &target, outputs)));
+                    .is_some_and(|target| link_inside(dest, &name, &target, outputs)));
         if !kept {
             ctx.eprintln(&format!(
                 "WARNING: skipping {} (only regular files, directories and symlinks inside the outputs are downloaded).",
@@ -246,27 +246,52 @@ pub(crate) fn unpack(ctx: &Ctx, path: &Path, dest: &Path, outputs: &Path) -> Res
     Ok(bytes)
 }
 
-fn link_inside(name: &Path, target: &Path, outputs: &Path) -> bool {
-    if target.as_os_str().is_empty() {
+/// Resolve against the extracted tree: earlier links are followed on disk,
+/// `..` must leave an existing real directory (the link's parents are created
+/// first), and existing paths are never
+/// replaced by a link, so later entries cannot change what was checked.
+fn link_inside(dest: &Path, name: &Path, target: &Path, outputs: &Path) -> bool {
+    let parent = name.parent().unwrap_or(Path::new(""));
+    if target.as_os_str().is_empty()
+        || fs::symlink_metadata(dest.join(name)).is_ok()
+        || fs::create_dir_all(dest.join(parent)).is_err()
+    {
         return false;
     }
-    let mut resolved: Vec<_> = name
-        .parent()
-        .map(|p| p.components().collect())
-        .unwrap_or_default();
+    resolve(dest, PathBuf::new(), parent, 0)
+        .and_then(|parent| resolve(dest, parent, target, 0))
+        .is_some_and(|path| path.starts_with(outputs))
+}
+
+fn resolve(dest: &Path, mut path: PathBuf, target: &Path, depth: usize) -> Option<PathBuf> {
+    if depth > 32 {
+        return None;
+    }
     for part in target.components() {
         match part {
-            Component::Normal(_) => resolved.push(part),
-            Component::CurDir => {}
-            Component::ParentDir => {
-                if resolved.pop().is_none() {
-                    return false;
+            Component::Normal(p) => {
+                path.push(p);
+                let disk = dest.join(&path);
+                if fs::symlink_metadata(&disk).is_ok_and(|m| m.is_symlink()) {
+                    let link = fs::read_link(&disk).ok()?;
+                    path.pop();
+                    path = resolve(dest, path, &link, depth + 1)?;
                 }
             }
-            Component::RootDir | Component::Prefix(_) => return false,
+            Component::CurDir => {}
+            Component::ParentDir => {
+                let disk = dest.join(&path);
+                if path.as_os_str().is_empty()
+                    || !fs::symlink_metadata(&disk).is_ok_and(|m| m.is_dir())
+                    || !path.pop()
+                {
+                    return None;
+                }
+            }
+            Component::RootDir | Component::Prefix(_) => return None,
         }
     }
-    resolved.iter().collect::<PathBuf>().starts_with(outputs)
+    Some(path)
 }
 
 pub(crate) fn tail(path: &Path) -> Result<String> {

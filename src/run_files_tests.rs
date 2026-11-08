@@ -203,3 +203,58 @@ fn results_with_unsafe_paths_are_still_refused() {
     );
     assert!(!env.root.join("dest/elsewhere").exists());
 }
+
+#[test]
+fn results_links_cannot_escape_through_earlier_or_later_links() {
+    let env = TestEnv::new();
+    let ctx = env.ctx().build();
+    let archive = env.root.join("results.tar");
+    let mut tar = tar::Builder::new(fs::File::create(&archive).unwrap());
+    let link = |tar: &mut tar::Builder<fs::File>, name: &str, target: &str| {
+        let mut header = tar::Header::new_gnu();
+        header.set_mode(0o777);
+        header.set_size(0);
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_link_name(target).unwrap();
+        header.set_cksum();
+        tar.append_data(&mut header, name, &b""[..]).unwrap();
+    };
+    link(&mut tar, "outputs/a/b/s", "..");
+    link(&mut tar, "outputs/a/b/y", "s/../../..");
+    link(&mut tar, "outputs/c/z", "d/../..");
+    link(&mut tar, "outputs/c/d", ".");
+    link(&mut tar, "outputs/a/b/s", ".");
+    let mut header = tar::Header::new_gnu();
+    header.set_mode(0o600);
+    header.set_size(5);
+    header.set_cksum();
+    tar.append_data(&mut header, "outputs/after.txt", &b"after"[..])
+        .unwrap();
+    tar.finish().unwrap();
+    let dest = env.root.join("gpu-runs/run");
+    fs::create_dir_all(&dest).unwrap();
+    run_files::unpack(&ctx, &archive, &dest, Path::new("outputs")).unwrap();
+    assert_eq!(
+        fs::read_link(dest.join("outputs/a/b/s")).unwrap(),
+        Path::new("..")
+    );
+    assert_eq!(
+        fs::read_link(dest.join("outputs/c/d")).unwrap(),
+        Path::new(".")
+    );
+    for skipped in ["a/b/y", "c/z"] {
+        assert!(fs::symlink_metadata(dest.join("outputs").join(skipped)).is_err());
+    }
+    assert_eq!(fs::read(dest.join("outputs/after.txt")).unwrap(), b"after");
+    let warnings = crate::testing::err(&ctx);
+    for name in ["a/b/y", "c/z", "a/b/s"] {
+        assert_eq!(
+            warnings
+                .lines()
+                .filter(|l| l.starts_with(&format!("WARNING: skipping outputs/{name} ")))
+                .count(),
+            1,
+            "{warnings}"
+        );
+    }
+}

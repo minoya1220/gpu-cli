@@ -334,6 +334,7 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
     let run_id = format!("{}-{id}", now.strftime("%Y%m%dT%H%M%SZ"));
     let local = cwd.join("gpu-runs").join(&run_id);
     let mut paths = None;
+    let mut launched = false;
     let job = (|| {
         if !cwd.join("gpu-runs").exists() {
             ctx.eprintln("Results go in gpu-runs/; add gpu-runs/ to .gitignore.")?;
@@ -413,6 +414,7 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
             shell_quote(&root),
             shell_quote(&run_id)
         );
+        launched = true;
         checked(
             ctx,
             &ssh(&alias, &start, 30.0).stdin(Input::Text(payload)),
@@ -431,17 +433,17 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
         outcome = Err(Error::Cancelled(130));
     }
     if let Some((alias, root, jobdir)) = paths {
-        let status = || {
+        let response = || {
             checked(
                 ctx,
                 &ssh(&alias, &control(&root, &run_id, "status"), 5.0),
                 "Status unavailable.",
             )
             .ok()
-            .and_then(|out| parse_status(&out.stdout))
         };
+        let status = || response().and_then(|out| parse_status(&out.stdout));
         let mut last = None;
-        if outcome.is_err() {
+        if outcome.is_err() && launched {
             let _ = checked(
                 ctx,
                 &ssh(&alias, &control(&root, &run_id, "stop"), 10.0),
@@ -451,7 +453,14 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
             // status; wait through transient SSH failures until it is seen.
             let until = ctx.clock.monotonic() + 35.0;
             while ctx.interrupts() < 2 && ctx.clock.monotonic() < until {
-                if let Some(s) = status().filter(|s| s.exit.is_some()) {
+                let out = response();
+                if out.as_ref().is_some_and(|o| o.stdout.trim() == "lost") {
+                    break;
+                }
+                if let Some(s) = out
+                    .and_then(|o| parse_status(&o.stdout))
+                    .filter(|s| s.exit.is_some())
+                {
                     last = Some(s);
                     break;
                 }

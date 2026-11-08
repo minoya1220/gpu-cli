@@ -24,6 +24,7 @@ enum End {
     Failure,
     Timeout,
     Lost,
+    SupervisorLost,
     CleanupFailure,
     Cancel,
     CancelFlakyStatus,
@@ -143,6 +144,9 @@ fn flow_with_flags(end: End, flags: RunFlags) -> (i32, Value, String, Vec<Cmd>) 
                         }
                         return testing::status(255);
                     }
+                    if matches!(end, End::SupervisorLost) {
+                        return testing::ok("lost\n");
+                    }
                     if matches!(end, End::CancelFlakyStatus) && *n <= 2 {
                         return if *n == 1 {
                             testing::status(255)
@@ -237,6 +241,7 @@ fn job_endings_always_download_then_verify_destroy() {
         (End::Failure, 7),
         (End::Timeout, 17),
         (End::Lost, 18),
+        (End::SupervisorLost, 18),
         (End::CleanupFailure, 19),
         (End::Cancel, 130),
         (End::CancelFlakyStatus, 130),
@@ -394,4 +399,23 @@ fn cancelled_download_rearms_only_after_the_final_status_despite_status_failures
         .position(|c| c.program() == "ssh" && c.argv.last().unwrap().starts_with("tar -C "))
         .unwrap();
     assert!(rearm < download);
+}
+
+#[test]
+fn pre_start_failures_do_not_wait_for_a_supervisor() {
+    for end in [End::UploadFailure, End::SupervisorLost] {
+        let (_, _, _, calls) = flow(end);
+        let status = calls
+            .iter()
+            .filter(|c| c.program() == "ssh" && c.argv.last().unwrap().contains(" status "))
+            .count();
+        let stops = calls
+            .iter()
+            .filter(|c| c.program() == "ssh" && c.argv.last().unwrap().contains(" stop "))
+            .count();
+        match end {
+            End::UploadFailure => assert_eq!((status, stops), (1, 0)),
+            _ => assert_eq!((status, stops), (3, 1)),
+        }
+    }
 }

@@ -58,6 +58,58 @@ fn unverified_cleanup_never_claims_success_and_still_removes_alias() {
 }
 
 #[test]
+fn cleanup_resends_destroy_while_the_instance_stays_listed() {
+    let env = TestEnv::new();
+    let clock = FakeClock::now_real();
+    let sends = Arc::new(AtomicUsize::new(0));
+    let counter = sends.clone();
+    let runner = FakeRunner::new(move |cmd| {
+        if cmd.argv[1] == "destroy" {
+            if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                return testing::status(1);
+            }
+            return testing::ok("");
+        }
+        if sends.load(Ordering::SeqCst) < 2 {
+            testing::ok(r#"[{"id":123,"actual_status":"running"}]"#)
+        } else {
+            testing::ok("[]")
+        }
+    });
+    let ctx = env.ctx().runner(&runner).clock(&clock).build();
+    destroy(&ctx, "123").unwrap();
+    let destroys = runner
+        .calls()
+        .iter()
+        .filter(|cmd| cmd.argv[1] == "destroy")
+        .count();
+    assert_eq!(destroys, 2);
+    assert!(clock.elapsed() < 60.0);
+}
+
+#[test]
+fn bounded_cleanup_resends_destroy_a_fixed_number_of_times() {
+    let env = TestEnv::new();
+    let clock = FakeClock::now_real();
+    let runner = FakeRunner::new(|cmd| {
+        if cmd.argv[1] == "destroy" {
+            testing::status(1)
+        } else {
+            testing::ok(r#"[{"id":123,"actual_status":"running"}]"#)
+        }
+    });
+    let ctx = env.ctx().runner(&runner).clock(&clock).build();
+    assert_eq!(destroy(&ctx, "123").unwrap_err().exit_code(), 19);
+    let destroys = runner
+        .calls()
+        .iter()
+        .filter(|cmd| cmd.argv[1] == "destroy")
+        .count();
+    assert_eq!(destroys, 3);
+    assert!(clock.elapsed() <= 60.0 + 1e-9);
+}
+
+#[test]
 fn remote_step_errors_include_status_and_bounded_safe_cause() {
     let env = TestEnv::new();
     let ctx = env.ctx().build();
@@ -124,6 +176,8 @@ fn unwritable_result_destination_fails_before_paid_create_and_names_path() {
 fn secret_looking_uploads_require_explicit_override_before_offer_search() {
     for path in [
         ".env",
+        ".env.local",
+        ".envrc",
         "id_rsa",
         ".netrc",
         ".aws/credentials",
@@ -166,6 +220,42 @@ fn secret_looking_uploads_require_explicit_override_before_offer_search() {
             ctx.result_snapshot().get("files"),
             Some(&Value::List(vec![Value::str(path)]))
         );
+        assert_eq!(
+            testing::err(&ctx)
+                .matches("WARNING: uploading secret-looking files")
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn committed_env_templates_upload_without_override_or_warning() {
+    for path in [".env.example", ".env.sample", ".env.template", ".env.dist"] {
+        let env = TestEnv::new();
+        let cwd = env.root.join("project");
+        fs::create_dir(&cwd).unwrap();
+        fs::write(cwd.join(path), b"KEY=").unwrap();
+        let runner = FakeRunner::new(|cmd| match cmd.program() {
+            "git" => testing::status(128),
+            "vastai" if cmd.argv[1] == "search" => {
+                testing::ok(r#"[{"id":42,"gpu_name":"T4","dph_total":0.1,"num_gpus":1}]"#)
+            }
+            _ => panic!("{:?}", cmd.argv),
+        });
+        let ctx = env.ctx().runner(&runner).build().for_command(true);
+        run(
+            &ctx,
+            &flags(&["--dry-run"]),
+            &crate::config::defaults(),
+            &cwd,
+        )
+        .unwrap();
+        assert_eq!(
+            ctx.result_snapshot().get("files"),
+            Some(&Value::List(vec![Value::str(path)]))
+        );
+        assert!(!testing::err(&ctx).contains("WARNING"));
     }
 }
 
@@ -205,4 +295,40 @@ fn results_download_retries_then_unpacks_without_implicit_linger() {
     assert_eq!(fs::read(local.join("outputs/result")).unwrap(), b"ok");
     assert_eq!(calls.load(Ordering::SeqCst), 3);
     assert_eq!(flags(&[]).linger, "0");
+}
+
+fn download_with(runner: &Arc<FakeRunner>, clock: &Arc<FakeClock>, env: &TestEnv) -> Result<()> {
+    let local = env.root.join("results");
+    fs::create_dir_all(&local).unwrap();
+    let ctx = env.ctx().runner(runner).clock(clock).build();
+    download(
+        &ctx,
+        "vast-123",
+        "/root/state",
+        "/workspace/job",
+        "outputs",
+        &local,
+        ctx.clock.now() + jiff::Span::new().hours(2),
+    )
+}
+
+#[test]
+fn remote_tar_failure_is_not_retried() {
+    let env = TestEnv::new();
+    let clock = FakeClock::now_real();
+    let runner = FakeRunner::new(|_| testing::status(2));
+    let error = download_with(&runner, &clock, &env).unwrap_err();
+    assert!(error.text().contains("Exit status 2"));
+    assert_eq!(runner.calls().len(), 1);
+    assert_eq!(clock.elapsed(), 0.0);
+}
+
+#[test]
+fn persistent_transport_failure_stops_after_a_small_budget() {
+    let env = TestEnv::new();
+    let clock = FakeClock::now_real();
+    let runner = FakeRunner::new(|_| testing::status(255));
+    download_with(&runner, &clock, &env).unwrap_err();
+    assert_eq!(runner.calls().len(), DOWNLOAD_RETRY_DELAYS.len() + 1);
+    assert!(clock.elapsed() <= 120.0);
 }

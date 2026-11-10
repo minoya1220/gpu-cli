@@ -97,6 +97,54 @@ esac
     }
 }
 
+#[test]
+fn signal_during_timed_exec_stops_the_isolated_ssh_child() {
+    use std::time::{Duration, Instant};
+    let s = Sandbox::new();
+    s.stub("vastai", "#!/bin/sh\nprintf '%s\\n' '[{\"id\":123,\"actual_status\":\"running\",\"ssh_host\":\"ssh1.vast.ai\",\"ssh_port\":22}]'\n");
+    s.stub(
+        "ssh",
+        r#"#!/bin/sh
+case "$*" in *'-T '*) ;; *) exit 0;; esac
+trap 'touch "$HOME/signalled"; exit 130' INT TERM HUP
+touch "$HOME/started"
+i=0
+while [ "$i" -lt 300 ]; do sleep 0.1; i=$((i + 1)); done
+"#,
+    );
+    let mut child = s
+        .command(&[
+            "exec",
+            "123",
+            "--command-timeout",
+            "600",
+            "--",
+            "sleep",
+            "600",
+        ])
+        .spawn()
+        .unwrap();
+    let until = Instant::now() + Duration::from_secs(10);
+    while !s.home.join("started").exists() && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if !s.home.join("started").exists() {
+        let _ = child.kill();
+        panic!("remote command did not start");
+    }
+    rustix::process::kill_process(
+        rustix::process::Pid::from_raw(child.id() as i32).unwrap(),
+        rustix::process::Signal::INT,
+    )
+    .unwrap();
+    assert_eq!(child.wait().unwrap().code(), Some(130));
+    let until = Instant::now() + Duration::from_secs(5);
+    while !s.home.join("signalled").exists() && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(s.home.join("signalled").exists(), "ssh child outlived gpu");
+}
+
 fn ready() -> Sandbox {
     let s = Sandbox::new();
     s.stub("vastai", "#!/bin/sh\nprintf '%s\\n' '[{\"id\":123,\"actual_status\":\"running\",\"ssh_host\":\"ssh1.vast.ai\",\"ssh_port\":22}]'\n");

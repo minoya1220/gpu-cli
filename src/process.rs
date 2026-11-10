@@ -3,6 +3,7 @@
 use std::io::{Read, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -205,6 +206,55 @@ fn collect(
     })
 }
 
+/// Children given their own process group only so a timeout can kill their
+/// whole tree. A terminal signal no longer reaches them, so the signal
+/// handler forwards it with `forward_signal` before exiting.
+static TIMEOUT_GROUPS: Mutex<Vec<i32>> = Mutex::new(Vec::new());
+
+struct TimeoutGroup(Option<i32>);
+
+impl TimeoutGroup {
+    fn register(pid: Option<i32>) -> TimeoutGroup {
+        if let Some(pid) = pid {
+            TIMEOUT_GROUPS
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(pid);
+        }
+        TimeoutGroup(pid)
+    }
+}
+
+impl Drop for TimeoutGroup {
+    fn drop(&mut self) {
+        if let Some(pid) = self.0 {
+            TIMEOUT_GROUPS
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .retain(|p| *p != pid);
+        }
+    }
+}
+
+/// Deliver a terminal signal to every timeout-isolated child group.
+pub fn forward_signal(signal: i32) {
+    use rustix::process::Signal;
+    let signal = match signal {
+        signal_hook::consts::SIGINT => Signal::INT,
+        signal_hook::consts::SIGHUP => Signal::HUP,
+        _ => Signal::TERM,
+    };
+    for pid in TIMEOUT_GROUPS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+    {
+        if let Some(pid) = rustix::process::Pid::from_raw(*pid) {
+            let _ = rustix::process::kill_process_group(pid, signal);
+        }
+    }
+}
+
 fn kill(child: &mut Child, group: bool) {
     if group {
         if let Some(pid) = rustix::process::Pid::from_raw(child.id() as i32) {
@@ -273,6 +323,8 @@ impl RealRunner {
             std::io::ErrorKind::NotFound => RunError::NotFound,
             _ => RunError::Os(crate::error::os_message(&err, None)),
         })?;
+        let _registered =
+            TimeoutGroup::register((group && !cmd.process_group).then(|| child.id() as i32));
         let deadline = cmd
             .timeout
             .map(|t| Instant::now() + Duration::from_secs_f64(t.max(0.0)));

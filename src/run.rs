@@ -266,8 +266,18 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
         .iter()
         .filter(|path| run_files::secret_path(path))
         .collect();
-    if !flags.allow_secrets && !secrets.is_empty() {
-        return Err(Error::Usage(format!("Refusing secret-looking upload files: {}. Ignore them in .gitignore or explicitly pass --allow-secrets.", secrets.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", "))));
+    if !secrets.is_empty() {
+        let names = secrets
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        if !flags.allow_secrets {
+            return Err(Error::Usage(format!("Refusing secret-looking upload files: {names}. Ignore them in .gitignore or explicitly pass --allow-secrets.")));
+        }
+        ctx.eprintln(&format!(
+            "WARNING: uploading secret-looking files allowed by --allow-secrets: {names}."
+        ))?;
     }
     let setup = setup(flags, &upload.root.join(&upload.relative));
     let mut cfg = cfg.clone();
@@ -776,6 +786,12 @@ fn finish_log(ctx: &Ctx, alias: &str, root: &str, local: &Path, size: u64) -> Re
     Ok(())
 }
 
+/// Only SSH transport failures are retried, a few times; a remote tar error
+/// or an exhausted budget proceeds straight to destroy.
+const DOWNLOAD_RETRY_DELAYS: [f64; 3] = [5.0, 15.0, 30.0];
+const DESTROY_ATTEMPTS: usize = 3;
+const DESTROY_VERIFY_SECONDS: f64 = 60.0;
+
 fn download(
     ctx: &Ctx,
     alias: &str,
@@ -794,25 +810,30 @@ fn download(
         shell_quote(&format!("{root}/attached"))
     );
     let end = ctx.clock.monotonic() + seconds;
-    let mut delay = 1.0f64;
-    loop {
+    let message = "Results download failed; instance will still be destroyed.";
+    for delay in DOWNLOAD_RETRY_DELAYS
+        .iter()
+        .copied()
+        .map(Some)
+        .chain([None])
+    {
         let remaining = (end - ctx.clock.monotonic()).max(0.1);
-        match checked_transfer(
-            ctx,
+        let result = ctx.transfer(
             &ssh(alias, &command, remaining).stdout_file(archive.path()),
             2,
-            "Results download failed; instance will still be destroyed.",
-        ) {
+        );
+        let transport = matches!(result, Ok(Output { code: 255, .. }));
+        let error = match step_result(ctx, result, message) {
             Ok(_) => break,
-            Err(error) => {
-                if ctx.interrupts() >= 2 || ctx.clock.monotonic() + delay >= end {
-                    return Err(error);
-                }
-                ctx.eprintln(&format!("{} Retrying download.", error.text()))?;
-                ctx.clock.sleep(delay);
-                delay = (delay * 2.0).min(15.0);
-            }
-        }
+            Err(error) => error,
+        };
+        let Some(delay) = delay.filter(|delay| {
+            transport && ctx.interrupts() < 2 && ctx.clock.monotonic() + delay < end
+        }) else {
+            return Err(error);
+        };
+        ctx.eprintln(&format!("{} Retrying download.", error.text()))?;
+        ctx.clock.sleep(delay);
     }
     let bytes = run_files::unpack(ctx, archive.path(), local, Path::new(outputs))?;
     ctx.result("downloaded_bytes", Value::Int(bytes as i64));
@@ -829,20 +850,32 @@ fn destroy(ctx: &Ctx, id: &str) -> Result<()> {
     let cleanup = || -> Result<()> {
         // This invocation owns the freshly created ID. A lagging or broken
         // inventory must never suppress the paid-resource cleanup request.
-        let sent = crate::process::run(
-            ctx,
-            &["vastai", "destroy", "instance", id, "--yes"],
-            Some(30.0),
-        );
-        if let Err(error) = sent {
-            // A failed/timeout reply does not prove the mutation was rejected.
-            // A definite absence after the request still verifies completion.
-            let _ = ctx.eprintln(&format!(
-                "Destroy request completion uncertain: {}",
-                ctx.safe_diagnostic(error.text())
-            ));
+        let mut verified = Ok(());
+        for _ in 0..DESTROY_ATTEMPTS {
+            let sent = crate::process::run(
+                ctx,
+                &["vastai", "destroy", "instance", id, "--yes"],
+                Some(30.0),
+            );
+            if let Err(error) = sent {
+                // A failed/timeout reply does not prove the mutation was rejected.
+                // A definite absence after the request still verifies completion.
+                let _ = ctx.eprintln(&format!(
+                    "Destroy request completion uncertain: {}",
+                    ctx.safe_diagnostic(error.text())
+                ));
+            }
+            verified = crate::commands::wait_for_lifecycle(
+                ctx,
+                id,
+                "destroy",
+                DESTROY_VERIFY_SECONDS / DESTROY_ATTEMPTS as f64,
+            );
+            if verified.is_ok() {
+                break;
+            }
         }
-        crate::commands::wait_for_lifecycle(ctx, id, "destroy", 60.0)
+        verified
     };
     let outcome = cleanup();
     let _ = crate::ssh_config::remove_host(&ctx.env, id);

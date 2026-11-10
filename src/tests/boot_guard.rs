@@ -55,16 +55,12 @@ fn script(mode: &str) -> String {
 }
 
 fn unpack(script: &str) -> String {
-    if script.lines().nth(1).is_some_and(|l| l.ends_with("| bash")) {
-        let packed = script
-            .lines()
-            .nth(1)
-            .unwrap()
-            .strip_prefix("echo ")
-            .unwrap()
-            .split(" | ")
-            .next()
-            .unwrap();
+    if let Some(rest) = script
+        .lines()
+        .nth(1)
+        .and_then(|l| l.strip_prefix("bash -c \"$(echo "))
+    {
+        let packed = rest.split(" | ").next().unwrap();
         decode(packed)
     } else {
         script.into()

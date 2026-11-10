@@ -16,12 +16,10 @@ fn remote_run_suite() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let passed: usize = stdout
-        .lines()
-        .find_map(|line| line.strip_suffix(" passed, 0 failed"))
-        .and_then(|count| count.parse().ok())
-        .unwrap_or(0);
-    assert!(passed > 0, "{stdout}");
+    assert!(
+        stdout.lines().any(|line| line == "11 passed, 0 failed"),
+        "{stdout}"
+    );
 }
 
 #[cfg(target_os = "linux")]

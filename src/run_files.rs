@@ -43,7 +43,9 @@ pub(crate) fn max_bytes(text: &str) -> Result<u64> {
 pub(crate) fn secret_path(path: &Path) -> bool {
     path.components().any(|component| {
         let name = component.as_os_str().to_string_lossy().to_ascii_lowercase();
-        name.starts_with(".env")
+        (name.starts_with(".env")
+            && ![".env.example", ".env.sample", ".env.template", ".env.dist"]
+                .contains(&name.as_str()))
             || name.starts_with("id_rsa")
             || name.starts_with("id_ed25519")
             || name.ends_with(".pem")
@@ -167,15 +169,6 @@ pub(crate) fn prepare(ctx: &Ctx, cwd: &Path, cap: u64) -> Result<Upload> {
             .checked_add(meta.len())
             .ok_or_else(|| Error::msg("Upload size overflow."))?;
         sizes.push((meta.len(), path));
-        if path
-            .file_name()
-            .is_some_and(|n| n.to_string_lossy().starts_with(".env"))
-        {
-            ctx.eprintln(&format!(
-                "WARNING: uploading {} (may contain secrets).",
-                path.display()
-            ))?;
-        }
     }
     if bytes > cap {
         sizes.sort_by_key(|a| std::cmp::Reverse(a.0));

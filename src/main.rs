@@ -33,6 +33,7 @@ fn main() {
                         continue;
                     }
                 }
+                gpu::process::forward_signal(signal);
                 gpu::picker::term::restore_terminal();
                 handler_ctx.report_interrupt(128 + signal);
                 std::process::exit(128 + signal);

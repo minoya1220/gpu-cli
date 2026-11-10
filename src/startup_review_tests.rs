@@ -108,3 +108,58 @@ fn failed_clone_is_recorded_without_claiming_setup_success() {
     );
     assert!(!env.home.join(".works").exists());
 }
+
+#[test]
+fn failed_gh_install_and_auth_still_clone_and_finish_setup() {
+    let env = TestEnv::new();
+    env.executable("apt", "#!/bin/sh\nexit 100\n");
+    env.executable("gh", "#!/bin/sh\nexit 1\n");
+    env.executable("sed", "#!/bin/sh\nexit 0\n");
+    env.executable("entrypoint.sh", "#!/bin/sh\nexit 0\n");
+    env.executable(
+        "git",
+        "#!/bin/sh\n[ \"$1\" = clone ] && mkdir -p \"$3\" && touch \"$MARKER\"\nexit 0\n",
+    );
+    let script = startup_script(
+        &Repo::from_arg("owner/project"),
+        "container",
+        &config::defaults(),
+        None,
+    )
+    .unwrap()
+    .replace("/workspace", &env.root.join("workspace").to_string_lossy())
+    .replace("/root", &env.home.to_string_lossy())
+    .replace("/venv", &env.root.join("venv").to_string_lossy())
+    .replace("source /etc/environment", "export GH_TOKEN=token; true");
+    let output = execute(&env, &script);
+    assert!(output.status.success());
+    assert!(
+        env.root.join("installed").exists(),
+        "repository must be cloned"
+    );
+    assert_eq!(
+        std::fs::read_to_string(env.root.join("workspace/.gpu-setup")).unwrap(),
+        "done\n"
+    );
+    assert!(env.home.join(".works").exists());
+}
+
+#[test]
+fn packed_script_body_is_not_readable_from_stdin() {
+    let env = TestEnv::new();
+    let marker = env.root.join("installed");
+    let mut lines = vec!["#!/bin/bash".to_string(), "cat >/dev/null".to_string()];
+    lines.extend((0..ONSTART_LIMIT / 4).map(|i| format!(": {i:x}")));
+    lines.push(format!("touch {}", shell_quote(&marker.to_string_lossy())));
+    let script = bounded_script(lines).unwrap();
+    assert!(script.len() <= ONSTART_LIMIT);
+    let script_path = env.root.join("onstart.sh");
+    std::fs::write(&script_path, script).unwrap();
+    let output = Command::new("bash")
+        .arg(&script_path)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(marker.exists(), "lines after a stdin reader must still run");
+}

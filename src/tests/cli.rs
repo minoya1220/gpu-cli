@@ -22,13 +22,13 @@ echo pending >/workspace/.gpu-setup
 trap 'echo failed >/workspace/.gpu-setup' EXIT
 source /etc/environment 2>/dev/null || true
 export GH_TOKEN
-apt update; apt install -y gh
+apt update || true; apt install -y gh || echo 'WARNING: gh install failed; continuing without it.' >&2
 touch /root/.no_auto_tmux
 rm -rf /venv
 mkdir -p /workspace
 git config --global user.name minoya1220
 git config --global user.email minoya1220@gmail.com
-if [ -n "${GH_TOKEN:-}" ]; then gh auth setup-git; else echo "WARNING: GH_TOKEN is not set in Vast account environment; private GitHub repos may not clone." >&2; fi
+if [ -n "${GH_TOKEN:-}" ]; then gh auth setup-git || echo "WARNING: gh auth setup-git failed; private GitHub repos may not clone." >&2; else echo "WARNING: GH_TOKEN is not set in Vast account environment; private GitHub repos may not clone." >&2; fi
 [ -d /workspace/gpu-kernels ] || git clone https://github.com/minoya1220/gpu-kernels /workspace/gpu-kernels
 if [ -f /workspace/gpu-kernels/pyproject.toml ]; then uv sync --directory /workspace/gpu-kernels; fi
 echo done >/workspace/.gpu-setup

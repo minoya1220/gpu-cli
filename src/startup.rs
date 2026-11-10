@@ -47,7 +47,7 @@ fn bounded_script(lines: Vec<String>) -> Result<String> {
     let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
     gzip.write_all(script.as_bytes())?;
     let packed = base64(&gzip.finish()?);
-    let wrapper = format!("#!/bin/bash\necho {packed} | base64 -d | gunzip | bash\n");
+    let wrapper = format!("#!/bin/bash\nbash -c \"$(echo {packed} | base64 -d | gunzip)\"\n");
     if wrapper.len() > ONSTART_LIMIT {
         return Err(Error::msg(format!("Startup script exceeds Vast's {ONSTART_LIMIT} character onstart limit; use a shorter repository URL or identity.")));
     }
@@ -160,7 +160,7 @@ pub fn startup_script(
     if mode == "container" {
         lines.extend(
             [
-                "apt update; apt install -y gh",
+                "apt update || true; apt install -y gh || echo 'WARNING: gh install failed; continuing without it.' >&2",
                 "touch /root/.no_auto_tmux",
                 "rm -rf /venv",
             ]
@@ -168,7 +168,7 @@ pub fn startup_script(
         );
     } else {
         lines.extend([
-            "if ! command -v ncu >/dev/null 2>&1; then cd /tmp; wget -q --timeout=120 https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb; echo 'd93190d50b98ad4699ff40f4f7af50f16a76dac3bb8da1eaaf366d47898ff8df  cuda-keyring_1.1-1_all.deb' | sha256sum -c -; dpkg -i cuda-keyring_1.1-1_all.deb; apt update; apt install -y gh git curl build-essential nsight-compute-2025.4.0 cuda-nvcc-12-8; fi".to_string(),
+            "if ! command -v ncu >/dev/null 2>&1; then cd /tmp; wget -q --timeout=120 https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb; echo 'd93190d50b98ad4699ff40f4f7af50f16a76dac3bb8da1eaaf366d47898ff8df  cuda-keyring_1.1-1_all.deb' | sha256sum -c -; dpkg -i cuda-keyring_1.1-1_all.deb; apt update || true; apt install -y gh git curl build-essential nsight-compute-2025.4.0 cuda-nvcc-12-8; fi".to_string(),
             "grep -q nsight-compute /root/.bashrc || cat >> /root/.bashrc <<'EOF'\nexport PATH=$PATH:/opt/nvidia/nsight-compute/2025.4.0:/usr/local/cuda-12.8/bin\nexport LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}:/usr/local/cuda-12.8/lib64\nexport PATH=\"/root/.local/bin:$PATH\"\nEOF".to_string(),
             "export PATH=$PATH:/opt/nvidia/nsight-compute/2025.4.0:/usr/local/cuda-12.8/bin".to_string(),
             UV_INSTALL.to_string(),
@@ -185,7 +185,7 @@ pub fn startup_script(
             lines.push(format!("git config --global user.{field} {identity}"));
         }
     }
-    lines.push(r#"if [ -n "${GH_TOKEN:-}" ]; then gh auth setup-git; else echo "WARNING: GH_TOKEN is not set in Vast account environment; private GitHub repos may not clone." >&2; fi"#.into());
+    lines.push(r#"if [ -n "${GH_TOKEN:-}" ]; then gh auth setup-git || echo "WARNING: gh auth setup-git failed; private GitHub repos may not clone." >&2; else echo "WARNING: GH_TOKEN is not set in Vast account environment; private GitHub repos may not clone." >&2; fi"#.into());
     if *repo != Repo::NoRepo {
         lines.push(format!(
             "[ -d {} ] || git clone {} {}",

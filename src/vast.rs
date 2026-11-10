@@ -1,13 +1,16 @@
 //! The authenticated `vastai` CLI: offer search, instance listing, and the
 //! exact `create instance` request.
 
+use jiff::Timestamp;
+
 use crate::config::{self, CONTAINER_ENV};
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use crate::offers::{offer_number, price_field};
-use crate::process::run;
+use crate::process::{run, run_output};
 use crate::pyfmt::{float_repr, py_str};
 use crate::pyjson::{self, Dict, Value};
+use crate::redact::redact_text;
 use crate::repos::{resolve_repo, Repo};
 use crate::startup::startup_script;
 
@@ -17,6 +20,8 @@ pub struct RequestArgs<'a> {
     pub mode: &'a str,
     pub interruptible: bool,
     pub disk: Option<i64>,
+    /// `--expire`: the onstart script starts the boot-time expiry guard.
+    pub deadline: Option<Timestamp>,
 }
 
 #[derive(Clone)]
@@ -57,13 +62,77 @@ impl Vast {
     pub fn request(&self, offer: &Dict, args: &RequestArgs, cfg: &Dict) -> Result<Vec<Value>> {
         request(offer, args, cfg)
     }
+
+    /// Send a create request; the reply, or `None` when it is unreadable.
+    /// vastai 1.8.2 reports a refused request (HTTP 410 under
+    /// `--cancel-unavail`, low credit, bad arguments) by printing
+    /// `{"error": true, "status_code": N, "msg": ...}` to stderr and exiting
+    /// 0 with no stdout; that becomes a `{"success": false, "msg": ...}` reply.
+    pub fn create(&self, request: &[Value]) -> Result<Option<Dict>> {
+        let output = run_output(&self.ctx, &argv(request)?, None)?;
+        let stdout = output.stdout.trim();
+        if !stdout.is_empty() {
+            return Ok(match pyjson::loads(stdout) {
+                Ok(Value::Dict(reply)) => Some(reply),
+                _ => None,
+            });
+        }
+        Ok(output.stderr.lines().rev().find_map(|line| {
+            let Ok(Value::Dict(error)) = pyjson::loads(line) else {
+                return None;
+            };
+            (error.get("error") == Some(&Value::Bool(true))).then(|| {
+                let msg = error.get("msg").map(py_str).unwrap_or_default();
+                Dict::from_iter([
+                    ("success".into(), Value::Bool(false)),
+                    ("msg".into(), Value::Str(redact_text(&msg))),
+                ])
+            })
+        }))
+    }
 }
 
 /// The create request as Python builds it: every item is a string except the
 /// image, which is the raw config value.
 pub fn request(offer: &Dict, args: &RequestArgs, cfg: &Dict) -> Result<Vec<Value>> {
     let mode = args.mode;
-    let script = startup_script(args.repo, mode, cfg)?;
+    let script = startup_script(args.repo, mode, cfg, args.deadline)?;
+    let label = resolve_repo(args.repo.as_arg(), &py_str(config::get(cfg, "owner")?))?.1;
+    request_script(offer, args, cfg, script, label)
+}
+
+/// Job startup shares the exact create flags, but never clones a repository.
+pub fn run_request(
+    offer: &Dict,
+    disk: Option<i64>,
+    cfg: &Dict,
+    deadline: Timestamp,
+    label: String,
+) -> Result<Vec<Value>> {
+    let args = RequestArgs {
+        repo: &Repo::NoRepo,
+        mode: "container",
+        interruptible: false,
+        disk,
+        deadline: Some(deadline),
+    };
+    request_script(
+        offer,
+        &args,
+        cfg,
+        crate::startup::run_script(deadline)?,
+        label,
+    )
+}
+
+fn request_script(
+    offer: &Dict,
+    args: &RequestArgs,
+    cfg: &Dict,
+    script: String,
+    label: String,
+) -> Result<Vec<Value>> {
+    let mode = args.mode;
     let none = Value::Null;
     let (key, price) = if args.interruptible {
         ("min_bid", offer.get("min_bid").unwrap_or(&none))
@@ -91,8 +160,11 @@ pub fn request(offer: &Dict, args: &RequestArgs, cfg: &Dict) -> Result<Vec<Value
         Value::Str(script),
         Value::str("--ssh"),
         Value::str("--direct"),
+        // Fail when the host cannot start it now, instead of creating a
+        // stopped instance that can still bill storage.
+        Value::str("--cancel-unavail"),
         Value::str("--label"),
-        Value::Str(resolve_repo(args.repo.as_arg(), &py_str(config::get(cfg, "owner")?))?.1),
+        Value::Str(label),
     ];
     if mode == "container" {
         command.extend([Value::str("--env"), Value::str(CONTAINER_ENV)]);

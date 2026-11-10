@@ -34,6 +34,8 @@ pub(crate) fn vast(detail: &str) -> Option<Error> {
         "offer does not exist",
         "no such offer",
         "no such ask",
+        // Vast's 410 slug when `--cancel-unavail` finds the host cannot start it.
+        "no_such_ask",
         "not rentable",
     ]
     .iter()

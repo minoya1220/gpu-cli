@@ -2,6 +2,7 @@
 //! maps to `X.rs`, keeping each test's name).
 
 mod automation;
+mod boot_guard;
 mod cli;
 mod editors;
 mod expiry;

@@ -71,7 +71,7 @@ fn search_answer(offers: &'static str) -> std::sync::Arc<FakeRunner> {
 
 #[test]
 fn test_container_script_uses_selected_repo_directory_only() {
-    let script = startup_script(&repo("gpu-kernels"), "container", &defaults()).unwrap();
+    let script = startup_script(&repo("gpu-kernels"), "container", &defaults(), None).unwrap();
     assert_eq!(script, EXPECTED_CONTAINER_SCRIPT);
     assert!(script
         .contains("git clone https://github.com/minoya1220/gpu-kernels /workspace/gpu-kernels"));
@@ -89,7 +89,8 @@ fn test_container_script_uses_selected_repo_directory_only() {
 #[test]
 fn test_generated_startup_script_is_valid_bash() {
     for mode in ["container", "vm"] {
-        let result = bash_n(&startup_script(&repo("gpu-kernels"), mode, &defaults()).unwrap());
+        let result =
+            bash_n(&startup_script(&repo("gpu-kernels"), mode, &defaults(), None).unwrap());
         assert!(
             result.status.success(),
             "{mode}: {}",
@@ -100,7 +101,7 @@ fn test_generated_startup_script_is_valid_bash() {
 
 #[test]
 fn test_vm_script_preserves_toolchain_and_does_not_inject_secret() {
-    let script = startup_script(&repo("gpu-kernels"), "vm", &defaults()).unwrap();
+    let script = startup_script(&repo("gpu-kernels"), "vm", &defaults(), None).unwrap();
     assert!(script.contains("nsight-compute-2025.4.0") && script.contains("cuda-nvcc-12-8"));
     assert!(script.contains("source /etc/environment"));
     assert!(script.contains("GH_TOKEN") && script.contains("WARNING"));
@@ -121,6 +122,7 @@ fn test_launch_request_exact_image_env_script_and_offer() {
         mode: "container",
         interruptible: false,
         disk: None,
+        deadline: None,
     };
     let actual = argv(&request(&offer, &args, &defaults()).unwrap()).unwrap();
     assert_eq!(
@@ -138,6 +140,7 @@ fn test_launch_request_exact_image_env_script_and_offer() {
             EXPECTED_CONTAINER_SCRIPT,
             "--ssh",
             "--direct",
+            "--cancel-unavail",
             "--label",
             "gpu-kernels",
             "--env",
@@ -151,6 +154,7 @@ fn test_launch_request_exact_image_env_script_and_offer() {
         mode: "vm",
         interruptible: true,
         disk: Some(130),
+        deadline: None,
     };
     let request = argv(&request(&vm_offer, &vm_args, &defaults()).unwrap()).unwrap();
     assert_eq!(
@@ -224,7 +228,7 @@ fn test_non_string_git_identity_is_quoted_like_shlex() {
         for (value, expected) in &cases {
             let mut cfg = defaults();
             cfg.insert(key, json(value));
-            let result = startup_script(&gpu_kernels, "container", &cfg);
+            let result = startup_script(&gpu_kernels, "container", &cfg, None);
             match expected {
                 Ok(quoted) => {
                     let script = result.unwrap();
@@ -341,6 +345,7 @@ fn test_dry_run_launch_path_uses_mocked_api_and_exact_request() {
             EXPECTED_CONTAINER_SCRIPT,
             "--ssh",
             "--direct",
+            "--cancel-unavail",
             "--label",
             "gpu-kernels",
             "--env",
@@ -774,6 +779,7 @@ fn test_dry_run_request_contains_no_credentials() {
         mode: "container",
         interruptible: false,
         disk: None,
+        deadline: None,
     };
     let request =
         argv(&request(&dict(r#"{"id": 42, "dph_total": 0.1}"#), &args, &defaults()).unwrap())

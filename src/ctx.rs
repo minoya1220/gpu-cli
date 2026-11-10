@@ -5,6 +5,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -40,6 +41,12 @@ impl Env {
                 vars.insert("HOME".into(), home.to_string_lossy().into_owned());
             }
         }
+        // --env NAME is resolved from this snapshot, never re-read mid-run.
+        vars.extend(
+            std::env::vars_os().filter_map(|(key, value)| {
+                Some((key.into_string().ok()?, value.into_string().ok()?))
+            }),
+        );
         Env { vars }
     }
 
@@ -147,13 +154,17 @@ impl Console {
     }
 
     pub fn write_out(&self, text: &str) -> Result<()> {
+        self.write_out_bytes(text.as_bytes())
+    }
+
+    pub(crate) fn write_out_bytes(&self, text: &[u8]) -> Result<()> {
         match &mut *self.lock() {
             ConsoleIo::Real => {
                 let mut stdout = io::stdout().lock();
-                stdout.write_all(text.as_bytes())?;
+                stdout.write_all(text)?;
                 stdout.flush()?;
             }
-            ConsoleIo::Buffer { out, .. } => out.extend_from_slice(text.as_bytes()),
+            ConsoleIo::Buffer { out, .. } => out.extend_from_slice(text),
         }
         Ok(())
     }
@@ -171,13 +182,17 @@ impl Console {
     }
 
     pub(crate) fn write_err(&self, text: &str) -> Result<()> {
+        self.write_err_bytes(text.as_bytes())
+    }
+
+    pub(crate) fn write_err_bytes(&self, text: &[u8]) -> Result<()> {
         match &mut *self.lock() {
             ConsoleIo::Real => {
                 let mut stderr = io::stderr().lock();
-                stderr.write_all(text.as_bytes())?;
+                stderr.write_all(text)?;
                 stderr.flush()?;
             }
-            ConsoleIo::Buffer { err, .. } => err.extend_from_slice(text.as_bytes()),
+            ConsoleIo::Buffer { err, .. } => err.extend_from_slice(text),
         }
         Ok(())
     }
@@ -279,6 +294,9 @@ pub struct Ctx {
     pub console: Arc<Console>,
     pub ui: Arc<Ui>,
     output: Arc<Mutex<crate::output::CommandOutput>>,
+    interrupt_notice: Arc<Mutex<Option<String>>>,
+    cooperative: Arc<AtomicBool>,
+    interrupts: Arc<AtomicUsize>,
 }
 
 impl Ctx {
@@ -297,6 +315,9 @@ impl Ctx {
             console: Arc::new(Console::real()),
             ui: Arc::new(Ui::Terminal),
             output: Arc::default(),
+            interrupt_notice: Arc::default(),
+            cooperative: Arc::default(),
+            interrupts: Arc::default(),
         }
     }
 
@@ -319,6 +340,9 @@ impl Ctx {
             gcp_catalog_lock: Arc::default(),
             gcp_sku_refreshed: Arc::default(),
             output: Arc::default(),
+            interrupt_notice: Arc::default(),
+            cooperative: Arc::default(),
+            interrupts: Arc::default(),
         }
     }
 
@@ -343,6 +367,52 @@ impl Ctx {
             .unwrap_or_else(|p| p.into_inner())
             .result
             .insert(key, value);
+    }
+
+    /// What an interrupted command must still tell the user, such as a
+    /// created instance that keeps running. Shared by every copy of this
+    /// `Ctx`, including the one the SIGINT handler holds.
+    pub(crate) fn set_interrupt_notice(&self, notice: Option<String>) {
+        *self
+            .interrupt_notice
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = notice;
+    }
+
+    pub fn cooperative(&self) -> bool {
+        self.cooperative.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn begin_run(&self) {
+        self.interrupts.store(0, Ordering::SeqCst);
+        self.cooperative.store(true, Ordering::SeqCst);
+    }
+
+    pub(crate) fn end_run(&self) {
+        self.cooperative.store(false, Ordering::SeqCst);
+    }
+
+    pub fn interrupt(&self) -> usize {
+        self.interrupts.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    pub fn interrupts(&self) -> usize {
+        self.interrupts.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn check_cancelled(&self) -> Result<()> {
+        if self.cooperative() && self.interrupts() > 0 {
+            Err(Error::Cancelled(130))
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn interrupt_notice(&self) -> Option<String> {
+        self.interrupt_notice
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 
     pub(crate) fn set_ssh_timeout(&self, seconds: f64) {
@@ -402,9 +472,30 @@ impl Ctx {
         Ok(())
     }
 
+    /// During a cooperative run, terminal Ctrl-C must not kill cleanup
+    /// children; transfers are cancelled deliberately by `transfer`.
+    fn isolate(&self, cmd: &Cmd) -> Option<Cmd> {
+        self.cooperative().then(|| cmd.clone().process_group())
+    }
+
     pub fn run(&self, cmd: &Cmd) -> std::result::Result<Output, RunError> {
         self.authorize(cmd.program())?;
-        self.runner.run(cmd)
+        let isolated = self.isolate(cmd);
+        self.runner.run(isolated.as_ref().unwrap_or(cmd))
+    }
+
+    pub(crate) fn transfer(
+        &self,
+        cmd: &Cmd,
+        threshold: usize,
+    ) -> std::result::Result<Output, RunError> {
+        self.authorize(cmd.program())?;
+        let isolated = self.isolate(cmd);
+        self.runner.run_cancellable(
+            isolated.as_ref().unwrap_or(cmd),
+            &self.interrupts,
+            threshold,
+        )
     }
 
     pub fn exec(&self, argv: &[String]) -> String {

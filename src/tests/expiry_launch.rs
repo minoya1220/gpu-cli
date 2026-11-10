@@ -147,5 +147,15 @@ fn test_up_without_returned_id_cannot_claim_expiry() {
     let ctx = l.t.ctx().runner(&l.runner).clock(&l.clock).build();
     assert_eq!(main(&ctx, &ARGV[..11]), 1);
     assert!(calls_to(&l.runner, &["ssh"]).is_empty());
-    assert!(err(&ctx).contains("expiry NOT armed"));
+    let error = err(&ctx);
+    assert!(
+        error.contains(
+            "no ID returned; expiry NOT verified. Its boot guard should still destroy it at "
+        ),
+        "{error}"
+    );
+    assert!(
+        error.contains("\nRun gpu ls, then gpu expire ID show."),
+        "{error}"
+    );
 }

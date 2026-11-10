@@ -25,10 +25,10 @@ check() { if ! "$@"; then echo "FAIL: $*" >&2; exit 1; fi; }
 
 launch() {
     local token=$1 command=$2 setup=${3:-} limit=${4:-60}
-    local forwarded=${5:-'export TEST_SECRET="secret value"'}
+    local forwarded=${5:-'export TEST_SECRET="secret value"'} linger=${6:-0}
     local dir="$TMP/work/$token" deadline=$(( $(date +%s) + 120 ))
     mkdir -p "$dir"
-    GPU_RUN_CONFIG=$(printf 'JOBDIR=%q\nOUTPUTS=outputs\nSETUP=%q\nCOMMAND=%q\nDEADLINE=%s\nJOB_DEADLINE=%s\nLINGER=30\nFORWARDED=%q\n' "$dir" "$setup" "$command" "$deadline" "$(( $(date +%s) + limit ))" "$forwarded")
+    GPU_RUN_CONFIG=$(printf 'JOBDIR=%q\nOUTPUTS=outputs\nSETUP=%q\nCOMMAND=%q\nDEADLINE=%s\nJOB_DEADLINE=%s\nLINGER=%s\nFORWARDED=%q\n' "$dir" "$setup" "$command" "$deadline" "$(( $(date +%s) + limit ))" "$linger" "$forwarded")
     GPU_RUN_HOOK=$(printf 'printf "%%s" "$1" >%q\n' "$TMP/hook-$token")
     # Feed a separate bash, just like SSH stdin; it exits immediately after start.
     { printf 'GPU_RUN_SOURCE=%q\nGPU_RUN_CONFIG=%q\nGPU_RUN_HOOK=%q\n' "$GPU_RUN_SOURCE" "$GPU_RUN_CONFIG" "$GPU_RUN_HOOK"; cat "$SOURCE"; } |
@@ -67,10 +67,24 @@ status=$(wait_done success)
 check test "$(printf '%s' "$status" | cut -f2)" = 0
 check test "$(cat "$TMP/state/success/log")" = 'secret value'
 check test "$(cat "$TMP/work/success/outputs/result")" = result
-# Linger is armed before the final status is visible, so an attached CLI
-# re-arming the full deadline for its download always runs after it.
+# A live attachment retains the original download ceiling. Once its heartbeat
+# goes stale, default zero linger requests immediate expiry (a few seconds for
+# the expiry worker's readiness handshake), not an implicit 30-minute hold.
+check test ! -f "$TMP/hook-success"
+printf '0\n' >"$TMP/state/success/attached"
+for _ in $(seq 1 40); do [ ! -f "$TMP/hook-success" ] || break; sleep 0.1; done
 check test -f "$TMP/hook-success"
 hook=$(cat "$TMP/hook-success")
+check test "$hook" -le "$(( $(date +%s) + 5 ))"
+passed=$((passed+1))
+
+# Explicit retention is still available; it never extends the original ceiling.
+launch retained 'echo retained' '' 60 'export TEST_SECRET="secret value"' 30
+status=$(wait_done retained)
+printf '0\n' >"$TMP/state/retained/attached"
+for _ in $(seq 1 40); do [ ! -f "$TMP/hook-retained" ] || break; sleep 0.1; done
+hook=$(cat "$TMP/hook-retained")
+check test "$hook" -gt "$(( $(date +%s) + 10 ))"
 check test "$hook" -le "$(( $(date +%s) + 30 ))"
 passed=$((passed+1))
 

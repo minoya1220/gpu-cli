@@ -31,14 +31,23 @@ pub enum Command {
     /// Show provider setup state or configure a selected provider
     Setup(SetupFlags),
     /// Launch a GPU or TPU workspace with an optional repository
+    #[command(
+        after_help = "Non-terminal example: gpu up --gpu 'RTX 4090' --mode container --no-repo --expire 2h --yes --json\nIDs: numeric Vast ID; gcp:PROJECT:ZONE:NAME or an unambiguous TPU name.\nExit codes: 0 success; 1 error; 2 usage; 10 capacity; 11 price; 12 setup; 13 auth; 14 readiness timeout; 15 spend cap; 16 not found; 20 command timeout; 128+signal interrupted."
+    )]
     Up(UpFlags),
     /// Run a one-shot job on a fresh Vast container, fetch results, then destroy it
+    #[command(
+        after_help = "Example: gpu run --gpu 'RTX 4090' --expire 2h --yes --json -- python train.py\nNon-terminal launches require --gpu, --expire and --yes (or --dry-run).\nExit codes: remote job status, or 1 error; 2 usage; 10 capacity; 11 price; 12 setup; 13 auth; 14 readiness timeout; 15 spend cap; 16 not found; 17 job timeout; 18 instance lost; 19 cleanup unverified; 130 cancelled. Numeric Vast IDs only."
+    )]
     Run(RunFlags),
     /// List rented instances
     Ls {
         /// Filled from the global JSON flag
         #[arg(skip)]
         json: bool,
+        /// Wrap JSON in the standard command envelope, including partial failures
+        #[arg(long, requires = "output_json")]
+        envelope: bool,
         /// Show full provider-qualified IDs
         #[arg(long)]
         long: bool,
@@ -48,42 +57,65 @@ pub enum Command {
     },
     /// Wait until the instance answers a non-interactive SSH probe
     Wait {
+        /// Numeric Vast ID, gcp:PROJECT:ZONE:NAME, or unambiguous TPU name
         id: String,
+        /// Also wait for workspace setup to finish successfully
+        #[arg(long)]
+        wait_setup: bool,
         /// Maximum readiness wait in seconds
         #[arg(long, default_value = "120", value_parser = positive_seconds)]
         timeout: f64,
     },
     /// Execute a remote command without a terminal; preserve its exit code
     Exec {
+        /// Numeric Vast ID, gcp:PROJECT:ZONE:NAME, or unambiguous TPU name
         id: String,
+        /// Remote program and arguments after -- (use sh -c for shell syntax)
         #[arg(required = true, last = true, num_args = 1..)]
         command: Vec<String>,
         /// Maximum SSH readiness wait in seconds, not remote command runtime
         #[arg(long, default_value = "120", value_parser = positive_seconds)]
         timeout: f64,
+        /// Maximum remote command runtime in seconds; exit 20 on timeout
+        #[arg(long, value_parser = positive_seconds)]
+        command_timeout: Option<f64>,
     },
     /// Copy files; prefix exactly one path with :/ to select the remote side
     Cp {
+        /// Numeric Vast ID, gcp:PROJECT:ZONE:NAME, or unambiguous TPU name
         id: String,
+        /// Local source path, or :/absolute/remote/path
         source: String,
+        /// Local destination path, or :/absolute/remote/path
         destination: String,
+        /// Copy directories recursively
         #[arg(short, long)]
         recursive: bool,
         /// Maximum SSH readiness wait in seconds, not transfer time
         #[arg(long, default_value = "120", value_parser = positive_seconds)]
         timeout: f64,
+        /// Maximum transfer runtime in seconds; exit 20 on timeout
+        #[arg(long, value_parser = positive_seconds)]
+        command_timeout: Option<f64>,
     },
     /// Print or execute the SSH command
     Ssh {
+        /// Numeric Vast ID, full GCP ID, or short TPU name (picker if omitted)
         id: Option<String>,
+        /// Replace this process with an interactive SSH connection
         #[arg(long)]
         exec: bool,
     },
     /// Open an instance's repository in Cursor over SSH
-    Cursor { id: Option<String> },
+    Cursor {
+        /// Numeric Vast ID, full GCP ID, or short TPU name (picker if omitted)
+        id: Option<String>,
+    },
     /// Open an instance workspace in an editor over SSH
     Edit {
+        /// Numeric Vast ID, full GCP ID, or short TPU name (picker if omitted)
         id: Option<String>,
+        /// Editor to launch (otherwise use the most recently selected editor)
         #[arg(long, value_parser = ["cursor", "code", "zed", "nvim"])]
         editor: Option<String>,
         /// Neovim config git URL or local directory
@@ -91,10 +123,15 @@ pub enum Command {
         nvim_config: Option<String>,
     },
     /// Stop an instance
-    Stop { id: Option<String> },
+    Stop {
+        /// Numeric Vast ID, full GCP ID, or short TPU name (picker if omitted)
+        id: Option<String>,
+    },
     /// Destroy an instance
     Down {
+        /// Numeric Vast ID, full GCP ID, or short TPU name (picker if omitted)
         id: Option<String>,
+        /// Approve permanent destruction without a prompt (required without a terminal)
         #[arg(long)]
         yes: bool,
     },
@@ -182,22 +219,31 @@ pub struct UpFlags {
     /// Launch without cloning a repository
     #[arg(long)]
     pub no_repo: bool,
+    /// Workspace type (required for non-terminal Vast launches)
     #[arg(long, value_parser = ["container", "vm"])]
     pub mode: Option<String>,
+    /// GPU model, e.g. 'RTX 4090' (required without a terminal)
     #[arg(long)]
     pub gpu: Option<String>,
+    /// Number of GPUs per instance (at least 1)
     #[arg(long, default_value_t = 1, allow_negative_numbers = true)]
     pub num_gpus: i64,
+    /// Maximum total compute price in USD per hour
     #[arg(long, allow_negative_numbers = true)]
     pub max_price: Option<f64>,
+    /// Use interruptible bid pricing instead of on-demand
     #[arg(long)]
     pub interruptible: bool,
+    /// Select a specific matching Vast offer ID
     #[arg(long, allow_negative_numbers = true)]
     pub offer: Option<i64>,
+    /// Instance disk size in GB (at least 1; otherwise config default)
     #[arg(long, allow_negative_numbers = true)]
     pub disk: Option<i64>,
+    /// Approve renting and choose the cheapest matching offer
     #[arg(long)]
     pub yes: bool,
+    /// Show the exact create request without renting (offer search still runs)
     #[arg(long)]
     pub dry_run: bool,
     /// Auto-destroy after e.g. 2h or 1h30m (includes boot time)
@@ -206,9 +252,13 @@ pub struct UpFlags {
     /// Wait for working SSH after launch
     #[arg(long)]
     pub wait: bool,
+    /// Also wait for workspace setup; implies --wait
+    #[arg(long)]
+    pub wait_setup: bool,
     /// Maximum SSH readiness wait in seconds (with --wait)
     #[arg(long, default_value = "120", value_parser = positive_seconds)]
     pub timeout: f64,
+    /// Minimum host reliability from 0 to 1
     #[arg(long, allow_negative_numbers = true)]
     pub reliability: Option<f64>,
     /// include verified, unverified, and deverified hosts
@@ -218,22 +268,31 @@ pub struct UpFlags {
 
 #[derive(clap::Args, Clone, Debug)]
 pub struct RunFlags {
+    /// GPU model, e.g. 'RTX 4090' (required without a terminal)
     #[arg(long)]
     pub gpu: Option<String>,
-    #[arg(long, default_value_t = 1)]
+    /// Number of GPUs per instance (at least 1)
+    #[arg(long, default_value_t = 1, allow_negative_numbers = true)]
     pub num_gpus: i64,
-    #[arg(long)]
+    /// Maximum total compute price in USD per hour
+    #[arg(long, allow_negative_numbers = true)]
     pub max_price: Option<f64>,
-    #[arg(long)]
+    /// Select a specific matching Vast offer ID
+    #[arg(long, allow_negative_numbers = true)]
     pub offer: Option<i64>,
-    #[arg(long)]
+    /// Instance disk size in GB (at least 1; otherwise config default)
+    #[arg(long, allow_negative_numbers = true)]
     pub disk: Option<i64>,
-    #[arg(long)]
+    /// Minimum host reliability from 0 to 1
+    #[arg(long, allow_negative_numbers = true)]
     pub reliability: Option<f64>,
+    /// Include unverified and deverified hosts
     #[arg(long)]
     pub unverified: bool,
+    /// Approve renting and choose the cheapest matching offer
     #[arg(long)]
     pub yes: bool,
+    /// Inspect the upload and exact create request without renting
     #[arg(long)]
     pub dry_run: bool,
     /// Required lifetime ceiling including boot, upload and download
@@ -242,22 +301,31 @@ pub struct RunFlags {
     /// SSH readiness timeout, not job runtime
     #[arg(long, default_value = "600", value_parser = positive_seconds)]
     pub timeout: f64,
+    /// Override the container image
     #[arg(long)]
     pub image: Option<String>,
+    /// Shell command to prepare dependencies before the job
     #[arg(long, conflicts_with = "no_setup")]
     pub setup: Option<String>,
+    /// Skip automatic dependency setup
     #[arg(long)]
     pub no_setup: bool,
+    /// Permit uploading secret-looking files (refused by default)
+    #[arg(long)]
+    pub allow_secrets: bool,
     /// Results directory relative to the job's working directory
     #[arg(long, default_value = "outputs")]
     pub outputs: String,
     /// Forward a local variable over SSH stdin, never Vast metadata
     #[arg(long = "env", value_name = "NAME")]
     pub env: Vec<String>,
+    /// Maximum upload size, e.g. 500M or 1G
     #[arg(long, default_value = "1G")]
     pub max_upload: String,
-    #[arg(long, default_value = "30m")]
+    /// Opt-in unattended result retention after job finish (default: destroy immediately)
+    #[arg(long, default_value = "0")]
     pub linger: String,
+    /// Remote program and arguments after -- (use sh -c for shell syntax)
     #[arg(required = true, last = true, num_args = 1..)]
     pub command: Vec<String>,
 }
@@ -295,9 +363,11 @@ pub fn parse(argv: &[String]) -> Parsed {
             output_json,
             ..
         }) => {
-            if let Command::Ls { json, .. } = &mut command {
+            if let Command::Ls { json, envelope, .. } = &mut command {
                 *json = output_json;
-                return Parsed::Run(Box::new(command));
+                if !*envelope {
+                    return Parsed::Run(Box::new(command));
+                }
             }
             if output_json {
                 Parsed::RunJson(Box::new(command))
@@ -328,6 +398,43 @@ pub fn parse(argv: &[String]) -> Parsed {
                 to_stdout,
             }
         }
+    }
+}
+
+/// Global --json accepts the same unambiguous prefixes as clap. Stop at -- so
+/// a remote command's flags cannot change the local output protocol.
+pub(crate) fn wants_json(argv: &[String]) -> bool {
+    argv.iter()
+        .skip(1)
+        .take_while(|a| a.as_str() != "--")
+        .any(|a| {
+            let flag = a.split('=').next().unwrap_or("");
+            flag.starts_with("--j") && "--json".starts_with(flag)
+        })
+}
+
+pub(crate) fn parsed_command_name(argv: &[String]) -> &'static str {
+    let Ok(matches) = Cli::command()
+        .ignore_errors(true)
+        .try_get_matches_from(argv)
+    else {
+        return "parse";
+    };
+    match matches.subcommand_name() {
+        Some("up") => "up",
+        Some("run") => "run",
+        Some("setup") => "setup",
+        Some("ls") => "ls",
+        Some("wait") => "wait",
+        Some("exec") => "exec",
+        Some("cp") => "cp",
+        Some("ssh") => "ssh",
+        Some("cursor") => "cursor",
+        Some("edit") => "edit",
+        Some("stop") => "stop",
+        Some("down") => "down",
+        Some("expire") => "expire",
+        _ => "parse",
     }
 }
 

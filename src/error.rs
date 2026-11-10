@@ -17,6 +17,7 @@ pub enum ExitCode {
     JobTimeout = 17,
     InstanceLost = 18,
     CleanupUnverified = 19,
+    CommandTimeout = 20,
 }
 
 impl ExitCode {
@@ -32,6 +33,7 @@ impl ExitCode {
             Self::JobTimeout => "job_timeout",
             Self::InstanceLost => "instance_lost",
             Self::CleanupUnverified => "cleanup_unverified",
+            Self::CommandTimeout => "command_timeout",
         }
     }
 }
@@ -41,6 +43,11 @@ impl ExitCode {
 pub enum Error {
     /// A handled error: `gpu: <redacted message>` on stderr, exit 1.
     Msg(String),
+    /// A provider read can be retried without changing paid resources.
+    ProviderUnavailable(String),
+    /// A subprocess deadline elapsed; mutations may have completed remotely.
+    Timeout(String),
+    Interrupted(i32),
     Status(ExitCode, String),
     /// An SSH/scp process completed; do not replace its diagnostics or exit code.
     Remote(i32),
@@ -70,7 +77,8 @@ impl Error {
 
     pub fn exit_code(&self) -> i32 {
         match self {
-            Self::Msg(_) => 1,
+            Self::Msg(_) | Self::ProviderUnavailable(_) | Self::Timeout(_) => 1,
+            Self::Interrupted(code) => *code,
             Self::Usage(_) => 2,
             Self::Cancelled(code) | Self::Remote(code) => *code,
             Self::Status(code, _) => *code as i32,
@@ -84,7 +92,14 @@ impl Error {
             Self::Cancelled(_) => "cancelled",
             Self::Remote(_) => "remote_exit",
             Self::Msg(_) => "error",
+            Self::ProviderUnavailable(_) => "provider_unavailable",
+            Self::Timeout(_) => "timeout",
+            Self::Interrupted(_) => "interrupted",
         }
+    }
+
+    pub fn retryable(&self) -> bool {
+        matches!(self, Self::ProviderUnavailable(_) | Self::Timeout(_))
     }
 
     /// Python's `KeyError` text for a missing key.
@@ -95,7 +110,14 @@ impl Error {
     /// Message text for handled errors (empty for the other kinds).
     pub fn text(&self) -> &str {
         match self {
-            Error::Msg(text) | Error::Usage(text) | Error::Status(_, text) => text,
+            Error::Msg(text)
+            | Error::Usage(text)
+            | Error::Status(_, text)
+            | Error::ProviderUnavailable(text)
+            | Error::Timeout(text) => text,
+            Error::Interrupted(_) => {
+                "Command interrupted; inspect the partial result and gpu ls before retrying."
+            }
             Error::Cancelled(_) | Error::Remote(_) => "",
         }
     }

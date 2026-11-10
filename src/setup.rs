@@ -10,7 +10,7 @@ use crate::picker::{pick, Job, Next, Opt, Screen};
 use crate::pyjson::{self, Dict, Value};
 
 pub const GCP_NOT_SETUP: &str =
-    "Next: gpu setup\nGoogle Cloud is not set up. No gcloud command ran.";
+    "Google Cloud is not set up. No gcloud command ran.\nNext: gpu setup";
 const QUEUE: &str = "gpu-expiry";
 // Compute supplies the default compute identity and SSH infrastructure.
 const APIS: [&str; 4] = [

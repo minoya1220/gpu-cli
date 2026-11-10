@@ -47,15 +47,27 @@ supervise() {
     wait "$child" || rc=$?
     [ -f "$ROOT/phase" ] && read -r phase <"$ROOT/phase"
     [ "$timed" = 1 ] && rc=17
-    # Shorten to linger before publishing, so an attached CLI that sees the
-    # final status can re-arm the full deadline for its download. Linger
-    # cannot extend the boot deadline.
     end=$(( $(date +%s) + LINGER ))
     [ "$end" -gt "$DEADLINE" ] && end=$DEADLINE
-    bash "$ROOT/expiry-hook.sh" "$end" >/dev/null 2>&1 || true
     rm -f "$ROOT/config"  # discard forwarded secrets after the task ends
-    # Publish only after the log is complete.
+    # Publish only after the log is complete. An attached caller renews a
+    # short heartbeat in status/download; keep its original download ceiling.
     publish "$phase" "$rc" "$timed"
+    trap 'exit' TERM INT HUP
+    local attached=0
+    while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+        attached=0
+        read -r attached <"$ROOT/attached" 2>/dev/null || true
+        case $attached in ''|*[!0-9]*) attached=0;; esac
+        [ $(( $(date +%s) - attached )) -lt 30 ] || break
+        sleep 1
+    done
+    # No implicit retention: zero linger destroys at unattended finish (or
+    # after detecting a lost attachment). Never extend the original ceiling.
+    now=$(date +%s)
+    [ "$end" -le "$now" ] && end=$((now + 5))
+    [ "$end" -gt "$DEADLINE" ] && end=$DEADLINE
+    bash "$ROOT/expiry-hook.sh" "$end" >/dev/null 2>&1 || true
 }
 
 # Forwarded exports enter this shell's environment, never a child's argv.
@@ -75,7 +87,12 @@ task() {
     # Onstart installs uv; the supervisor's job deadline bounds this wait.
     if [ ! -e "$HOME/.works" ]; then
         printf 'Waiting for instance startup to finish.\n'
-        while [ ! -e "$HOME/.works" ]; do sleep 1; done
+        while [ ! -e "$HOME/.works" ]; do
+            if [ "$(cat /workspace/.gpu-setup 2>/dev/null)" = failed ]; then
+                echo 'Instance startup failed.' >&2; exit 1
+            fi
+            sleep 1
+        done
     fi
     if [ -n "$SETUP" ]; then
         ( forwarded "$FORWARDED" "$SETUP" ) || exit $?
@@ -103,6 +120,7 @@ main() {
             printf '%s' "$GPU_RUN_CONFIG" >"$ROOT/config"
             printf '%s' "$GPU_RUN_HOOK" >"$ROOT/expiry-hook.sh"
             : >"$ROOT/log"
+            date +%s >"$ROOT/attached"
             setsid bash "$ROOT/runner.sh" supervise "$ROOT" "$TOKEN" </dev/null >/dev/null 2>&1 &
             while [ ! -f "$ROOT/status" ] && [ "$count" -lt 50 ]; do sleep 0.1; count=$((count+1)); done
             [ -f "$ROOT/status" ] || exit 1
@@ -111,6 +129,7 @@ main() {
         supervise) supervise ;;
         task) task ;;
         status)
+            date +%s >"$ROOT/attached"
             [ -f "$ROOT/status" ] || exit 1
             IFS=$'\t' read -r phase rc timed <"$ROOT/status"
             read -r pid <"$ROOT/pid"
@@ -122,6 +141,8 @@ main() {
             printf '%s\t%s\t%s\t%s\n' "$phase" "$rc" "$timed" "$count"
             ;;
         stop)
+            IFS=$'\t' read -r phase rc timed <"$ROOT/status" || exit 1
+            [ "$rc" = - ] || return 0
             read -r pid <"$ROOT/pid" || exit 1
             if identity "$pid" "$TOKEN"; then kill -TERM "$pid"; fi
             ;;

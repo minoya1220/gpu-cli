@@ -212,7 +212,7 @@ fn python_resolve_repo() {
 }
 
 #[test]
-fn python_startup_scripts() {
+fn startup_script_contracts() {
     for row in rows("startup_scripts") {
         let cfg = dict(row.get("cfg").unwrap());
         let script = startup_script(

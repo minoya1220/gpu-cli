@@ -28,8 +28,9 @@ pub(crate) fn nonterminal(ctx: &Ctx, command: &Command, cfg: &Dict) -> Result<()
     }
     match command {
         Command::Up(flags) => {
+            let mut missing = Vec::new();
             if flags.expire.as_deref().is_none_or(str::is_empty) {
-                return Err(usage("Non-terminal gpu up requires --expire DURATION (e.g. --expire 2h), or default_expire in config.json."));
+                missing.push("Non-terminal gpu up requires --expire DURATION (e.g. --expire 2h), or default_expire in config.json.");
             }
             let tpu = flags.provider.as_deref() == Some("gcp")
                 || flags.tpu.is_some()
@@ -42,13 +43,13 @@ pub(crate) fn nonterminal(ctx: &Ctx, command: &Command, cfg: &Dict) -> Result<()
             } else {
                 flags.gpu.is_none()
             } {
-                return Err(usage("Choose hardware: pass --gpu MODEL or --tpu TYPE."));
+                missing.push("Choose hardware: pass --gpu MODEL or --tpu TYPE.");
             }
             if flags.repo.is_none() && !flags.no_repo {
-                return Err(usage("Choose a repository: pass --repo URL or --no-repo."));
+                missing.push("Choose a repository: pass --repo URL or --no-repo.");
             }
             if !tpu && flags.mode.is_none() {
-                return Err(usage("Choose a mode: pass --mode container or --mode vm."));
+                missing.push("Choose a mode: pass --mode container or --mode vm.");
             }
             if tpu
                 && flags.zone.is_none()
@@ -58,17 +59,21 @@ pub(crate) fn nonterminal(ctx: &Ctx, command: &Command, cfg: &Dict) -> Result<()
                     .and_then(|d| d.get("zone"))
                     .is_none()
             {
-                return Err(usage(
-                    "Choose a TPU zone: pass --zone ZONE (or configure gcp.zone).",
-                ));
+                missing.push("Choose a TPU zone: pass --zone ZONE (or configure gcp.zone).");
             }
             if !tpu && flags.dry_run && !flags.yes && flags.offer.is_none() {
-                return Err(usage(
-                    "Choose an offer: pass --yes (cheapest) or --offer ID.",
-                ));
+                missing.push("Choose an offer: pass --yes (cheapest) or --offer ID.");
             }
             if !flags.yes && !flags.dry_run {
-                return Err(usage("Non-terminal paid launch requires --yes; use --dry-run to inspect without renting."));
+                missing.push("Non-terminal paid launch requires --yes; use --dry-run to inspect without renting.");
+            }
+            if !missing.is_empty() {
+                let example = if tpu {
+                    "gpu up --tpu TYPE --zone ZONE --no-repo --expire 2h --yes"
+                } else {
+                    "gpu up --gpu MODEL --mode container --no-repo --expire 2h --yes"
+                };
+                return Err(usage(format!("{}\nExample: {example}", missing.join("\n"))));
             }
         }
         Command::Down { yes: false, .. } => {

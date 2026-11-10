@@ -205,8 +205,19 @@ fn collect(
     })
 }
 
+fn kill(child: &mut Child, group: bool) {
+    if group {
+        if let Some(pid) = rustix::process::Pid::from_raw(child.id() as i32) {
+            let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 fn wait(
     child: &mut Child,
+    group: bool,
     deadline: Option<Instant>,
     cancellation: Option<(&std::sync::atomic::AtomicUsize, usize)>,
 ) -> std::io::Result<Option<std::process::ExitStatus>> {
@@ -222,8 +233,7 @@ fn wait(
                 count.load(std::sync::atomic::Ordering::SeqCst) >= threshold
             })
         {
-            let _ = child.kill();
-            let _ = child.wait();
+            kill(child, group);
             return Ok(None);
         }
         thread::sleep(Duration::from_millis(5));
@@ -239,7 +249,8 @@ impl RealRunner {
 
         let mut command = Command::new(cmd.program());
         command.args(&cmd.argv[1..]);
-        if cmd.process_group {
+        let group = cmd.process_group || cmd.timeout.is_some();
+        if group {
             command.process_group(0);
         }
         command.stdin(match cmd.stdin {
@@ -274,11 +285,18 @@ impl RealRunner {
         // Read both pipes on threads so a large output cannot deadlock.
         let stdout = drain(child.stdout.take());
         let stderr = drain(child.stderr.take());
-        let status = wait(&mut child, deadline, cancellation)
+        let status = wait(&mut child, group, deadline, cancellation)
             .map_err(|e| RunError::Os(e.to_string()))?
             .ok_or(RunError::TimedOut)?;
-        let stdout = collect(stdout, deadline, cmd.normalize_newlines).ok_or(RunError::TimedOut)?;
-        let stderr = collect(stderr, deadline, cmd.normalize_newlines).ok_or(RunError::TimedOut)?;
+        let output = collect(stdout, deadline, cmd.normalize_newlines).zip(collect(
+            stderr,
+            deadline,
+            cmd.normalize_newlines,
+        ));
+        let Some((stdout, stderr)) = output else {
+            kill(&mut child, group);
+            return Err(RunError::TimedOut);
+        };
         let code = status
             .code()
             .unwrap_or_else(|| -status.signal().unwrap_or(1));
@@ -320,10 +338,12 @@ pub fn run<S: AsRef<str>>(ctx: &Ctx, argv: &[S], timeout: Option<f64>) -> Result
 
 /// `run`, keeping a successful command's full output, stderr included.
 pub fn run_output<S: AsRef<str>>(ctx: &Ctx, argv: &[S], timeout: Option<f64>) -> Result<Output> {
+    let program = argv.first().map(AsRef::as_ref).unwrap_or("");
+    let timeout = timeout.or_else(|| matches!(program, "vastai" | "gcloud" | "gh").then_some(60.0));
     let cmd = Cmd::new(argv).timeout(timeout);
     let program = cmd.program().to_string();
     match ctx.run(&cmd) {
-        Err(RunError::TimedOut) => Err(Error::msg(format!("Timed out running {program}"))),
+        Err(RunError::TimedOut) => Err(Error::Timeout(format!("Timed out running {program}"))),
         Err(RunError::NotFound) if program == "vastai" => Err(Error::status(
             crate::error::ExitCode::NotSetup,
             "Install the Vast CLI, then check authentication. Next: gpu setup --provider vast",
@@ -344,11 +364,20 @@ pub fn run_output<S: AsRef<str>>(ctx: &Ctx, argv: &[S], timeout: Option<f64>) ->
                     return Err(error);
                 }
             }
-            Err(Error::msg(if detail.is_empty() {
+            let message = if detail.is_empty() {
                 format!("Command failed: {program}")
             } else {
                 detail
-            }))
+            };
+            if program == "vastai"
+                && argv
+                    .get(1)
+                    .is_some_and(|s| matches!(s.as_ref(), "show" | "search" | "ssh-url"))
+            {
+                Err(Error::ProviderUnavailable(message))
+            } else {
+                Err(Error::msg(message))
+            }
         }
         Ok(output) => Ok(output),
     }

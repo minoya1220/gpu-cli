@@ -12,6 +12,15 @@ use crate::ctx::{Clock, Console, Ctx, Env, Ui};
 use crate::process::{Cmd, Output, RunError, Runner};
 use crate::pyjson::{self, Dict, Value};
 
+/// Explicit legacy fixture identity, not production defaults.
+pub fn fixture_config() -> Dict {
+    let mut cfg = crate::config::defaults();
+    cfg.insert("owner", Value::str("minoya1220"));
+    cfg.insert("git_name", Value::str("minoya1220"));
+    cfg.insert("git_email", Value::str("minoya1220@gmail.com"));
+    cfg
+}
+
 /// Seed a setup-complete test's offline facts, not the production catalog.
 pub fn tpu_facts(ctx: &Ctx) {
     let data = dict(include_str!("../tests/common/tpu_facts.json"));

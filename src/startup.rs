@@ -17,6 +17,43 @@ use crate::repos::{resolve_repo, Repo};
 /// checks nothing locally, so the smaller documented limit is enforced here.
 pub const ONSTART_LIMIT: usize = 4048;
 
+// Release checksums: https://github.com/astral-sh/uv/releases/tag/0.10.4
+const UV_INSTALL: &str = r#"command -v uv >/dev/null 2>&1 || (
+set -eu
+case $(uname -m) in
+x86_64) h=6b52a47358deea1c5e173278bf46b2b489747a59ae31f2a4362ed5c6c1c269f7;;
+aarch64) h=c84a6e6405715caa6e2f5ef8e5f29a5d0bc558a954e9f1b5c082b9d4708c222e;;
+*) echo 'Unsupported uv architecture' >&2; exit 1;;
+esac
+a=uv-$(uname -m)-unknown-linux-gnu
+t=$(mktemp -d); trap 'rm -rf "$t"' EXIT
+curl -fLsS --connect-timeout 15 --max-time 120 https://github.com/astral-sh/uv/releases/download/0.10.4/$a.tar.gz -o "$t/uv.tgz"
+echo "$h  $t/uv.tgz" | sha256sum -c -
+tar -xzf "$t/uv.tgz" -C "$t"
+mkdir -p /root/.local/bin
+install "$t/$a/uv" "$t/$a/uvx" /root/.local/bin/
+)"#;
+
+/// Workspace state is independent of SSH readiness. The EXIT trap records
+/// clone/installer failures; success is published before a long-lived entrypoint.
+pub(crate) const SETUP_START: &str = "set -e\nmkdir -p /workspace\necho pending >/workspace/.gpu-setup\ntrap 'echo failed >/workspace/.gpu-setup' EXIT";
+pub(crate) const SETUP_DONE: &str = "echo done >/workspace/.gpu-setup\ntrap - EXIT";
+
+fn bounded_script(lines: Vec<String>) -> Result<String> {
+    let script = lines.join("\n") + "\n";
+    if script.len() <= ONSTART_LIMIT {
+        return Ok(script);
+    }
+    let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+    gzip.write_all(script.as_bytes())?;
+    let packed = base64(&gzip.finish()?);
+    let wrapper = format!("#!/bin/bash\necho {packed} | base64 -d | gunzip | bash\n");
+    if wrapper.len() > ONSTART_LIMIT {
+        return Err(Error::msg(format!("Startup script exceeds Vast's {ONSTART_LIMIT} character onstart limit; use a shorter repository URL or identity.")));
+    }
+    Ok(wrapper)
+}
+
 /// Onstart lines that install `remote/expiry_guard.sh` and start it with the
 /// absolute `deadline`, so the instance destroys itself then even if the CLI
 /// never reaches SSH. Onstart runs again when Vast starts the instance, and
@@ -65,23 +102,28 @@ fn base64(bytes: &[u8]) -> String {
 pub fn run_script(deadline: Timestamp) -> Result<String> {
     let mut lines = vec!["#!/bin/bash".to_string()];
     lines.extend(expiry_guard(deadline));
+    // Keep the image's entrypoint/SSH services available even if setup fails.
+    lines.push("(".into());
+    lines.push(SETUP_START.into());
     lines.extend(
         [
             "touch /root/.no_auto_tmux",
             "mkdir -p /workspace",
             "export PATH=\"/root/.local/bin:$PATH\"",
-            "command -v uv >/dev/null 2>&1 || (curl -LsSf https://astral.sh/uv/install.sh | sh)",
+            UV_INSTALL,
+            SETUP_DONE,
             "touch /root/.works",
+            ")",
             "entrypoint.sh",
         ]
         .map(String::from),
     );
-    let script = lines.join("\n") + "\n";
-    if script.len() > ONSTART_LIMIT {
-        return Err(Error::msg("Job startup exceeds Vast's onstart limit."));
-    }
-    Ok(script)
+    bounded_script(lines)
 }
+
+#[cfg(test)]
+#[path = "startup_review_tests.rs"]
+mod review_tests;
 
 fn git_identity(cfg: &Dict, key: &str) -> Result<String> {
     let value = config::get(cfg, key)?;
@@ -107,6 +149,10 @@ pub fn startup_script(
     let target = format!("/workspace/{name}");
     let mut lines: Vec<String> = vec!["#!/bin/bash".into()];
     lines.extend(deadline.map(expiry_guard).unwrap_or_default());
+    if mode == "container" {
+        lines.push("(".into());
+    }
+    lines.push(SETUP_START.into());
     lines.extend([
         "source /etc/environment 2>/dev/null || true".into(),
         "export GH_TOKEN".into(),
@@ -114,7 +160,7 @@ pub fn startup_script(
     if mode == "container" {
         lines.extend(
             [
-                "apt update && apt install -y gh",
+                "apt update; apt install -y gh",
                 "touch /root/.no_auto_tmux",
                 "rm -rf /venv",
             ]
@@ -122,21 +168,23 @@ pub fn startup_script(
         );
     } else {
         lines.extend([
-            "if ! command -v ncu >/dev/null 2>&1; then cd /tmp; wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb; dpkg -i cuda-keyring_1.1-1_all.deb; apt update; apt install -y gh git curl build-essential nsight-compute-2025.4.0 cuda-nvcc-12-8; fi".to_string(),
+            "if ! command -v ncu >/dev/null 2>&1; then cd /tmp; wget -q --timeout=120 https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb; echo 'd93190d50b98ad4699ff40f4f7af50f16a76dac3bb8da1eaaf366d47898ff8df  cuda-keyring_1.1-1_all.deb' | sha256sum -c -; dpkg -i cuda-keyring_1.1-1_all.deb; apt update; apt install -y gh git curl build-essential nsight-compute-2025.4.0 cuda-nvcc-12-8; fi".to_string(),
             "grep -q nsight-compute /root/.bashrc || cat >> /root/.bashrc <<'EOF'\nexport PATH=$PATH:/opt/nvidia/nsight-compute/2025.4.0:/usr/local/cuda-12.8/bin\nexport LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}:/usr/local/cuda-12.8/lib64\nexport PATH=\"/root/.local/bin:$PATH\"\nEOF".to_string(),
             "export PATH=$PATH:/opt/nvidia/nsight-compute/2025.4.0:/usr/local/cuda-12.8/bin".to_string(),
-            "command -v uv >/dev/null 2>&1 || (curl -LsSf https://astral.sh/uv/install.sh | sh)".to_string(),
+            UV_INSTALL.to_string(),
         ]);
     }
     lines.push("mkdir -p /workspace".into());
-    lines.push(format!(
-        "git config --global user.name {}",
-        git_identity(cfg, "git_name")?
-    ));
-    lines.push(format!(
-        "git config --global user.email {}",
-        git_identity(cfg, "git_email")?
-    ));
+    for (key, field) in [("git_name", "name"), ("git_email", "email")] {
+        let identity = git_identity(cfg, key)?;
+        if cfg
+            .get(key)
+            .and_then(crate::pyjson::Value::as_str)
+            .is_some_and(|s| !s.is_empty())
+        {
+            lines.push(format!("git config --global user.{field} {identity}"));
+        }
+    }
     lines.push(r#"if [ -n "${GH_TOKEN:-}" ]; then gh auth setup-git; else echo "WARNING: GH_TOKEN is not set in Vast account environment; private GitHub repos may not clone." >&2; fi"#.into());
     if *repo != Repo::NoRepo {
         lines.push(format!(
@@ -151,19 +199,14 @@ pub fn startup_script(
             shell_quote(&target)
         ));
     }
+    lines.push(SETUP_DONE.into());
     if mode == "container" {
         lines.push(r#"sed -i 's|^cd \${WORKSPACE}$|[ "$PWD" = "$HOME" ] \&\& cd "${WORKSPACE:-/workspace}"|' /root/.bashrc"#.into());
         lines.push("touch /root/.works".into());
+        lines.push(")".into());
         lines.push("entrypoint.sh".into());
     } else {
         lines.push("touch /root/.works".into());
     }
-    let script = lines.join("\n") + "\n";
-    if script.len() > ONSTART_LIMIT {
-        return Err(Error::msg(format!(
-            "Startup script is {} characters; Vast accepts at most {ONSTART_LIMIT}. Use a shorter repository URL or git identity.",
-            script.len()
-        )));
-    }
-    Ok(script)
+    bounded_script(lines)
 }

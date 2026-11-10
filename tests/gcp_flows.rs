@@ -101,7 +101,7 @@ fn tpu_progress_is_silent_without_a_terminal() {
 }
 
 #[test]
-fn gcp_dry_run_is_offline_and_outputs_only_json_requests_after_banner() {
+fn gcp_dry_run_only_reads_local_identity_and_outputs_json_requests_after_banner() {
     let s = configured();
     let output = s
         .command(&[
@@ -130,7 +130,11 @@ fn gcp_dry_run_is_offline_and_outputs_only_json_requests_after_banner() {
     assert_eq!(parsed.as_list().unwrap().len(), 2);
     assert!(requests.contains("--method=DELETE"));
     assert!(requests.contains("--spot"));
-    assert!(s.calls().is_empty());
+    assert!(s.calls().iter().all(|args| args.starts_with(&[
+        "gh".into(),
+        "api".into(),
+        "user".into()
+    ])));
 }
 
 #[test]
@@ -187,7 +191,11 @@ fn config_lookup_and_setup_errors_use_xdg_or_dot_config_on_every_platform() {
             String::from_utf8_lossy(&configured.stderr)
         );
         assert!(String::from_utf8_lossy(&configured.stdout).contains("--project=test-project"));
-        assert!(s.calls().is_empty());
+        assert!(s.calls().iter().all(|args| args.starts_with(&[
+            "gh".into(),
+            "api".into(),
+            "user".into()
+        ])));
     }
 }
 

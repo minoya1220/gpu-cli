@@ -11,9 +11,9 @@ pub const CONTAINER_ENV: &str = r#"-p 1111:1111 -p 6006:6006 -p 8080:8080 -p 838
 /// The defaults every config starts from, in Python's key order.
 pub fn defaults() -> Dict {
     let mut cfg = Dict::new();
-    cfg.insert("owner", Value::str("minoya1220"));
-    cfg.insert("git_name", Value::str("minoya1220"));
-    cfg.insert("git_email", Value::str("minoya1220@gmail.com"));
+    cfg.insert("owner", Value::str(""));
+    cfg.insert("git_name", Value::str(""));
+    cfg.insert("git_email", Value::str(""));
     cfg.insert("disk", Value::Int(20));
     cfg.insert("vm_disk", Value::Int(130));
     cfg.insert("reliability", Value::Float(0.95));
@@ -50,6 +50,30 @@ pub fn load_config(env: &Env) -> Result<Dict> {
             "Config {} must contain a JSON object",
             path.display()
         ))),
+    }
+}
+
+/// Infer only missing identity values; explicit config always wins. No account
+/// name or email is shipped with the binary. Missing tools/auth are harmless.
+pub(crate) fn infer_identity(ctx: &crate::ctx::Ctx, cfg: &mut Dict) {
+    for (key, args) in [
+        ("owner", vec!["gh", "api", "user", "--jq", ".login"]),
+        ("git_name", vec!["git", "config", "--get", "user.name"]),
+        ("git_email", vec!["git", "config", "--get", "user.email"]),
+    ] {
+        if !cfg
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(str::is_empty)
+            || crate::editors::which(&ctx.env, args[0]).is_none()
+        {
+            continue;
+        }
+        if let Ok(value) = crate::process::run(ctx, &args, Some(10.0)) {
+            if !value.is_empty() && !value.chars().any(char::is_control) {
+                cfg.insert(key, Value::str(&value));
+            }
+        }
     }
 }
 

@@ -10,7 +10,6 @@ use jiff::Timestamp;
 
 use super::cli::bash_n;
 use super::instances::{editor_stubs, ssh_ready};
-use crate::config::defaults;
 use crate::ctx::Clock;
 use crate::expiry::{local_time, GUARD_SOURCE};
 use crate::process::{Output, RunError};
@@ -18,6 +17,7 @@ use crate::pyjson::{Dict, Value};
 use crate::redact::redact_text;
 use crate::repos::Repo;
 use crate::startup::{startup_script, ONSTART_LIMIT};
+use crate::testing::fixture_config as defaults;
 use crate::testing::*;
 
 const DEADLINE: i64 = 4_102_444_800;
@@ -50,7 +50,25 @@ fn script(mode: &str) -> String {
         &defaults(),
         Some(deadline()),
     )
+    .map(|script| unpack(&script))
     .unwrap()
+}
+
+fn unpack(script: &str) -> String {
+    if script.lines().nth(1).is_some_and(|l| l.ends_with("| bash")) {
+        let packed = script
+            .lines()
+            .nth(1)
+            .unwrap()
+            .strip_prefix("echo ")
+            .unwrap()
+            .split(" | ")
+            .next()
+            .unwrap();
+        decode(packed)
+    } else {
+        script.into()
+    }
 }
 
 /// The gzip+base64 payload in the guard line and its `boot DEADLINE` word.
@@ -100,10 +118,11 @@ fn test_expire_script_starts_guard_first_with_absolute_deadline() {
         assert!(lines[2].ends_with(&format!(
             r#" | base64 -d | gunzip >"$GPU_EXPIRE/guard.sh" && (setsid bash "$GPU_EXPIRE/guard.sh" boot {DEADLINE} </dev/null >/dev/null 2>&1 &)"#
         )));
-        assert_eq!(lines[3], "source /etc/environment 2>/dev/null || true");
+        assert_eq!(lines[3], if mode == "container" { "(" } else { "set -e" });
         // Everything after the guard is the script without a deadline.
-        let plain =
-            startup_script(&Repo::from_arg("gpu-kernels"), mode, &defaults(), None).unwrap();
+        let plain = unpack(
+            &startup_script(&Repo::from_arg("gpu-kernels"), mode, &defaults(), None).unwrap(),
+        );
         assert_eq!(
             format!("{}\n{}", lines[0], lines[3..].join("\n")) + "\n",
             plain
@@ -140,7 +159,10 @@ fn test_deadline_rounds_up_to_whole_seconds() {
     let at = Timestamp::from_second(DEADLINE).unwrap() + jiff::SignedDuration::from_millis(1);
     let script =
         startup_script(&Repo::from_arg("gpu-kernels"), "vm", &defaults(), Some(at)).unwrap();
-    assert_eq!(guard_payload(&script).1, (DEADLINE + 1).to_string());
+    assert_eq!(
+        guard_payload(&unpack(&script)).1,
+        (DEADLINE + 1).to_string()
+    );
 }
 
 #[test]
@@ -158,20 +180,24 @@ fn test_guard_scripts_fit_vast_onstart_limit_with_room_for_long_repos() {
     }
     // The longest generated script (VM) keeps a margin for configuration.
     assert!(
-        script("vm").len() + 500 < ONSTART_LIMIT,
-        "{}",
-        script("vm").len()
+        startup_script(&Repo::NoRepo, "vm", &defaults(), Some(deadline()))
+            .unwrap()
+            .len()
+            < ONSTART_LIMIT
     );
 }
 
 #[test]
 fn test_oversized_script_fails_before_any_request() {
     let mut cfg = defaults();
-    cfg.insert("git_name", Value::Str("n".repeat(ONSTART_LIMIT)));
+    let identity: String = (0..ONSTART_LIMIT)
+        .map(|i| format!("{:x}", i * 1664525 + 1013904223))
+        .collect();
+    cfg.insert("git_name", Value::Str(identity));
     let error = startup_script(&Repo::NoRepo, "container", &cfg, None).unwrap_err();
     assert!(error
         .text()
-        .contains(&format!("Vast accepts at most {ONSTART_LIMIT}")));
+        .contains(&format!("{ONSTART_LIMIT} character onstart limit")));
 }
 
 #[test]

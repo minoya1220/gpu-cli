@@ -16,6 +16,7 @@ mod not_found;
 mod picker;
 mod repo_cache;
 mod repos;
+mod review_fixes;
 mod setup;
 mod uptime;
 mod wizard;

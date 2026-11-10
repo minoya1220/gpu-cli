@@ -592,8 +592,8 @@ fn short_tpu_names_before_setup_never_run_gcloud() {
     let env = TestEnv::new();
     let runner = FakeRunner::forbid();
     let ctx = env.ctx().runner(&runner).build();
-    assert_eq!(main(&ctx, &["ssh", "gpu-short"]), 12);
-    assert!(err(&ctx).contains("Next: gpu setup"));
+    assert_eq!(main(&ctx, &["ssh", "gpu-short"]), 16);
+    assert!(err(&ctx).contains("Vast IDs are numeric. Next: gpu ls"));
     assert!(runner.calls().is_empty());
 }
 
@@ -704,7 +704,11 @@ fn tpu_editor_readiness_timeout_terminal_state_and_iam_failure_do_not_open_or_ch
         }
         assert_eq!(
             main(&ctx, &["edit", ID, "--editor", "code"]),
-            if mode == "timeout" { 14 } else { 1 }
+            if matches!(mode, "timeout" | "malformed") {
+                14
+            } else {
+                1
+            }
         );
         let error = err(&ctx);
         assert!(!error.contains("do-not-print"));

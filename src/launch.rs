@@ -10,7 +10,7 @@ use crate::config;
 use crate::ctx::Ctx;
 use crate::editors::after_up_screen;
 use crate::error::{Error, Result};
-use crate::history::{recent_picks, record_picks};
+use crate::history::{recent_picks, record_picks_best_effort as record_picks};
 use crate::offers::{
     gpu_stats, known_gpu_models, offer_label, offer_price, OfferSearch, NO_OFFERS,
 };
@@ -53,19 +53,19 @@ impl UpArgs {
 
 pub fn validate_launch_args(args: &UpArgs) -> Result<()> {
     if args.num_gpus < 1 {
-        return Err(Error::msg("--num-gpus must be at least 1"));
+        return Err(Error::Usage("--num-gpus must be at least 1".into()));
     }
     if args.disk.is_some_and(|d| d < 1) {
-        return Err(Error::msg("--disk must be at least 1"));
+        return Err(Error::Usage("--disk must be at least 1".into()));
     }
     if args.max_price.is_some_and(|p| !p.is_finite() || p <= 0.0) {
-        return Err(Error::msg("--max-price must be greater than 0"));
+        return Err(Error::Usage("--max-price must be greater than 0".into()));
     }
     if args.reliability.is_some_and(|r| !(0.0..=1.0).contains(&r)) {
-        return Err(Error::msg("--reliability must be between 0 and 1"));
+        return Err(Error::Usage("--reliability must be between 0 and 1".into()));
     }
     if args.offer.is_some_and(|o| o < 1) {
-        return Err(Error::msg("--offer must be a positive ID"));
+        return Err(Error::Usage("--offer must be a positive ID".into()));
     }
     Ok(())
 }
@@ -521,10 +521,7 @@ pub fn launch(ctx: &Ctx, args: &UpArgs, cfg: &Dict, deadline: Option<Timestamp>)
     ctx.result("created", Value::Bool(false));
     ctx.result("expiry_armed", Value::Bool(false));
     if args.dry_run {
-        ctx.result(
-            "request",
-            crate::redact::redact(&Value::List(request.clone())),
-        );
+        ctx.result("request", Value::List(request.clone()));
         ctx.println("DRY RUN: no instance created")?;
         ctx.println(&pyjson::dumps(&Value::List(request), Some(2)))?;
         if let Some(expire) = args.expire() {
@@ -616,7 +613,7 @@ pub fn launch(ctx: &Ctx, args: &UpArgs, cfg: &Dict, deadline: Option<Timestamp>)
         }
     }
     announced?;
-    record_picks(&ctx.env, &[("mode", &mode), ("gpu", &gpu)])?;
+    record_picks(ctx, &[("mode", &mode), ("gpu", &gpu)]);
     if let Some(instance_id) = instance_id {
         if ctx.interactive() {
             let editor = pick(ctx, after_up_screen(last_editor(&ctx.env)))?;

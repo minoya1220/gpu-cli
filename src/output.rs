@@ -6,8 +6,11 @@ use crate::pyjson::{self, Dict, Value};
 #[derive(Default)]
 pub(crate) struct CommandOutput {
     pub json: bool,
+    pub command: String,
+    pub written: bool,
     pub result: Dict,
     pub ssh_timeout: Option<f64>,
+    pub command_timeout: Option<f64>,
 }
 
 pub(crate) fn envelope(ctx: &Ctx, command: &str, outcome: &Result<()>) -> Value {
@@ -31,8 +34,14 @@ pub(crate) fn envelope(ctx: &Ctx, command: &str, outcome: &Result<()>) -> Value 
 pub(crate) fn finish(ctx: &Ctx, command: &str, outcome: &Result<()>) -> Result<()> {
     // Remote stdout/stderr are caller data, not provider API responses. They
     // deliberately pass through unchanged. Provider data is redacted at source.
+    let _emission = ctx.emission.lock().unwrap_or_else(|p| p.into_inner());
+    if ctx.output_written() {
+        return Ok(());
+    }
     ctx.console
-        .println(&pyjson::dumps(&envelope(ctx, command, outcome), None))
+        .println(&pyjson::dumps(&envelope(ctx, command, outcome), None))?;
+    ctx.mark_output_written();
+    Ok(())
 }
 
 pub(crate) fn usage(text: impl Into<String>) -> Error {

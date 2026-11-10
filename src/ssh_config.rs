@@ -1,6 +1,6 @@
 //! Managed `vast-<id>` SSH aliases in `~/.ssh/vst_config`.
 
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
@@ -55,11 +55,6 @@ fn split_lines(data: &[u8]) -> Vec<&[u8]> {
     lines
 }
 
-fn chmod_600(path: &Path) -> Result<()> {
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-        .map_err(|e| os_error(&e, path))
-}
-
 /// `Path.read_text()`, with its universal newlines: `\r\n` and `\r` read as `\n`.
 fn read_text(path: &Path) -> Result<String> {
     let text = std::fs::read_to_string(path).map_err(|e| os_error(&e, path))?;
@@ -74,22 +69,19 @@ fn ensure_include(env: &Env) -> Result<()> {
         .create(&directory)
         .map_err(|e| os_error(&e, &directory))?;
     let config = directory.join("config");
-    let original = if config.exists() {
-        std::fs::read(&config).map_err(|e| os_error(&e, &config))?
-    } else {
-        Vec::new()
-    };
-    if !split_lines(&original)
-        .iter()
-        .any(|line| INCLUDE_LINE.is_match(line))
-    {
-        // The Include must precede all Host/Match blocks for SSH precedence.
-        let mut content = INCLUDE.to_vec();
-        content.extend_from_slice(&original);
-        std::fs::write(&config, content).map_err(|e| os_error(&e, &config))?;
-        chmod_600(&config)?;
-    }
-    Ok(())
+    crate::atomic_file::update(&config, |original| {
+        if !split_lines(original)
+            .iter()
+            .any(|line| INCLUDE_LINE.is_match(line))
+        {
+            // The Include must precede all Host/Match blocks for SSH precedence.
+            let mut content = INCLUDE.to_vec();
+            content.extend_from_slice(original);
+            Ok(content)
+        } else {
+            Ok(original.to_vec())
+        }
+    })
 }
 
 fn without_entry(content: &str, instance_id: &str) -> String {
@@ -149,24 +141,28 @@ pub fn update_host(env: &Env, instance: &Dict) -> std::result::Result<String, Ho
     }
     ensure_include(env)?;
     let path = managed_path(env);
-    let current = if path.exists() {
-        read_text(&path)?
-    } else {
-        String::new()
-    };
     let entry = format!(
-        "Host vast-{instance_id}\n  HostName {host}\n  Port {port}\n  User root\n  IdentityFile ~/.ssh/id_ed25519\n  StrictHostKeyChecking accept-new\n"
+        "Host vast-{instance_id}\n  HostName {host}\n  Port {port}\n  User root\n  IdentityFile ~/.ssh/id_ed25519\n  StrictHostKeyChecking accept-new\n  ServerAliveInterval 15\n  ServerAliveCountMax 4\n"
     );
-    let content = if current.is_empty() {
-        entry
-    } else {
-        format!(
-            "{}\n{entry}",
-            without_entry(&current, &instance_id).trim_end_matches('\n')
-        )
-    };
-    std::fs::write(&path, content).map_err(|e| os_error(&e, &path))?;
-    chmod_600(&path)?;
+    crate::atomic_file::update(&path, |original| {
+        let current = String::from_utf8_lossy(original)
+            .replace("\r\n", "\n")
+            .replace('\r', "\n");
+        // Preserve ordering and avoid a rename on every readiness poll.
+        if HOST_BLOCK
+            .captures_iter(&current)
+            .any(|caps| caps[1] == instance_id && caps[0] == entry)
+        {
+            return Ok(original.to_vec());
+        }
+        let rest = without_entry(&current, &instance_id);
+        Ok(if rest.trim_end_matches('\n').is_empty() {
+            entry.clone()
+        } else {
+            format!("{}\n{entry}", rest.trim_end_matches('\n'))
+        }
+        .into_bytes())
+    })?;
     Ok(format!("vast-{instance_id}"))
 }
 
@@ -185,9 +181,10 @@ pub fn has_host(env: &Env, instance_id: &str) -> Result<bool> {
 /// Remove only this instance's managed stanza; never edit user SSH config.
 pub fn remove_host(env: &Env, instance_id: &str) -> Result<()> {
     let path = managed_path(env);
-    if path.exists() {
-        let content = without_entry(&read_text(&path)?, instance_id);
-        std::fs::write(&path, content).map_err(|e| os_error(&e, &path))?;
+    if !path.exists() {
+        return Ok(());
     }
-    Ok(())
+    crate::atomic_file::update(&path, |original| {
+        Ok(without_entry(&String::from_utf8_lossy(original), instance_id).into_bytes())
+    })
 }

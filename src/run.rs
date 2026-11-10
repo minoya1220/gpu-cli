@@ -18,6 +18,10 @@ use crate::pyjson::{self, Dict, Value};
 use crate::run_files;
 use crate::vast::{self, Vast};
 
+#[cfg(test)]
+#[path = "run_review_tests.rs"]
+mod review_tests;
+
 pub const REMOTE_SOURCE: &str = include_str!("../remote/run_remote.sh");
 const DOWNLOAD_RESERVE: i64 = 600;
 const CHUNK: u64 = 131072;
@@ -26,18 +30,43 @@ fn phase(ctx: &Ctx, phase: &str) {
     ctx.result("phase", Value::str(phase));
 }
 
-fn checked(ctx: &Ctx, cmd: &Cmd, message: &str) -> Result<Output> {
-    match ctx.run(cmd) {
+fn step_result(
+    ctx: &Ctx,
+    result: std::result::Result<Output, crate::process::RunError>,
+    message: &str,
+) -> Result<Output> {
+    match result {
         Ok(out) if out.code == 0 => Ok(out),
-        _ => Err(Error::msg(message)), // never leak forwarded credentials or SSH diagnostics
+        Ok(out) => {
+            // Mask exact forwarded values before taking a bounded stderr tail.
+            let detail = ctx.safe_diagnostic(&out.stderr);
+            let tail: String = detail
+                .chars()
+                .rev()
+                .take(2048)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            Err(Error::msg(format!(
+                "{message} Exit status {}. {}",
+                out.code,
+                tail.trim()
+            )))
+        }
+        Err(error) => Err(Error::msg(format!(
+            "{message} {}",
+            ctx.safe_diagnostic(&error.python_text("ssh"))
+        ))),
     }
 }
 
+fn checked(ctx: &Ctx, cmd: &Cmd, message: &str) -> Result<Output> {
+    step_result(ctx, ctx.run(cmd), message)
+}
+
 fn checked_transfer(ctx: &Ctx, cmd: &Cmd, threshold: usize, message: &str) -> Result<Output> {
-    match ctx.transfer(cmd, threshold) {
-        Ok(out) if out.code == 0 => Ok(out),
-        _ => Err(Error::msg(message)),
-    }
+    step_result(ctx, ctx.transfer(cmd, threshold), message)
 }
 
 fn ssh(alias: &str, command: &str, timeout: f64) -> Cmd {
@@ -182,7 +211,11 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
     }
     let deadline = Timestamp::from_second(now.as_second() + seconds)
         .map_err(|_| Error::Usage("Expiry out of range.".into()))?;
-    let linger = duration(&flags.linger, now)?;
+    let linger = if flags.linger == "0" {
+        0
+    } else {
+        duration(&flags.linger, now)?
+    };
     if !run_files::relative(Path::new(&flags.outputs)) {
         return Err(Error::Usage(
             "--outputs must be a relative directory without . or .. components.".into(),
@@ -222,11 +255,20 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
                 "Local variable {key} contains a NUL."
             )));
         }
+        ctx.protect_secret(value);
         env.push_str(&format!("export {key}={}\n", shell_quote(value)));
     }
     let args = args(flags);
     crate::launch::validate_launch_args(&args).map_err(|e| Error::Usage(e.text().into()))?;
     let upload = run_files::prepare(ctx, cwd, run_files::max_bytes(&flags.max_upload)?)?;
+    let secrets: Vec<_> = upload
+        .files
+        .iter()
+        .filter(|path| run_files::secret_path(path))
+        .collect();
+    if !flags.allow_secrets && !secrets.is_empty() {
+        return Err(Error::Usage(format!("Refusing secret-looking upload files: {}. Ignore them in .gitignore or explicitly pass --allow-secrets.", secrets.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", "))));
+    }
     let setup = setup(flags, &upload.root.join(&upload.relative));
     let mut cfg = cfg.clone();
     if let Some(image) = &flags.image {
@@ -258,6 +300,18 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
     }
     ctx.result("expires_at", Value::str(deadline.to_string()));
     ctx.result("uploaded_files", Value::Int(upload.files.len() as i64));
+    if flags.dry_run {
+        ctx.result(
+            "files",
+            Value::List(
+                upload
+                    .files
+                    .iter()
+                    .map(|p| Value::str(p.to_string_lossy()))
+                    .collect(),
+            ),
+        );
+    }
     ctx.result("uploaded_bytes", Value::Int(upload.bytes as i64));
     ctx.result(
         "setup",
@@ -288,7 +342,7 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
     let request = vast::run_request(&offer, flags.disk, &cfg, deadline, label)?;
     vast::argv(&request)?;
     if flags.dry_run {
-        ctx.result("request", crate::redact::redact(&Value::List(request)));
+        ctx.result("request", Value::List(request));
         ctx.println(&format!("DRY RUN: {} files, {} bytes; setup: {}; maximum compute estimate ${}. No instance created.", upload.files.len(), upload.bytes, setup, crate::pyfmt::fixed(estimate, 3)))?;
         return Ok(());
     }
@@ -296,8 +350,10 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
         && !crate::prompt::confirm(
             ctx,
             &format!(
-                "Run {} at ${}/hr, at most {expire} (up to ${})? Type 'yes': ",
+                "Run {} ({} files, {} bytes) at ${}/hr, at most {expire} (up to ${})? Type 'yes': ",
                 shell_join(&flags.command),
+                upload.files.len(),
+                upload.bytes,
                 crate::pyfmt::fixed(rate, 3),
                 crate::pyfmt::fixed(estimate, 3)
             ),
@@ -310,6 +366,19 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
             "Not enough time remains before expiry; choose a longer --expire.".into(),
         ));
     }
+    // Prove the destination is writable before spending anything. Keep a unique
+    // staging directory on the same filesystem, then rename once the ID is known.
+    let results = cwd.join("gpu-runs");
+    if !results.exists() {
+        ctx.eprintln("Results go in gpu-runs/; add gpu-runs/ to .gitignore.")?;
+    }
+    fs::create_dir_all(&results).map_err(|e| crate::error::os_error(&e, &results))?;
+    let staging = tempfile::Builder::new()
+        .prefix(".gpu-run-")
+        .tempdir_in(&results)
+        .map_err(|e| crate::error::os_error(&e, &results))?;
+    fs::write(staging.path().join("log.txt"), b"")
+        .map_err(|e| crate::error::os_error(&e, &staging.path().join("log.txt")))?;
     // Before create, Ctrl-C cancels at once: nothing has been rented yet.
     ctx.begin_run();
     ctx.set_interrupt_notice(Some(format!(
@@ -336,16 +405,12 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
     let mut paths = None;
     let mut launched = false;
     let job = (|| {
-        if !cwd.join("gpu-runs").exists() {
-            ctx.eprintln("Results go in gpu-runs/; add gpu-runs/ to .gitignore.")?;
-        }
-        fs::create_dir_all(&local)?;
+        fs::rename(staging.path(), &local).map_err(|e| crate::error::os_error(&e, &local))?;
         ctx.result("run_id", Value::str(&run_id));
         ctx.result(
             "log_path",
             Value::str(local.join("log.txt").to_string_lossy()),
         );
-        fs::write(local.join("log.txt"), b"")?;
         ctx.check_cancelled()?;
         let remaining =
             (deadline.as_second() - DOWNLOAD_RESERVE - ctx.clock.now().as_second()) as f64;
@@ -480,7 +545,15 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
                 ));
             }
             phase(ctx, "download");
-            let downloaded = download(ctx, &alias, &jobdir, &flags.outputs, &local, deadline);
+            let downloaded = download(
+                ctx,
+                &alias,
+                &root,
+                &jobdir,
+                &flags.outputs,
+                &local,
+                deadline,
+            );
             if let Err(error) = downloaded {
                 let _ = ctx.eprintln(&format!("Could not fetch results: {}", error.text()));
                 if outcome.is_ok()
@@ -706,6 +779,7 @@ fn finish_log(ctx: &Ctx, alias: &str, root: &str, local: &Path, size: u64) -> Re
 fn download(
     ctx: &Ctx,
     alias: &str,
+    root: &str,
     jobdir: &str,
     outputs: &str,
     local: &Path,
@@ -714,16 +788,32 @@ fn download(
     let archive = tempfile::NamedTempFile::new()?;
     let seconds = (deadline.as_second() - ctx.clock.now().as_second()).max(1) as f64;
     let command = format!(
-        "tar -C {} -cf - -- {}",
+        "tar -C {} -cf - -- {} & p=$!; while kill -0 $p 2>/dev/null; do date +%s >{}; sleep 5; done; wait $p",
         shell_quote(jobdir),
-        shell_quote(outputs)
+        shell_quote(outputs),
+        shell_quote(&format!("{root}/attached"))
     );
-    checked_transfer(
-        ctx,
-        &ssh(alias, &command, seconds).stdout_file(archive.path()),
-        2,
-        "Results download failed; instance will still be destroyed.",
-    )?;
+    let end = ctx.clock.monotonic() + seconds;
+    let mut delay = 1.0f64;
+    loop {
+        let remaining = (end - ctx.clock.monotonic()).max(0.1);
+        match checked_transfer(
+            ctx,
+            &ssh(alias, &command, remaining).stdout_file(archive.path()),
+            2,
+            "Results download failed; instance will still be destroyed.",
+        ) {
+            Ok(_) => break,
+            Err(error) => {
+                if ctx.interrupts() >= 2 || ctx.clock.monotonic() + delay >= end {
+                    return Err(error);
+                }
+                ctx.eprintln(&format!("{} Retrying download.", error.text()))?;
+                ctx.clock.sleep(delay);
+                delay = (delay * 2.0).min(15.0);
+            }
+        }
+    }
     let bytes = run_files::unpack(ctx, archive.path(), local, Path::new(outputs))?;
     ctx.result("downloaded_bytes", Value::Int(bytes as i64));
     ctx.result(
@@ -734,20 +824,27 @@ fn download(
 }
 
 /// Only ever called with the ID this invocation just created. A successful
-/// mutation is not enough: verify disappearance before removing the SSH alias.
+/// mutation is not enough: verify disappearance. Always remove the local alias.
 fn destroy(ctx: &Ctx, id: &str) -> Result<()> {
     let cleanup = || -> Result<()> {
-        let live = vast::list_instances(ctx, Some(15.0))?;
-        if vast::find_instance(&live, id).is_some() {
-            crate::process::run(
-                ctx,
-                &["vastai", "destroy", "instance", id, "--yes"],
-                Some(30.0),
-            )?;
-            crate::commands::wait_for_lifecycle(ctx, id, "destroy", 60.0)?;
+        // This invocation owns the freshly created ID. A lagging or broken
+        // inventory must never suppress the paid-resource cleanup request.
+        let sent = crate::process::run(
+            ctx,
+            &["vastai", "destroy", "instance", id, "--yes"],
+            Some(30.0),
+        );
+        if let Err(error) = sent {
+            // A failed/timeout reply does not prove the mutation was rejected.
+            // A definite absence after the request still verifies completion.
+            let _ = ctx.eprintln(&format!(
+                "Destroy request completion uncertain: {}",
+                ctx.safe_diagnostic(error.text())
+            ));
         }
-        crate::ssh_config::remove_host(&ctx.env, id)?;
-        Ok(())
+        crate::commands::wait_for_lifecycle(ctx, id, "destroy", 60.0)
     };
-    cleanup().map_err(|_| Error::status(ExitCode::CleanupUnverified, format!("Instance {id}: destruction unverified; billing may continue. Next: gpu down {id} --yes")))
+    let outcome = cleanup();
+    let _ = crate::ssh_config::remove_host(&ctx.env, id);
+    outcome.map_err(|_| Error::status(ExitCode::CleanupUnverified, format!("Instance {id}: destruction unverified; billing may continue. Next: gpu down {id} --yes")))
 }

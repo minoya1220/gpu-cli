@@ -7,7 +7,6 @@ use std::sync::Arc;
 use super::cli::{bash_n, dry_run_request};
 use super::picker::Gate;
 use super::repo_cache::{flow, gated};
-use crate::config::defaults;
 use crate::error::Result;
 use crate::launch::prompt_for_picks;
 use crate::offers::Stats;
@@ -17,6 +16,7 @@ use crate::process::Output;
 use crate::pyjson::Dict;
 use crate::repos::{cache_path, load_cached_repos, resolve_repo, save_cached_repos, Repo};
 use crate::startup::startup_script;
+use crate::testing::fixture_config as defaults;
 use crate::testing::*;
 use crate::wizard::{Picks, Search};
 
@@ -153,6 +153,13 @@ fn test_cli_dry_run_skips_github_and_prompts() {
     ];
     for flags in cases {
         let t = TestEnv::new();
+        let path = crate::config::config_path(&t.env());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            path,
+            crate::pyjson::dumps(&crate::pyjson::Value::Dict(defaults()), None),
+        )
+        .unwrap();
         let runner = FakeRunner::new(|cmd| {
             assert_eq!(
                 cmd.argv[..3],
@@ -219,7 +226,22 @@ fn test_flag_conflict_and_invalid_repo_fail_before_network() {
         2
     );
     assert_eq!(
-        main(&ctx, &["up", "--repo", "https://host/repo;id", "--dry-run"]),
+        main(
+            &ctx,
+            &[
+                "up",
+                "--repo",
+                "https://host/repo;id",
+                "--dry-run",
+                "--gpu",
+                "T4",
+                "--mode",
+                "container",
+                "--expire",
+                "2h",
+                "--yes"
+            ]
+        ),
         1
     );
     assert!(err(&ctx).contains("Use a bare repo name"));

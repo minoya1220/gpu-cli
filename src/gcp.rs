@@ -158,7 +158,11 @@ pub(crate) fn checked(
         Ok(out) if out.code == 0 => Ok(out.stdout.trim().into()),
         result => {
             let reason = match result {
-                Err(RunError::TimedOut) => "Google Cloud timed out. Completion unverified",
+                Err(RunError::TimedOut) => {
+                    return Err(Error::Timeout(format!(
+                        "Google Cloud timed out. Completion unverified. Next: {next}"
+                    )))
+                }
                 Ok(out) => {
                     let detail = format!("{} {}", out.stdout, out.stderr).to_ascii_lowercase();
                     if detail.contains("quota") {
@@ -183,7 +187,7 @@ pub(crate) fn checked(
                     } else if detail.contains("not_found") || detail.contains("not found") {
                         "Google Cloud resource was not found"
                     } else {
-                        "Google Cloud request failed. Completion unverified"
+                        return Err(Error::ProviderUnavailable(format!("Google Cloud request failed; provider may be temporarily unavailable. Completion unverified. Next: {next}")));
                     }
                 }
                 _ => "Could not run Google Cloud CLI",
@@ -210,8 +214,8 @@ pub(crate) fn json_timeout(
 ) -> Result<Value> {
     args.push("--format=json".into());
     pyjson::loads(&run_timeout(ctx, &args, next, timeout)?).map_err(|_| {
-        Error::msg(format!(
-            "Google Cloud returned an unreadable reply. Next: {next}"
+        Error::ProviderUnavailable(format!(
+            "Google Cloud returned an unreadable reply. Retry: {next}"
         ))
     })
 }
@@ -228,7 +232,9 @@ pub fn objects(value: Value) -> Result<Vec<Dict>> {
     Err(bad_reply())
 }
 pub fn bad_reply() -> Error {
-    Error::msg("Google Cloud returned an incomplete reply. Next: gpu ls --provider gcp")
+    Error::ProviderUnavailable(
+        "Google Cloud returned an incomplete reply. Retry: gpu ls --provider gcp".into(),
+    )
 }
 pub fn describe(ctx: &Ctx, id: &TpuId) -> Result<Dict> {
     match json(ctx, id.args("describe"), "gpu ls --provider gcp")? {
@@ -299,7 +305,10 @@ pub fn locations(ctx: &Ctx, project: &str) -> Result<Vec<String>> {
         .collect()
 }
 pub fn nodes(ctx: &Ctx, project: &str, zone: &str) -> Result<Vec<Dict>> {
-    let found = objects(json(
+    nodes_timeout(ctx, project, zone, 60.0)
+}
+fn nodes_timeout(ctx: &Ctx, project: &str, zone: &str, timeout: f64) -> Result<Vec<Dict>> {
+    let found = objects(json_timeout(
         ctx,
         vec![
             "gcloud".into(),
@@ -312,6 +321,7 @@ pub fn nodes(ctx: &Ctx, project: &str, zone: &str) -> Result<Vec<Dict>> {
             "--quiet".into(),
         ],
         "gpu ls --provider gcp",
+        timeout,
     )?)?;
     let prefix = format!("projects/{project}/locations/{zone}/nodes/");
     for node in &found {
@@ -528,6 +538,7 @@ pub(crate) fn picker_flags(args: &crate::launch::UpArgs, picks: &crate::wizard::
         reliability: args.reliability,
         unverified: args.unverified,
         wait: false,
+        wait_setup: false,
         timeout: 120.0,
     }
 }
@@ -961,8 +972,22 @@ pub fn unique_name(ctx: &Ctx, prefix: &str) -> Result<String> {
 fn startup(repo: &crate::repos::Repo, cfg: &Dict) -> Result<String> {
     let owner = crate::pyfmt::py_str(crate::config::get(cfg, "owner")?);
     let (url, name) = crate::repos::resolve_repo(repo.as_arg(), &owner)?;
-    let mut script =
-        "#!/bin/bash\nset -eu\nmkdir -p /workspace\nchmod 1777 /workspace\n".to_string();
+    let mut script = format!(
+        "#!/bin/bash\n{}\nchmod 1777 /workspace\n",
+        crate::startup::SETUP_START
+    );
+    for (key, field) in [("git_name", "name"), ("git_email", "email")] {
+        if let Some(value) = cfg
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+        {
+            script.push_str(&format!(
+                "git config --global user.{field} {}\n",
+                crate::pyfmt::shell_quote(value)
+            ));
+        }
+    }
     if !url.is_empty() {
         let dir = format!("/workspace/{name}");
         script.push_str(&format!(
@@ -973,6 +998,8 @@ fn startup(repo: &crate::repos::Repo, cfg: &Dict) -> Result<String> {
             crate::pyfmt::shell_quote(&dir)
         ));
     }
+    script.push_str(crate::startup::SETUP_DONE);
+    script.push('\n');
     Ok(script)
 }
 
@@ -1053,7 +1080,25 @@ pub fn lifecycle(ctx: &Ctx, id: &TpuId, cfg: &Dict, destroy: bool, yes: bool) ->
     run(ctx, &id.args(action), "gpu ls --provider gcp")?;
     let until = ctx.clock.monotonic() + 60.0;
     loop {
-        let listed = nodes(ctx, &id.project, &id.zone)?;
+        if ctx.clock.monotonic() >= until {
+            return Err(Error::msg(
+                "TPU lifecycle completion is unverified. Next: gpu ls --provider gcp",
+            ));
+        }
+        let listed = match nodes_timeout(
+            ctx,
+            &id.project,
+            &id.zone,
+            (until - ctx.clock.monotonic()).min(15.0),
+        ) {
+            Ok(listed) => listed,
+            Err(error) if error.retryable() => {
+                ctx.clock
+                    .sleep((until - ctx.clock.monotonic()).clamp(0.0, 2.0));
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         let live = listed.iter().find(|d| {
             text(d, "name").is_some_and(|n| n.rsplit('/').next() == Some(id.name.as_str()))
         });

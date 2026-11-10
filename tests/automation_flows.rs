@@ -3,6 +3,100 @@ mod common;
 use common::Sandbox;
 use gpu::pyjson::{self, Value};
 
+#[test]
+fn process_timeout_kills_local_descendants_that_would_hold_capture_pipes_open() {
+    use gpu::process::{Cmd, RealRunner, RunError, Runner};
+    use std::time::{Duration, Instant};
+    let s = Sandbox::new();
+    let marker = s.root.join("descendant-ran");
+    let command = format!(
+        "(sleep 0.4; touch {}) & wait",
+        gpu::pyfmt::shell_quote(&marker.to_string_lossy())
+    );
+    let start = Instant::now();
+    assert_eq!(
+        RealRunner.run(&Cmd::new(&["sh", "-c", &command]).timeout(Some(0.05))),
+        Err(RunError::TimedOut)
+    );
+    assert!(start.elapsed() < Duration::from_secs(2));
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(!marker.exists());
+}
+
+#[test]
+fn signals_during_json_up_preserve_created_id_and_notice() {
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+    for signal in [
+        rustix::process::Signal::INT,
+        rustix::process::Signal::TERM,
+        rustix::process::Signal::HUP,
+    ] {
+        let s = Sandbox::new();
+        s.stub("git", "#!/bin/sh\nexit 1\n");
+        s.stub(
+            "vastai",
+            r#"#!/bin/sh
+case "$1 $2" in
+'search offers') echo '[{"id":42,"gpu_name":"T4","num_gpus":1,"dph_total":0.1}]';;
+'create instance') echo '{"success":true,"new_contract":123}';;
+'show instances') touch "$HOME/polling"; echo '[{"id":123,"actual_status":"loading"}]';;
+*) exit 97;;
+esac
+"#,
+        );
+        let mut child = s
+            .command(&[
+                "up",
+                "--gpu",
+                "T4",
+                "--no-repo",
+                "--mode",
+                "container",
+                "--expire",
+                "2h",
+                "--yes",
+                "--json",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let until = Instant::now() + Duration::from_secs(10);
+        while !s.home.join("polling").exists() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if !s.home.join("polling").exists() {
+            let _ = child.kill();
+            panic!("did not reach post-create polling");
+        }
+        rustix::process::kill_process(
+            rustix::process::Pid::from_raw(child.id() as i32).unwrap(),
+            signal,
+        )
+        .unwrap();
+        let output = child.wait_with_output().unwrap();
+        let code = 128 + signal.as_raw();
+        assert_eq!(output.status.code(), Some(code));
+        let object = pyjson::loads(&String::from_utf8(output.stdout).unwrap()).unwrap();
+        assert_eq!(object.get("command"), Some(&Value::str("up")));
+        assert_eq!(
+            object.get("result").unwrap().get("id"),
+            Some(&Value::str("123"))
+        );
+        assert_eq!(
+            object.get("result").unwrap().get("created"),
+            Some(&Value::Bool(true))
+        );
+        assert_eq!(
+            object.get("error").unwrap().get("code"),
+            Some(&Value::str("interrupted"))
+        );
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.contains("Instance 123 keeps running"));
+    }
+}
+
 fn ready() -> Sandbox {
     let s = Sandbox::new();
     s.stub("vastai", "#!/bin/sh\nprintf '%s\\n' '[{\"id\":123,\"actual_status\":\"running\",\"ssh_host\":\"ssh1.vast.ai\",\"ssh_port\":22}]'\n");

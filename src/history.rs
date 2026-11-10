@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use crate::ctx::Env;
-use crate::error::{os_error, Result};
+use crate::error::Result;
 use crate::pyjson::{self, Dict, Value};
 
 pub fn history_path(env: &Env) -> PathBuf {
@@ -35,22 +35,34 @@ pub fn recent_picks(env: &Env, step: &str) -> Vec<String> {
 }
 
 pub fn record_picks(env: &Env, picks: &[(&str, &str)]) -> Result<()> {
-    let mut history = load_history(env);
-    for (step, value) in picks {
-        let mut entries = match history.get(step) {
-            Some(Value::List(items)) => items.clone(),
-            _ => Vec::new(),
-        };
-        entries.insert(0, Value::str(*value));
-        entries.truncate(100);
-        history.insert(*step, Value::List(entries));
-    }
     let path = history_path(env);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| os_error(&e, parent))?;
+    crate::atomic_file::update(&path, |original| {
+        let mut history = match pyjson::loads(&String::from_utf8_lossy(original)) {
+            Ok(Value::Dict(history)) => history,
+            _ => Dict::new(),
+        };
+        for (step, value) in picks {
+            let mut entries = match history.get(step) {
+                Some(Value::List(items)) => items.clone(),
+                _ => Vec::new(),
+            };
+            entries.insert(0, Value::str(*value));
+            entries.truncate(100);
+            history.insert(*step, Value::List(entries));
+        }
+        let text = pyjson::dumps(&Value::Dict(history), Some(2)) + "\n";
+        Ok(text.into_bytes())
+    })
+}
+
+/// Picker convenience must never turn a successful paid operation into failure.
+pub fn record_picks_best_effort(ctx: &crate::ctx::Ctx, picks: &[(&str, &str)]) {
+    if let Err(error) = record_picks(&ctx.env, picks) {
+        let _ = ctx.eprintln(&format!(
+            "Warning: could not save pick history: {}",
+            crate::redact::redact_text(error.text())
+        ));
     }
-    let text = pyjson::dumps(&Value::Dict(history), Some(2)) + "\n";
-    std::fs::write(&path, text).map_err(|e| os_error(&e, &path))
 }
 
 /// Options picked before, ranked by recency-weighted frequency

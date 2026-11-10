@@ -18,6 +18,7 @@ entry=$tool; for arg in "$@"; do entry="$entry	$arg"; done
 printf '%s\n' "$entry" >> "$FAKE_CLI_LOG"
 sleep "${FAKE_CLI_DELAY:-0.3}"
 case "$tool $1 $2" in
+    "gh api user") echo 'minoya1220' ;;
     "gh repo list")
         echo '[{"name": "gpu-kernels"}, {"name": "other-repo"}]'
         ;;
@@ -78,6 +79,10 @@ impl Sandbox {
         for tool in ["gh", "vastai"] {
             sandbox.stub(tool, FAKE_CLI);
         }
+        sandbox.stub(
+            "git",
+            "#!/bin/sh\n[ \"$1\" = config ] && exit 1\nexec /usr/bin/git \"$@\"\n",
+        );
         for tool in [
             "ssh", "scp", "rsync", "cursor", "code", "zed", "curl", "gcloud",
         ] {

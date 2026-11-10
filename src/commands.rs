@@ -7,7 +7,7 @@ use crate::ctx::Ctx;
 use crate::editors::{check_editor, editor_label, editor_screen, launch_editor, EDITORS};
 use crate::error::{Error, Result};
 use crate::expiry::{expiry_summary, manage_expiry};
-use crate::history::{recent_picks, record_picks};
+use crate::history::{recent_picks, record_picks_best_effort as record_picks};
 use crate::instances::{repo_name, select_instance};
 use crate::offers::offer_dicts;
 use crate::picker::pick;
@@ -54,17 +54,9 @@ pub fn last_editor(env: &crate::ctx::Env) -> Option<String> {
         .find(|e| EDITORS.iter().any(|(key, _)| key == e))
 }
 
-/// `vastai show instances --raw`, split so callers can tell a CLI failure
-/// (Python's RuntimeError/OSError) from a malformed reply.
-fn poll_instances(ctx: &Ctx, timeout: f64) -> std::result::Result<Vec<Dict>, (bool, Error)> {
-    let raw = run(
-        ctx,
-        &["vastai", "show", "instances", "--raw"],
-        Some(timeout),
-    )
-    .map_err(|e| (true, e))?;
-    let value = crate::vast::parse_reply(&raw).map_err(|e| (false, e))?;
-    offer_dicts(value).map_err(|e| (false, e))
+/// Bounded provider read with typed retryability.
+fn poll_instances(ctx: &Ctx, timeout: f64) -> Result<Vec<Dict>> {
+    list_instances(ctx, Some(timeout.min(15.0)))
 }
 
 /// Verify provider state, not just acceptance of a lifecycle request.
@@ -85,13 +77,12 @@ pub fn wait_for_lifecycle(ctx: &Ctx, instance_id: &str, action: &str, timeout: f
         }
         let live = match poll_instances(ctx, remaining) {
             Ok(live) => live,
-            Err((true, err)) => {
-                return Err(Error::msg(format!(
-                    "Instance {instance_id}: {action} could not be verified: {}",
-                    err.text()
-                )))
+            Err(err) if err.retryable() => {
+                ctx.clock
+                    .sleep((deadline - ctx.clock.monotonic()).clamp(0.0, 2.0));
+                continue;
             }
-            Err((false, err)) => return Err(err),
+            Err(err) => return Err(err),
         };
         let instance = find_instance(&live, instance_id);
         if action == "destroy" && instance.is_none() {
@@ -146,10 +137,13 @@ pub(crate) fn wait_for_ssh_with_hint(
         }
         let live = match poll_instances(ctx, remaining) {
             Ok(live) => live,
-            Err((true, err)) if err.text().contains("Timed out") => {
-                return Err(timed_out("provider inventory request timed out"))
+            Err(err) if err.retryable() => {
+                reason = err.text().into();
+                ctx.clock
+                    .sleep((deadline - ctx.clock.monotonic()).clamp(0.0, 3.0));
+                continue;
             }
-            Err((_, err)) => return Err(err),
+            Err(err) => return Err(err),
         };
         let instance =
             find_instance(&live, instance_id).ok_or_else(|| Error::not_found(instance_id))?;
@@ -249,7 +243,7 @@ pub fn edit_instance(
         None
     };
     launch_editor(ctx, &editor, &alias, &directory, nvim_config.as_deref())?;
-    record_picks(&ctx.env, &[("editor", &editor)])?;
+    record_picks(ctx, &[("editor", &editor)]);
     ctx.println(&format!(
         "Opened {} at {directory} on {alias}.",
         editor_label(&editor).unwrap_or(&editor)

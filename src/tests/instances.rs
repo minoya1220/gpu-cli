@@ -4,7 +4,6 @@
 use std::sync::{Arc, Mutex};
 
 use crate::commands::edit_instance;
-use crate::config::defaults;
 use crate::instances::{instance_label, repo_name};
 use crate::launch::{launch, UpArgs};
 use crate::picker::testing::*;
@@ -14,6 +13,7 @@ use crate::pyfmt::py_str;
 use crate::pyjson::{self, Dict, Value};
 use crate::repos::Repo;
 use crate::ssh_config::{remove_host, update_host};
+use crate::testing::fixture_config as defaults;
 use crate::testing::*;
 
 pub const INSTANCES: &str = r#"[
@@ -67,6 +67,14 @@ pub fn ssh_ready(cmd: &Cmd) -> Result<Output, RunError> {
     match strs(&cmd.argv)[..] {
         ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", _, "true"] => {
             Ok(Output::status(0))
+        }
+        ["ssh", ..]
+            if cmd
+                .argv
+                .last()
+                .is_some_and(|s| s.starts_with("cat /workspace/.gpu-setup")) =>
+        {
+            ok("")
         }
         ["cursor" | "code" | "zed", ..] => Ok(Output::status(0)),
         _ => panic!("unexpected command: {:?}", cmd.argv),
@@ -276,7 +284,7 @@ fn test_managed_ssh_config_with_crlf_replaces_stale_alias() {
         "Host vast-12\r\n  HostName old.example\r\n  Port 1\r\nHost vast-34\r\n  HostName ssh7.vast.ai\r\n  Port 2222\r\n",
     )
     .unwrap();
-    let entry = "Host vast-12\n  HostName ssh6.vast.ai\n  Port 12345\n  User root\n  IdentityFile ~/.ssh/id_ed25519\n  StrictHostKeyChecking accept-new\n";
+    let entry = "Host vast-12\n  HostName ssh6.vast.ai\n  Port 12345\n  User root\n  IdentityFile ~/.ssh/id_ed25519\n  StrictHostKeyChecking accept-new\n  ServerAliveInterval 15\n  ServerAliveCountMax 4\n";
     assert_eq!(update_host(&env, &instances()[0]).unwrap(), "vast-12");
     assert_eq!(
         read(&managed),

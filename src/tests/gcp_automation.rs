@@ -1,6 +1,60 @@
 use super::*;
 use crate::process::Runner;
 
+#[test]
+fn transient_describe_and_lifecycle_inventory_replies_are_retried() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    for action in ["wait", "stop", "down"] {
+        let (_env, ctx, native, state) = fixture();
+        state.lock().unwrap().nodes.push(node(false));
+        let count = Arc::new(AtomicUsize::new(0));
+        let seen = count.clone();
+        let relay = native.clone();
+        let runner = FakeRunner::new(move |cmd| {
+            let read = (action == "wait" && cmd.argv.iter().any(|a| a == "describe"))
+                || (action != "wait" && cmd.argv.iter().any(|a| a == "list"));
+            if cmd.program() == "gcloud"
+                && read
+                && seen.fetch_add(1, Ordering::SeqCst) == if action == "wait" { 0 } else { 1 }
+            {
+                return ok("<html>502</html>");
+            }
+            relay.run(cmd)
+        });
+        let ctx = ctx.with_runner(runner);
+        let mut args = vec![action, ID, "--json"];
+        if action == "down" {
+            args.push("--yes");
+        }
+        assert_eq!(main(&ctx, &args), 0, "{}", out(&ctx));
+        assert!(count.load(Ordering::SeqCst) >= 2);
+    }
+}
+
+#[test]
+fn enveloped_mixed_listing_retains_reachable_instances_on_provider_failure() {
+    let (_env, ctx, native, state) = fixture();
+    state.lock().unwrap().nodes.push(node(false));
+    let relay = native.clone();
+    let runner = FakeRunner::new(move |cmd| {
+        if cmd.program() == "vastai" {
+            return Ok(Output::failed(1, "Connection reset by peer"));
+        }
+        relay.run(cmd)
+    });
+    let ctx = ctx.with_runner(runner);
+    assert_eq!(main(&ctx, &["ls", "--json", "--envelope"]), 1);
+    let reply = dict(&out(&ctx));
+    let result = reply.get("result").unwrap();
+    assert_eq!(result.get("complete"), Some(&Value::Bool(false)));
+    assert_eq!(result.get("instances").unwrap().as_list().unwrap().len(), 1);
+    assert_eq!(
+        reply.get("error").unwrap().get("code"),
+        Some(&Value::str("provider_unavailable"))
+    );
+    assert!(err(&ctx).is_empty());
+}
+
 fn result(ctx: &Ctx, args: &[&str]) -> Dict {
     let mut args = args.to_vec();
     args.insert(0, "--json");

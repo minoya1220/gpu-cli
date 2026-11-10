@@ -32,24 +32,11 @@ fn main() {
                         let _ = rustix::io::write(rustix::stdio::stderr(), message.as_bytes());
                         continue;
                     }
-                } else if signal != SIGINT {
-                    std::process::exit(128 + signal);
                 }
+                gpu::process::forward_signal(signal);
                 gpu::picker::term::restore_terminal();
-                if handler_ctx.cooperative() {
-                    // Third press is an emergency exit, not a completed JSON
-                    // command. Never inject prose into run's stdout log/JSON.
-                    let _ = rustix::io::write(rustix::stdio::stderr(), b"\nCancelled.\n");
-                } else {
-                    let _ = rustix::io::write(rustix::stdio::stdout(), b"\nCancelled.\n");
-                }
-                if let Some(notice) = handler_ctx.interrupt_notice() {
-                    let _ = rustix::io::write(
-                        rustix::stdio::stderr(),
-                        format!("{notice}\n").as_bytes(),
-                    );
-                }
-                std::process::exit(130);
+                handler_ctx.report_interrupt(128 + signal);
+                std::process::exit(128 + signal);
             }
         });
     }

@@ -4,7 +4,6 @@ use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use crate::gcp::{self, TpuId};
 use crate::pyjson::{Dict, Value};
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 
 fn ssh_args(id: &TpuId) -> Vec<String> {
     let mut args = id.args("ssh");
@@ -105,6 +104,7 @@ pub fn stanza(id: &TpuId, command: &str) -> Result<String> {
     for line in lines {
         result.push_str(&line);
     }
+    result.push_str("  ServerAliveInterval 15\n  ServerAliveCountMax 4\n");
     Ok(result)
 }
 
@@ -125,29 +125,32 @@ fn without(content: &str, id: &TpuId) -> String {
 }
 fn save(ctx: &Ctx, id: &TpuId, stanza: &str) -> Result<()> {
     let dir = ctx.env.home().join(".ssh");
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&dir)?;
     let config = dir.join("config");
-    let old = if config.exists() {
-        std::fs::read_to_string(&config)?
-    } else {
-        String::new()
-    };
     let include = "Include ~/.ssh/gpu_gcp_config";
-    if !old.lines().any(|l| l.trim().eq_ignore_ascii_case(include)) {
-        std::fs::write(&config, format!("{include}\n{old}"))?;
-        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))?;
-    }
+    crate::atomic_file::update(&config, |original| {
+        let old = String::from_utf8_lossy(original);
+        if old.lines().any(|l| l.trim().eq_ignore_ascii_case(include)) {
+            Ok(original.to_vec())
+        } else {
+            Ok(format!("{include}\n{old}").into_bytes())
+        }
+    })?;
     let path = dir.join("gpu_gcp_config");
-    let old = if path.exists() {
-        std::fs::read_to_string(&path)?
-    } else {
-        String::new()
-    };
-    std::fs::write(&path, format!("{}{stanza}", without(&old, id)))?;
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    crate::atomic_file::update(&path, |original| {
+        let old = String::from_utf8_lossy(original);
+        let wanted = format!("Host {}", alias(id));
+        let block = old
+            .split_inclusive('\n')
+            .skip_while(|line| line.trim_end() != wanted)
+            .enumerate()
+            .take_while(|(n, line)| *n == 0 || !line.starts_with("Host "))
+            .map(|(_, line)| line)
+            .collect::<String>();
+        if block == stanza {
+            return Ok(original.to_vec());
+        }
+        Ok(format!("{}{stanza}", without(&old, id)).into_bytes())
+    })?;
     Ok(())
 }
 pub fn has(ctx: &Ctx, id: &TpuId) -> Result<bool> {
@@ -162,10 +165,12 @@ pub fn has(ctx: &Ctx, id: &TpuId) -> Result<bool> {
 }
 pub fn remove(ctx: &Ctx, id: &TpuId) -> Result<()> {
     let path = ctx.env.home().join(".ssh/gpu_gcp_config");
-    if path.exists() {
-        std::fs::write(&path, without(&std::fs::read_to_string(&path)?, id))?;
+    if !path.exists() {
+        return Ok(());
     }
-    Ok(())
+    crate::atomic_file::update(&path, |original| {
+        Ok(without(&String::from_utf8_lossy(original), id).into_bytes())
+    })
 }
 
 fn probe(ctx: &Ctx, args: &[String], next: &str, timeout: f64) -> Result<bool> {
@@ -206,31 +211,30 @@ pub fn ready_alias(ctx: &Ctx, id: &TpuId, timeout: f64) -> Result<String> {
         crate::pyfmt::general(timeout)
     );
     wait_for_ssh(ctx, id, &next, timeout)?;
-    let remaining = timeout - (ctx.clock.monotonic() - start);
-    if remaining <= 0.0 {
-        return Err(Error::status(
-            crate::error::ExitCode::WaitTimeout,
-            format!(
-                "Timed out resolving SSH for {}. Next: gpu wait {} --timeout 120",
-                id.cli(),
-                id.cli()
-            ),
-        ));
-    }
     let mut dry = ssh_args(id);
     dry.push("--dry-run".into());
-    let command = gcp::run_timeout(ctx, &dry, &next, remaining.min(15.0)).map_err(|e| {
-        if e.text().contains("timed out") {
-            Error::status(
+    loop {
+        let remaining = timeout - (ctx.clock.monotonic() - start);
+        if remaining <= 0.0 {
+            return Err(Error::status(
                 crate::error::ExitCode::WaitTimeout,
-                format!("SSH alias resolution timed out. Next: {next}"),
-            )
-        } else {
-            e
+                format!("Timed out resolving SSH for {}. Next: {next}", id.cli()),
+            ));
         }
-    })?;
-    save(ctx, id, &stanza(id, &command)?)?;
-    Ok(alias(id))
+        match gcp::run_timeout(ctx, &dry, &next, remaining.min(15.0))
+            .and_then(|command| stanza(id, &command))
+        {
+            Ok(stanza) => {
+                save(ctx, id, &stanza)?;
+                return Ok(alias(id));
+            }
+            Err(error) if error.retryable() => {
+                ctx.clock
+                    .sleep((timeout - (ctx.clock.monotonic() - start)).clamp(0.0, 2.0));
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 /// Use the same bounded readiness/SSH wait as Vast, without changing node
@@ -260,16 +264,23 @@ fn wait_for_ssh(ctx: &Ctx, id: &TpuId, next: &str, timeout: f64) -> Result<Dict>
             return Err(timed_out(&reason));
         }
         let node = gcp::json_timeout(ctx, id.args("describe"), next, remaining.min(15.0))
-            .map_err(|e| {
-                if e.text().contains("timed out") {
-                    timed_out("provider describe request timed out")
-                } else {
-                    e
-                }
-            })?
-            .as_dict()
-            .cloned()
-            .ok_or_else(gcp::bad_reply)?;
+            .and_then(|value| value.as_dict().cloned().ok_or_else(gcp::bad_reply));
+        let node = match node {
+            Ok(node) if gcp::text(&node, "state").is_some() => node,
+            Ok(_) => {
+                reason = gcp::bad_reply().text().into();
+                ctx.clock
+                    .sleep((end - ctx.clock.monotonic()).clamp(0.0, 2.0));
+                continue;
+            }
+            Err(error) if error.retryable() => {
+                reason = error.text().into();
+                ctx.clock
+                    .sleep((end - ctx.clock.monotonic()).clamp(0.0, 2.0));
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         let state = gcp::text(&node, "state").ok_or_else(gcp::bad_reply)?;
         if ![
             "READY",
@@ -286,7 +297,10 @@ fn wait_for_ssh(ctx: &Ctx, id: &TpuId, next: &str, timeout: f64) -> Result<Dict>
         ]
         .contains(&state)
         {
-            return Err(gcp::bad_reply());
+            reason = gcp::bad_reply().text().into();
+            ctx.clock
+                .sleep((end - ctx.clock.monotonic()).clamp(0.0, 2.0));
+            continue;
         }
         if state != previous {
             ctx.progress(&format!("TPU {}: {state}", id.cli()))?;
@@ -306,7 +320,12 @@ fn wait_for_ssh(ctx: &Ctx, id: &TpuId, next: &str, timeout: f64) -> Result<Dict>
                 if remaining <= 0.0 {
                     return Err(timed_out(&reason));
                 }
-                if probe(ctx, &ssh, next, remaining.min(15.0))? {
+                let answering = match probe(ctx, &ssh, next, remaining.min(15.0)) {
+                    Ok(answering) => answering,
+                    Err(error) if error.retryable() => false,
+                    Err(error) => return Err(error),
+                };
+                if answering {
                     return Ok(node);
                 }
                 reason = "TPU is READY but SSH is not answering".into();
@@ -392,7 +411,7 @@ pub fn edit(
         None
     };
     crate::editors::launch_editor(ctx, &editor, &alias(id), directory, nvim.as_deref())?;
-    crate::history::record_picks(&ctx.env, &[("editor", &editor)])?;
+    crate::history::record_picks_best_effort(ctx, &[("editor", &editor)]);
     ctx.println(&format!(
         "Opened {} at {directory} on {}.",
         crate::editors::editor_label(&editor).unwrap_or(&editor),

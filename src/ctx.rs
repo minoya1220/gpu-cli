@@ -294,9 +294,11 @@ pub struct Ctx {
     pub console: Arc<Console>,
     pub ui: Arc<Ui>,
     output: Arc<Mutex<crate::output::CommandOutput>>,
+    pub(crate) emission: Arc<Mutex<()>>,
     interrupt_notice: Arc<Mutex<Option<String>>>,
     cooperative: Arc<AtomicBool>,
     interrupts: Arc<AtomicUsize>,
+    secrets: Arc<Mutex<Vec<String>>>,
 }
 
 impl Ctx {
@@ -315,9 +317,11 @@ impl Ctx {
             console: Arc::new(Console::real()),
             ui: Arc::new(Ui::Terminal),
             output: Arc::default(),
+            emission: Arc::default(),
             interrupt_notice: Arc::default(),
             cooperative: Arc::default(),
             interrupts: Arc::default(),
+            secrets: Arc::default(),
         }
     }
 
@@ -340,21 +344,85 @@ impl Ctx {
             gcp_catalog_lock: Arc::default(),
             gcp_sku_refreshed: Arc::default(),
             output: Arc::default(),
+            emission: Arc::default(),
             interrupt_notice: Arc::default(),
             cooperative: Arc::default(),
             interrupts: Arc::default(),
+            secrets: Arc::default(),
         }
     }
 
     /// Fresh output state for one invocation, shared by its worker Jobs.
     pub(crate) fn for_command(&self, json: bool) -> Self {
-        Self {
-            output: Arc::new(Mutex::new(crate::output::CommandOutput {
-                json,
-                ..Default::default()
-            })),
-            ..self.clone()
+        // The signal handler holds the original Ctx: keep this state shared.
+        *self.output.lock().unwrap_or_else(|p| p.into_inner()) = crate::output::CommandOutput {
+            json,
+            ..Default::default()
+        };
+        self.clone()
+    }
+
+    pub(crate) fn output_written(&self) -> bool {
+        self.output
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .written
+    }
+
+    pub(crate) fn mark_output_written(&self) {
+        self.output
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .written = true;
+    }
+
+    pub(crate) fn set_command(&self, command: &str) {
+        self.output
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .command = command.into();
+    }
+
+    pub fn report_interrupt(&self, code: i32) {
+        if self.json() {
+            let command = self
+                .output
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .command
+                .clone();
+            let _ = crate::output::finish(self, &command, &Err(Error::Interrupted(code)));
+        } else if self.cooperative() {
+            let _ = self.eprintln("Cancelled.");
+        } else {
+            let _ = self.console.println("Cancelled.");
         }
+        if let Some(notice) = self.interrupt_notice() {
+            let _ = self.eprintln(&notice);
+        }
+    }
+
+    pub(crate) fn protect_secret(&self, value: &str) {
+        if !value.is_empty() {
+            self.secrets
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(value.into());
+        }
+    }
+
+    pub(crate) fn safe_diagnostic(&self, text: &str) -> String {
+        let mut text = text.to_string();
+        let mut secrets = self
+            .secrets
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        secrets.sort_by_key(|s| std::cmp::Reverse(s.len()));
+        for secret in secrets {
+            text = text.replace(&secret, "REDACTED");
+        }
+        crate::redact::redact_text(&text)
     }
 
     pub fn json(&self) -> bool {
@@ -413,6 +481,20 @@ impl Ctx {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .clone()
+    }
+
+    pub(crate) fn set_command_timeout(&self, seconds: Option<f64>) {
+        self.output
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .command_timeout = seconds;
+    }
+
+    pub(crate) fn command_timeout(&self) -> Option<f64> {
+        self.output
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .command_timeout
     }
 
     pub(crate) fn set_ssh_timeout(&self, seconds: f64) {

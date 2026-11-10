@@ -69,7 +69,11 @@ impl Vast {
     /// `{"error": true, "status_code": N, "msg": ...}` to stderr and exiting
     /// 0 with no stdout; that becomes a `{"success": false, "msg": ...}` reply.
     pub fn create(&self, request: &[Value]) -> Result<Option<Dict>> {
-        let output = run_output(&self.ctx, &argv(request)?, None)?;
+        let output = run_output(&self.ctx, &argv(request)?, Some(120.0)).map_err(|error| {
+            if matches!(error, Error::Timeout(_)) {
+                Error::Timeout("Vast create timed out; completion unverified. An instance may be billing. Check: gpu ls before retrying.".into())
+            } else { error }
+        })?;
         let stdout = output.stdout.trim();
         if !stdout.is_empty() {
             return Ok(match pyjson::loads(stdout) {
@@ -198,14 +202,29 @@ pub fn list_instances(ctx: &Ctx, timeout: Option<f64>) -> Result<Vec<Dict>> {
         &["vastai", "show", "instances", "--raw"],
         timeout,
     )?)?;
-    crate::offers::offer_dicts(value)
+    let unreadable = || {
+        Error::ProviderUnavailable(
+            "Vast returned an unreadable instance list. Retry: gpu ls".into(),
+        )
+    };
+    if !matches!(value, Value::List(_)) {
+        return Err(unreadable());
+    }
+    let instances = crate::offers::offer_dicts(value).map_err(|_| unreadable())?;
+    if instances.iter().any(|item| {
+        item.get("id")
+            .is_none_or(|id| !crate::pyfmt::is_digits(&py_str(id)))
+    }) {
+        return Err(unreadable());
+    }
+    Ok(instances)
 }
 
 /// Decode provider data without exposing raw output or decoder diagnostics.
 pub(crate) fn parse_reply(output: &str) -> Result<Value> {
     let value = pyjson::loads(output).map_err(|_| {
         crate::provider_errors::vast(output).unwrap_or_else(|| {
-            Error::msg("Vast returned no readable data. Log in with: vastai set api-key <api-key>")
+            Error::ProviderUnavailable("Vast returned no readable data; the provider may be temporarily unavailable. Retry: gpu ls".into())
         })
     })?;
     if let Some(dict) = value.as_dict() {
@@ -217,6 +236,9 @@ pub(crate) fn parse_reply(output: &str) -> Result<Value> {
                     }
                 }
             }
+            return Err(Error::ProviderUnavailable(
+                "Vast returned an unsuccessful reply. Retry: gpu ls".into(),
+            ));
         }
     }
     Ok(value)
@@ -235,7 +257,7 @@ mod tests {
     use crate::testing::{self, FakeRunner, TestEnv};
 
     #[test]
-    fn unreadable_instances_reply_has_login_hint_without_raw_output() {
+    fn unreadable_instances_reply_has_retry_hint_without_raw_output() {
         for output in ["", "Please log in: secret-token", "{broken secret-token"] {
             let env = TestEnv::new();
             let runner = FakeRunner::new(move |cmd| {
@@ -244,7 +266,7 @@ mod tests {
             });
             let ctx = env.ctx().runner(&runner).build();
             let expected =
-                "Vast returned no readable data. Log in with: vastai set api-key <api-key>";
+                "Vast returned no readable data; the provider may be temporarily unavailable. Retry: gpu ls";
             assert_eq!(list_instances(&ctx, None).unwrap_err().text(), expected);
             for json in [false, true] {
                 assert_eq!(

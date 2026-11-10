@@ -1,6 +1,7 @@
 //! `gpu`: launch Vast.ai GPU and Google Cloud TPU workspaces through
 //! authenticated provider CLIs. External work always crosses the Runner seam.
 
+mod atomic_file;
 pub mod cli;
 pub mod commands;
 pub mod config;
@@ -71,14 +72,16 @@ pub fn main_with(argv: &[String], ctx: &Ctx) -> i32 {
             text,
             to_stdout,
         } => {
-            if !to_stdout
-                && argv
-                    .iter()
-                    .take_while(|a| a.as_str() != "--")
-                    .any(|a| a == "--json")
-            {
-                let error = Err(Error::Usage(text));
-                let _ = output::finish(ctx, "parse", &error);
+            if !to_stdout && cli::wants_json(argv) {
+                let command = cli::parsed_command_name(argv);
+                let error = Err(Error::Usage(
+                    text.lines().next().unwrap_or("Invalid arguments").into(),
+                ));
+                let ctx = ctx.for_command(true);
+                if let Some(usage) = text.lines().find(|line| line.starts_with("Usage:")) {
+                    ctx.result("usage", pyjson::Value::str(usage));
+                }
+                let _ = output::finish(&ctx, command, &error);
                 return code;
             }
             let _ = if to_stdout {
@@ -91,6 +94,7 @@ pub fn main_with(argv: &[String], ctx: &Ctx) -> i32 {
     };
     let ctx = ctx.for_command(json);
     let name = command.name();
+    ctx.set_command(name);
     let outcome = dispatch(&ctx, command);
     if json {
         if let Err(error) = output::finish(&ctx, name, &outcome) {
@@ -141,11 +145,13 @@ fn up_args(flags: cli::UpFlags) -> UpArgs {
 }
 
 fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
-    let cfg = config::load_config(&ctx.env)?;
+    let mut cfg = config::load_config(&ctx.env)?;
     if let Command::Up(flags) = &mut command {
         guardrails::defaults(flags, &cfg)?;
+        launch::validate_launch_args(&up_args(flags.clone()))?;
+        // Syntax validation does not need an inferred account name.
         if let Some(repo) = &flags.repo {
-            repos::resolve_repo(repo, &pyfmt::py_str(config::get(&cfg, "owner")?))?;
+            repos::resolve_repo(repo, "owner")?;
         }
     }
     // Validate expiry syntax before making dependency calls or creating an instance.
@@ -185,18 +191,30 @@ fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
         return Err(output::usage("Interactive SSH/editor sessions cannot use --json. Use gpu exec ID -- COMMAND for terminal-free execution."));
     }
     guardrails::nonterminal(ctx, &command, &cfg)?;
+    if let Command::Up(flags) = &command {
+        config::infer_identity(ctx, &mut cfg);
+        if let Some(repo) = &flags.repo {
+            repos::resolve_repo(repo, &pyfmt::py_str(config::get(&cfg, "owner")?))?;
+        }
+    }
     match command {
         Command::Setup(flags) => setup::run(ctx, &cfg, &flags),
         Command::Run(flags) => run::run(ctx, &flags, &cfg, &std::env::current_dir()?),
-        Command::Wait { id, timeout } => {
+        Command::Wait {
+            id,
+            timeout,
+            wait_setup,
+        } => {
             let id = provider::selected_id(ctx, &cfg, Some(&id), "wait")?.expect("explicit id");
-            remote::wait(ctx, &id, timeout).map(|_| ())
+            remote::wait_with_setup(ctx, &id, timeout, wait_setup).map(|_| ())
         }
         Command::Exec {
             id,
             command,
             timeout,
+            command_timeout,
         } => {
+            ctx.set_command_timeout(command_timeout);
             let id = provider::selected_id(ctx, &cfg, Some(&id), "exec")?.expect("explicit id");
             remote::exec(ctx, &id, &command, timeout)
         }
@@ -206,13 +224,17 @@ fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
             destination,
             recursive,
             timeout,
+            command_timeout,
         } => {
+            ctx.set_command_timeout(command_timeout);
             remote::validate_copy(&source, &destination)?;
             let id = provider::selected_id(ctx, &cfg, Some(&id), "cp")?.expect("explicit id");
             remote::copy(ctx, &id, &source, &destination, recursive, timeout)
         }
         Command::Up(flags) => {
-            let wait = flags.wait;
+            let wait = flags.wait || flags.wait_setup;
+            let wait_setup = flags.wait_setup;
+            ctx.result("setup_done", pyjson::Value::Null);
             let timeout = flags.timeout;
             if wait {
                 ctx.set_ssh_timeout(timeout);
@@ -226,7 +248,7 @@ fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
             // TPU flags imply Google Cloud; only an explicit --provider vast rejects them.
             if flags.provider.as_deref() == Some("gcp") || (flags.provider.is_none() && tpu_flags) {
                 gcp::launch(ctx, &flags, &cfg, up_deadline)?;
-                return remote::after_up(ctx, wait && !flags.dry_run, timeout);
+                return remote::after_up(ctx, wait && !flags.dry_run, timeout, wait_setup);
             }
             if tpu_flags {
                 return Err(Error::msg(
@@ -235,13 +257,14 @@ fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
             }
             let dry_run = flags.dry_run;
             launch::launch(ctx, &up_args(flags), &cfg, up_deadline)?;
-            remote::after_up(ctx, wait && !dry_run, timeout)
+            remote::after_up(ctx, wait && !dry_run, timeout, wait_setup)
         }
         Command::Ls {
             json,
             long,
             provider,
-        } => provider::ls(ctx, &cfg, json, long, provider.as_deref()),
+            envelope,
+        } => provider::ls(ctx, &cfg, json, long, provider.as_deref(), envelope),
         Command::Expire { .. } => {
             let (id, action, deadline) = expire_plan.expect("parsed above");
             ctx.result("action", pyjson::Value::str(&action));

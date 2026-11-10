@@ -246,10 +246,16 @@ fn assert_aligned(term: &Terminal, token: &str) {
     );
 }
 
+// These assertions count picker jobs, not the fresh pre-launch identity read.
+fn identity_read(call: &[String]) -> bool {
+    call.starts_with(&["gh".into(), "api".into(), "user".into()])
+}
+
 fn tools(sandbox: &Sandbox) -> Vec<String> {
     sandbox
         .calls()
         .into_iter()
+        .filter(|call| !identity_read(call))
         .map(|call| call[0].clone())
         .collect()
 }
@@ -377,7 +383,9 @@ fn test_new_repository_choices_dry_run_in_terminal() {
         }
         for call in sandbox.calls() {
             assert!(
-                call[1..3] == ["repo", "list"] || call[1..3] == ["search", "offers"],
+                identity_read(&call)
+                    || call[1..3] == ["repo", "list"]
+                    || call[1..3] == ["search", "offers"],
                 "{call:?}"
             );
         }
@@ -607,10 +615,11 @@ fn test_tpu_without_config_keeps_setup_visible_and_returns_to_gpu_choices() {
         term.wait(shows("id=100"));
         term.press("\x03");
         assert_eq!(term.exit_status(), 130);
-        assert!(sandbox
-            .calls()
-            .iter()
-            .all(|call| { call[1..3] == ["repo", "list"] || call[1..3] == ["search", "offers"] }));
+        assert!(sandbox.calls().iter().all(|call| {
+            identity_read(call)
+                || call[1..3] == ["repo", "list"]
+                || call[1..3] == ["search", "offers"]
+        }));
     }
 }
 
@@ -1621,7 +1630,7 @@ fn test_enter_submits_repository_url_and_tpu_duration_text_boxes() {
     assert!(sandbox
         .calls()
         .iter()
-        .all(|a| a[0] == "curl" || (a[0] == "gcloud" && a[1] == "auth")));
+        .all(|a| identity_read(a) || a[0] == "curl" || (a[0] == "gcloud" && a[1] == "auth")));
 }
 
 #[test]

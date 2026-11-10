@@ -80,6 +80,8 @@ fn dry_run_with_flags_prints_the_exact_request() {
     assert!(stdout.contains("\"docker.io/vastai/kvm\""));
     assert!(stdout.contains("\"no-repo\""));
     let calls = sandbox.calls();
+    assert_eq!(calls[0][..3], ["gh", "api", "user"]);
+    let calls = &calls[1..];
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0][..3], ["vastai", "search", "offers"]);
     assert!(calls[0][3].ends_with("disk_space>=130 vms_enabled=true gpu_name=Tesla_T4"));

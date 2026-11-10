@@ -64,6 +64,12 @@ pub fn selected_id(
             ctx.result("id", Value::str(id));
             return Ok(Some(id.into()));
         }
+        if !crate::setup::gcp_ready(cfg) {
+            return Err(Error::status(
+                crate::error::ExitCode::NotFound,
+                format!("No instance ID like '{id}'. Vast IDs are numeric. Next: gpu ls"),
+            ));
+        }
         ctx.require_gcloud()?;
         let settings = crate::gcp::Settings::load(cfg)?;
         let nodes = crate::gcp::all_nodes(ctx, &settings.project)?;
@@ -121,17 +127,32 @@ pub(crate) fn short_candidate(id: &str) -> bool {
     crate::gcp::component(id) && id.as_bytes()[0].is_ascii_alphabetic()
 }
 
-pub fn ls(ctx: &Ctx, cfg: &Dict, json: bool, long: bool, only: Option<&str>) -> Result<()> {
-    if only != Some("gcp") && (only == Some("vast") || !crate::setup::gcp_ready(cfg)) {
+pub fn ls(
+    ctx: &Ctx,
+    cfg: &Dict,
+    json: bool,
+    long: bool,
+    only: Option<&str>,
+    envelope: bool,
+) -> Result<()> {
+    if !envelope && only != Some("gcp") && (only == Some("vast") || !crate::setup::gcp_ready(cfg)) {
         return crate::commands::ls(ctx, json);
     }
     let (items, failed) = inventory(ctx, cfg, only)?;
     if json {
-        let value = Value::List(items.iter().cloned().map(Value::Dict).collect());
-        ctx.println(&crate::pyjson::dumps(
-            &crate::redact::redact(&value),
-            Some(1),
-        ))?;
+        let value = crate::redact::redact(&Value::List(
+            items.iter().cloned().map(Value::Dict).collect(),
+        ));
+        if envelope {
+            ctx.result("instances", value);
+            ctx.result("complete", Value::Bool(failed.is_empty()));
+            ctx.result(
+                "unavailable_providers",
+                Value::List(failed.iter().map(|(name, _)| Value::str(name)).collect()),
+            );
+        } else {
+            ctx.println(&crate::pyjson::dumps(&value, Some(1)))?;
+        }
     }
     if !json && (!items.is_empty() || failed.is_empty()) {
         crate::instances::render_table(ctx, &items, long)?;
@@ -150,6 +171,7 @@ pub fn ls(ctx: &Ctx, cfg: &Dict, json: bool, long: bool, only: Option<&str>) -> 
         );
         return Err(match &failed[0].1 {
             Error::Status(code, _) => Error::status(*code, message),
+            error if error.retryable() => Error::ProviderUnavailable(message),
             _ => Error::msg(message),
         });
     }

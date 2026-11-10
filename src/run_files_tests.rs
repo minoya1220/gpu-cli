@@ -68,7 +68,7 @@ fn git_upload_respects_ignores_edits_and_subdirectory_without_recursing_links() 
 }
 
 #[test]
-fn outside_git_excludes_builtin_trees_and_warns_about_dotenv() {
+fn outside_git_excludes_builtin_trees_without_judging_secrets() {
     let env = TestEnv::new();
     let ctx = env
         .ctx()
@@ -82,10 +82,10 @@ fn outside_git_excludes_builtin_trees_and_warns_about_dotenv() {
     fs::create_dir_all(root.join("gpu-runs")).unwrap();
     fs::write(root.join(".venv/not-sent"), "skip").unwrap();
     fs::write(root.join("gpu-runs/not-sent"), "skip").unwrap();
-    fs::write(root.join(".env.local"), "sent with warning").unwrap();
+    fs::write(root.join(".env.local"), "listed").unwrap();
     let upload = prepare(&ctx, &root, 100).unwrap();
     assert_eq!(upload.files, [Path::new(".env.local")]);
-    assert!(crate::testing::err(&ctx).contains("WARNING: uploading .env.local"));
+    assert!(!crate::testing::err(&ctx).contains("WARNING"));
 }
 
 #[test]

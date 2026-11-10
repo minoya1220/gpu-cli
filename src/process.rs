@@ -3,6 +3,7 @@
 use std::io::{Read, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -205,8 +206,68 @@ fn collect(
     })
 }
 
+/// Children given their own process group only so a timeout can kill their
+/// whole tree. A terminal signal no longer reaches them, so the signal
+/// handler forwards it with `forward_signal` before exiting.
+static TIMEOUT_GROUPS: Mutex<Vec<i32>> = Mutex::new(Vec::new());
+
+struct TimeoutGroup(Option<i32>);
+
+impl TimeoutGroup {
+    fn register(pid: Option<i32>) -> TimeoutGroup {
+        if let Some(pid) = pid {
+            TIMEOUT_GROUPS
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(pid);
+        }
+        TimeoutGroup(pid)
+    }
+}
+
+impl Drop for TimeoutGroup {
+    fn drop(&mut self) {
+        if let Some(pid) = self.0 {
+            TIMEOUT_GROUPS
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .retain(|p| *p != pid);
+        }
+    }
+}
+
+/// Deliver a terminal signal to every timeout-isolated child group.
+pub fn forward_signal(signal: i32) {
+    use rustix::process::Signal;
+    let signal = match signal {
+        signal_hook::consts::SIGINT => Signal::INT,
+        signal_hook::consts::SIGHUP => Signal::HUP,
+        _ => Signal::TERM,
+    };
+    for pid in TIMEOUT_GROUPS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+    {
+        if let Some(pid) = rustix::process::Pid::from_raw(*pid) {
+            let _ = rustix::process::kill_process_group(pid, signal);
+        }
+    }
+}
+
+fn kill(child: &mut Child, group: bool) {
+    if group {
+        if let Some(pid) = rustix::process::Pid::from_raw(child.id() as i32) {
+            let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 fn wait(
     child: &mut Child,
+    group: bool,
     deadline: Option<Instant>,
     cancellation: Option<(&std::sync::atomic::AtomicUsize, usize)>,
 ) -> std::io::Result<Option<std::process::ExitStatus>> {
@@ -222,8 +283,7 @@ fn wait(
                 count.load(std::sync::atomic::Ordering::SeqCst) >= threshold
             })
         {
-            let _ = child.kill();
-            let _ = child.wait();
+            kill(child, group);
             return Ok(None);
         }
         thread::sleep(Duration::from_millis(5));
@@ -239,7 +299,8 @@ impl RealRunner {
 
         let mut command = Command::new(cmd.program());
         command.args(&cmd.argv[1..]);
-        if cmd.process_group {
+        let group = cmd.process_group || cmd.timeout.is_some();
+        if group {
             command.process_group(0);
         }
         command.stdin(match cmd.stdin {
@@ -262,6 +323,8 @@ impl RealRunner {
             std::io::ErrorKind::NotFound => RunError::NotFound,
             _ => RunError::Os(crate::error::os_message(&err, None)),
         })?;
+        let _registered =
+            TimeoutGroup::register((group && !cmd.process_group).then(|| child.id() as i32));
         let deadline = cmd
             .timeout
             .map(|t| Instant::now() + Duration::from_secs_f64(t.max(0.0)));
@@ -274,11 +337,18 @@ impl RealRunner {
         // Read both pipes on threads so a large output cannot deadlock.
         let stdout = drain(child.stdout.take());
         let stderr = drain(child.stderr.take());
-        let status = wait(&mut child, deadline, cancellation)
+        let status = wait(&mut child, group, deadline, cancellation)
             .map_err(|e| RunError::Os(e.to_string()))?
             .ok_or(RunError::TimedOut)?;
-        let stdout = collect(stdout, deadline, cmd.normalize_newlines).ok_or(RunError::TimedOut)?;
-        let stderr = collect(stderr, deadline, cmd.normalize_newlines).ok_or(RunError::TimedOut)?;
+        let output = collect(stdout, deadline, cmd.normalize_newlines).zip(collect(
+            stderr,
+            deadline,
+            cmd.normalize_newlines,
+        ));
+        let Some((stdout, stderr)) = output else {
+            kill(&mut child, group);
+            return Err(RunError::TimedOut);
+        };
         let code = status
             .code()
             .unwrap_or_else(|| -status.signal().unwrap_or(1));
@@ -320,10 +390,12 @@ pub fn run<S: AsRef<str>>(ctx: &Ctx, argv: &[S], timeout: Option<f64>) -> Result
 
 /// `run`, keeping a successful command's full output, stderr included.
 pub fn run_output<S: AsRef<str>>(ctx: &Ctx, argv: &[S], timeout: Option<f64>) -> Result<Output> {
+    let program = argv.first().map(AsRef::as_ref).unwrap_or("");
+    let timeout = timeout.or_else(|| matches!(program, "vastai" | "gcloud" | "gh").then_some(60.0));
     let cmd = Cmd::new(argv).timeout(timeout);
     let program = cmd.program().to_string();
     match ctx.run(&cmd) {
-        Err(RunError::TimedOut) => Err(Error::msg(format!("Timed out running {program}"))),
+        Err(RunError::TimedOut) => Err(Error::Timeout(format!("Timed out running {program}"))),
         Err(RunError::NotFound) if program == "vastai" => Err(Error::status(
             crate::error::ExitCode::NotSetup,
             "Install the Vast CLI, then check authentication. Next: gpu setup --provider vast",
@@ -344,11 +416,20 @@ pub fn run_output<S: AsRef<str>>(ctx: &Ctx, argv: &[S], timeout: Option<f64>) ->
                     return Err(error);
                 }
             }
-            Err(Error::msg(if detail.is_empty() {
+            let message = if detail.is_empty() {
                 format!("Command failed: {program}")
             } else {
                 detail
-            }))
+            };
+            if program == "vastai"
+                && argv
+                    .get(1)
+                    .is_some_and(|s| matches!(s.as_ref(), "show" | "search" | "ssh-url"))
+            {
+                Err(Error::ProviderUnavailable(message))
+            } else {
+                Err(Error::msg(message))
+            }
         }
         Ok(output) => Ok(output),
     }

@@ -118,7 +118,7 @@ impl Helper {
         ])
         .timeout(Some(60.0))
     }
-    fn call(&self, ctx: &Ctx, op: &str) -> Result<Value> {
+    fn call(&self, ctx: &Ctx, op: &str) -> Result<(Value, String)> {
         for key in [
             "MODAL_TOKEN_ID",
             "MODAL_TOKEN_SECRET",
@@ -142,15 +142,21 @@ impl Helper {
             ),
             _ => Error::msg(ctx.safe_diagnostic(&error.python_text("uv"))),
         })?;
-        let diagnostic = ctx.safe_diagnostic(&output.stderr);
-        if !diagnostic.trim().is_empty() {
-            ctx.eprintln(&diagnostic)?;
-        }
+        let diagnostic = ctx.safe_diagnostic(&output.stderr).trim().to_string();
+        let failed = |message: &str| {
+            Error::msg(if diagnostic.is_empty() {
+                message.to_string()
+            } else {
+                format!("{message}\n{diagnostic}")
+            })
+        };
         // Never expose raw stdout on parse errors: it may contain credentials.
         let value = pyjson::loads(&output.stdout).map_err(|_| {
-            Error::msg(
-                "Invalid Modal helper response. Update gpu or retry gpu setup --provider modal.",
-            )
+            failed(if output.code != 0 {
+                "Modal helper failed. Retry gpu setup --provider modal."
+            } else {
+                "Invalid Modal helper response. Update gpu or retry gpu setup --provider modal."
+            })
         })?;
         if let Some(error) = value
             .as_dict()
@@ -171,16 +177,19 @@ impl Helper {
             ));
         }
         if output.code != 0 {
-            return Err(Error::msg(
+            return Err(failed(
                 "Modal helper failed. Retry gpu setup --provider modal.",
             ));
         }
-        Ok(value)
+        Ok((value, diagnostic))
     }
 }
 
 pub fn check(ctx: &Ctx) -> Result<()> {
-    let reply = Helper::new()?.call(ctx, "check")?;
+    let (reply, diagnostic) = Helper::new()?.call(ctx, "check")?;
+    if !diagnostic.is_empty() {
+        ctx.eprintln(&diagnostic)?;
+    }
     let reply = reply
         .as_dict()
         .ok_or_else(|| Error::msg("Invalid Modal readiness response."))?;
@@ -203,10 +212,13 @@ pub fn check(ctx: &Ctx) -> Result<()> {
 }
 
 #[derive(Clone)]
-pub struct Rates(Dict);
+pub struct Rates {
+    prices: Dict,
+    diagnostic: String,
+}
 impl Rates {
     fn component(&self, key: &str) -> Result<f64> {
-        let number = match self.0.get(key) {
+        let number = match self.prices.get(key) {
             Some(Value::Str(s)) => s.parse().ok(),
             Some(Value::Float(v)) => Some(*v),
             Some(Value::Int(v)) => Some(*v as f64),
@@ -232,10 +244,14 @@ impl Rates {
 }
 
 pub fn rates(ctx: &Ctx) -> Result<Rates> {
-    let value = Helper::new()?.call(ctx, "rates")?;
-    Ok(Rates(value.as_dict().cloned().ok_or_else(|| {
-        Error::msg("Invalid Modal rates response.")
-    })?))
+    let (value, diagnostic) = Helper::new()?.call(ctx, "rates")?;
+    Ok(Rates {
+        prices: value
+            .as_dict()
+            .cloned()
+            .ok_or_else(|| Error::msg("Invalid Modal rates response."))?,
+        diagnostic,
+    })
 }
 
 pub struct ModalBackend {
@@ -264,6 +280,9 @@ impl RunBackend for ModalBackend {
         )?;
         let (cpu, memory) = resources(flags)?;
         let rates = self.rates.clone().map_or_else(|| rates(ctx), Ok)?;
+        if !rates.diagnostic.is_empty() {
+            ctx.eprintln(&rates.diagnostic)?;
+        }
         let price = rates.price(name, flags.num_gpus, cpu, memory)?;
         if flags.max_price.is_some_and(|cap| price > cap) {
             return Err(Error::status(

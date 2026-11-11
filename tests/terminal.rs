@@ -1710,6 +1710,18 @@ fn test_run_without_expire_asks_for_it_in_a_terminal_then_opens_the_gpu_picker()
     }
     term.press_until(ENTER, on("GPU"));
     term.wait(shows("Consumer RTX 40 series        from $0.300/hr"));
+    for c in "modal t4".chars() {
+        term.press(&c.to_string());
+    }
+    term.wait(shows(
+        "Modal helper failed. Retry gpu setup --provider modal.",
+    ));
+    assert!(shows("Modal T4")(&term));
+    assert!(
+        !term.output_text().contains("unexpected call"),
+        "helper stderr must not be written over the picker"
+    );
+    term.press("\x03");
     term.press("\x03");
     assert_eq!(term.exit_status(), 130);
     assert!(!sandbox
@@ -1726,4 +1738,43 @@ fn test_run_without_expire_asks_for_it_in_a_terminal_then_opens_the_gpu_picker()
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr)
         .contains("gpu run requires --expire DURATION or default_expire in config.json."));
+}
+
+#[test]
+fn test_live_run_picker_lists_no_modal_rows_and_never_starts_the_modal_helper() {
+    let sandbox = Sandbox::new();
+    let mut term = Terminal::start(&sandbox, &["run", "--expire", "30m", "--", "true"]);
+    term.wait(on("GPU"));
+    term.wait(shows("Consumer RTX 40 series        from $0.300/hr"));
+    assert!(!shows("Modal")(&term));
+    term.press("\x03");
+    term.press("\x03");
+    assert_eq!(term.exit_status(), 130);
+    assert!(!sandbox.calls().iter().any(|call| call[0] == "uv"));
+}
+
+#[test]
+fn test_run_with_modal_provider_and_no_gpu_opens_a_modal_only_picker() {
+    let sandbox = Sandbox::new();
+    let mut term = Terminal::start(
+        &sandbox,
+        &[
+            "run",
+            "--provider",
+            "modal",
+            "--expire",
+            "30m",
+            "--dry-run",
+            "--",
+            "true",
+        ],
+    );
+    term.wait(|t| on("GPU")(t) && shows("Modal helper failed")(t));
+    assert!(shows("Modal T4")(&term));
+    assert!(!shows("Consumer RTX")(&term));
+    assert!(!shows("TPU")(&term));
+    term.press("\x03");
+    term.press("\x03");
+    assert_eq!(term.exit_status(), 130);
+    assert!(sandbox.calls().iter().all(|call| call[0] == "uv"));
 }

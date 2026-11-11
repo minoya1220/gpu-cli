@@ -331,19 +331,34 @@ enum Selection {
 }
 
 fn choose(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, args: &UpArgs) -> Result<Selection> {
-    let search = OfferSearch::new(Vast::new(ctx), args, cfg)?;
     if ctx.interactive() {
-        let worker = ctx.clone();
-        let (cpu, memory) = crate::modal::resources(flags)?;
-        let count = flags.num_gpus;
-        let modal_rates =
-            Job::new(move || crate::modal::rates(&worker).map_err(|e| e.text().to_string()));
+        let modal_only = flags.provider.as_deref() == Some("modal");
+        let search = if modal_only {
+            None
+        } else {
+            Some(OfferSearch::new(Vast::new(ctx), args, cfg)?)
+        };
+        let modal = if flags.dry_run && flags.provider.as_deref() != Some("vast") {
+            let worker = ctx.clone();
+            let (cpu, memory) = crate::modal::resources(flags)?;
+            let rates =
+                Job::new(move || crate::modal::rates(&worker).map_err(|e| e.text().to_string()));
+            Some((rates, flags.num_gpus, cpu, memory))
+        } else {
+            None
+        };
         let wizard = crate::wizard::LaunchWizard::new(
             &ctx.env,
             crate::wizard::WizardOptions {
                 repos: Job::new(|| Ok(Vec::new())),
-                search: Some(Arc::new(search.clone())),
-                models: crate::offers::known_gpu_models(&ctx.env),
+                search: search
+                    .clone()
+                    .map(|s| Arc::new(s) as Arc<dyn crate::wizard::Search>),
+                models: if modal_only {
+                    Vec::new()
+                } else {
+                    crate::offers::known_gpu_models(&ctx.env)
+                },
                 recent_gpus: crate::history::recent_picks(&ctx.env, "gpu"),
                 choose_offer: !flags.yes && flags.offer.is_none(),
                 owner: String::new(),
@@ -355,12 +370,7 @@ fn choose(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, args: &UpArgs) -> Result<Sele
                 tpu_catalog: None,
             },
         )
-        .with_modal((flags.provider.as_deref() != Some("vast")).then_some((
-            modal_rates.clone(),
-            count,
-            cpu,
-            memory,
-        )));
+        .with_modal(modal.clone(), modal_only);
         let picks = wizard.run(
             ctx,
             crate::wizard::Picks::new(
@@ -370,7 +380,10 @@ fn choose(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, args: &UpArgs) -> Result<Sele
             ),
         )?;
         if let Some(name) = picks.modal {
-            return Ok(Selection::Modal(name, modal_rates.result()));
+            return Ok(Selection::Modal(
+                name,
+                modal.and_then(|(rates, ..)| rates.result()),
+            ));
         }
         if picks.tpu.is_some() {
             return Err(Error::Usage("gpu run supports Vast GPUs only.".into()));
@@ -378,6 +391,7 @@ fn choose(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, args: &UpArgs) -> Result<Sele
         if let Some(offer) = picks.offer {
             return Ok(Selection::Vast(offer));
         }
+        let search = search.ok_or_else(|| Error::Usage("Modal requires --gpu MODEL.".into()))?;
         return crate::launch::select_offer(
             ctx,
             search.offers("container", picks.gpu.as_deref())?,
@@ -385,6 +399,7 @@ fn choose(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, args: &UpArgs) -> Result<Sele
         )
         .map(Selection::Vast);
     }
+    let search = OfferSearch::new(Vast::new(ctx), args, cfg)?;
     crate::launch::select_offer(ctx, search.offers("container", flags.gpu.as_deref())?, args)
         .map(Selection::Vast)
 }
@@ -564,7 +579,9 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
         .to_string_lossy()
         .to_string();
     let mut selected_flags = flags.clone();
-    let mut backend: Box<dyn RunBackend> = if flags.provider.as_deref() == Some("modal") {
+    let mut backend: Box<dyn RunBackend> = if flags.provider.as_deref() == Some("modal")
+        && (flags.gpu.is_some() || !ctx.interactive())
+    {
         Box::new(crate::modal::ModalBackend { rates: None })
     } else {
         match choose(ctx, flags, &cfg, &args)? {
@@ -577,9 +594,6 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
                 selected_flags.gpu = Some(name);
                 ctx.result("provider", Value::str("modal"));
                 crate::modal::validate(&selected_flags, seconds)?;
-                if !flags.dry_run {
-                    return Err(Error::Usage(crate::modal::NOT_LIVE.into()));
-                }
                 Box::new(crate::modal::ModalBackend { rates })
             }
         }

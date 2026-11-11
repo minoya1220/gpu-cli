@@ -104,11 +104,15 @@ honored. First use of the pinned helper needs network access to populate uv's ca
 Dry runs fetch live, workspace-specific rates; offline testing can stub `uv` on PATH.
 They never create apps, Sandboxes, volumes or secrets.
 
-The interactive **run** GPU screen also includes **Modal T4**, **Modal H100**, etc.
-with live total hourly prices; type `modal` to filter them. Selecting one chooses
-Modal rather than a Vast offer. `--provider vast` keeps only the existing choices.
-Prices load in a background job and do not block keyboard input; an unavailable
-quote is not a capacity promise and a missing rate fails planning closed.
+In a terminal, the **run --dry-run** GPU screen also includes **Modal T4**,
+**Modal H100**, etc. with live total hourly prices; type `modal` to filter them.
+Selecting one chooses Modal rather than a Vast offer. `--provider vast` and runs
+without `--dry-run` keep only the existing choices and never start the helper;
+`--provider modal` without `--gpu` lists only Modal rows. Prices load in a
+background job and do not block keyboard input; if they fail (no `uv`, no token),
+Vast rows still work and a highlighted Modal row shows a short reason, not a price.
+An unavailable quote is not a capacity promise and a missing rate fails planning
+closed.
 
 Modal accepts its own GPU names (case-insensitive, spaces become hyphens), not
 Vast consumer model aliases. Use `--num-gpus`, `--cpu` (physical cores, default 4)

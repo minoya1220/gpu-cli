@@ -138,6 +138,7 @@ struct State {
     prefetch_attached: Cell<bool>,
     preferred_mode: String,
     modal: Option<ModalPrices>,
+    modal_only: bool,
 }
 
 pub type ModalPrices = (Job<crate::modal::Rates>, i64, f64, f64);
@@ -203,6 +204,7 @@ impl LaunchWizard {
                 prices: RefCell::new(HashMap::new()),
                 prefetch_attached: Cell::new(false),
                 modal: None,
+                modal_only: false,
                 preferred_mode: crate::history::recent_picks(env, "mode")
                     .into_iter()
                     .find(|m| MODES.contains(&m.as_str()))
@@ -212,8 +214,11 @@ impl LaunchWizard {
     }
 
     /// Only the run wizard opts into Modal; up's rows and defaults stay intact.
-    pub fn with_modal(mut self, prices: Option<ModalPrices>) -> Self {
-        Rc::get_mut(&mut self.state).expect("unshared wizard").modal = prices;
+    /// `only` hides the Vast and TPU rows for an explicit `--provider modal`.
+    pub fn with_modal(mut self, prices: Option<ModalPrices>, only: bool) -> Self {
+        let state = Rc::get_mut(&mut self.state).expect("unshared wizard");
+        state.modal_only = only && prices.is_some();
+        state.modal = prices;
         self
     }
 
@@ -596,6 +601,9 @@ impl LaunchWizard {
         let options = {
             let prices = prices.clone();
             move || {
+                if opts.state.modal_only {
+                    return hardware_options(opts.modal_rows(), None);
+                }
                 let stats = prices.result().unwrap_or_default();
                 let status = prices.state();
                 let pending = Self::price_placeholder(status);
@@ -619,6 +627,9 @@ impl LaunchWizard {
         let searching = {
             let prices = prices.clone();
             move |query: &str| {
+                if search.state.modal_only {
+                    return hardware_options(search.modal_rows(), Some(query));
+                }
                 let stats = prices.result().unwrap_or_default();
                 let status = prices.state();
                 let mut rows = search
@@ -680,7 +691,7 @@ impl LaunchWizard {
         .selection_note(move |choice| {
             if matches!(choice, Choice::Modal(_)) {
                 cloud.state.modal.as_ref().map(|(job, ..)| {
-                    if job.state() == JobState::Failed { crate::redact::redact_text(&job.error()) }
+                    if job.state() == JobState::Failed { crate::redact::redact_text(&job.error()).lines().next().unwrap_or("").to_string() }
                     else { "Modal total compute: GPU + capped CPU + memory. Capacity unknown; GPU Sandboxes can be preempted.".into() }
                 }).unwrap_or_default()
             } else if matches!(choice, Choice::Tpu(_)) {

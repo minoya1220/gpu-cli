@@ -32,8 +32,14 @@ fn flags(extra: &[&str]) -> RunFlags {
         _ => panic!("invalid flags"),
     }
 }
+fn rates_of(data: &str) -> Rates {
+    Rates {
+        prices: dict(data),
+        diagnostic: String::new(),
+    }
+}
 fn fake_rates() -> Rates {
-    Rates(dict(RATES))
+    rates_of(RATES)
 }
 
 #[test]
@@ -52,9 +58,9 @@ fn gpu_validation_and_total_price() {
     assert!((fake_rates().price("T4", 2, 4.0, 16.0).unwrap() - 2.1316).abs() < 1e-9);
     for bad in ["null", "-1", "\"NaN\"", "\"inf\""] {
         let data = RATES.replace("\"0.59\"", bad);
-        assert!(Rates(dict(&data)).price("T4", 1, 4.0, 16.0).is_err());
+        assert!(rates_of(&data).price("T4", 1, 4.0, 16.0).is_err());
     }
-    assert!(Rates(dict("{}")).price("T4", 1, 4.0, 16.0).is_err());
+    assert!(rates_of("{}").price("T4", 1, 4.0, 16.0).is_err());
 }
 
 #[test]
@@ -231,7 +237,7 @@ fn modal_gpu_rows_show_live_total_and_skip_vast_offer_screen() {
             owner: String::new(),
         },
     )
-    .with_modal(Some((Job::new(|| Ok(fake_rates())), 1, 4.0, 16.0)));
+    .with_modal(Some((Job::new(|| Ok(fake_rates())), 1, 4.0, 16.0)), false);
     let picks = Picks::new(Some(crate::repos::Repo::NoRepo), Some("container"), None);
     let Next::Screen(first) = flow.next(picks) else {
         panic!("missing GPU screen");
@@ -248,4 +254,99 @@ fn modal_gpu_rows_show_live_total_and_skip_vast_offer_screen() {
     };
     assert_eq!(picks.modal.as_deref(), Some("T4"));
     assert!(picks.offer.is_none());
+}
+
+#[test]
+fn helper_stderr_is_carried_not_printed_until_the_plan_runs() {
+    use crate::testing::err;
+    let runner = FakeRunner::new(|_| {
+        Ok(Output {
+            code: 0,
+            stdout: RATES.into(),
+            stderr: "helper warning canary-value".into(),
+        })
+    });
+    let t = TestEnv::new();
+    let ctx = t.ctx().runner(&runner).build();
+    ctx.protect_secret("canary-value");
+    let fetched = rates(&ctx).unwrap();
+    assert_eq!(err(&ctx), "");
+    let deadline = ctx.clock.now() + jiff::Span::new().minutes(30);
+    ModalBackend {
+        rates: Some(fetched),
+    }
+    .plan(
+        &ctx,
+        &flags(&[]),
+        &crate::config::defaults(),
+        deadline,
+        "repo".into(),
+    )
+    .unwrap();
+    assert!(err(&ctx).contains("helper warning"));
+    assert!(!err(&ctx).contains("canary-value"));
+
+    let runner = FakeRunner::new(|_| {
+        Ok(Output {
+            code: 1,
+            stdout: String::new(),
+            stderr: "error: failed to download modal==1.6.3".into(),
+        })
+    });
+    let ctx = t.ctx().runner(&runner).build();
+    let error = rates(&ctx).err().unwrap();
+    assert_eq!(err(&ctx), "");
+    assert!(error.text().contains("failed to download modal"));
+}
+
+#[test]
+fn explicit_modal_provider_picker_lists_only_modal_rows_with_a_short_failure_reason() {
+    use crate::picker::{
+        testing::{drive, CTRL_C},
+        Job, Next, Outcome,
+    };
+    use crate::wizard::{LaunchWizard, Picks, WizardOptions};
+    let t = TestEnv::new();
+    let flow = LaunchWizard::new(
+        &t.env(),
+        WizardOptions {
+            repos: Job::new(|| Ok(Vec::new())),
+            search: None,
+            models: vec!["RTX 4090".into()],
+            recent_gpus: Vec::new(),
+            choose_offer: true,
+            tpu_setup_error: Some("not available".into()),
+            tpu_transition: None,
+            tpu_prices: None,
+            tpu_cached_prices: None,
+            tpu_types: Vec::new(),
+            tpu_catalog: None,
+            owner: String::new(),
+        },
+    )
+    .with_modal(
+        Some((
+            Job::new(|| Err("Install uv. Next: gpu setup --provider modal\ndetail".into())),
+            1,
+            4.0,
+            16.0,
+        )),
+        true,
+    );
+    let picks = Picks::new(Some(crate::repos::Repo::NoRepo), Some("container"), None);
+    let Next::Screen(first) = flow.next(picks) else {
+        panic!("missing GPU screen");
+    };
+    let outcome = drive(first, |keys| {
+        keys.wait(|s| s.title == "GPU" && s.body.iter().any(|l| l.contains("Install uv")));
+        let snapshot = keys.snapshot();
+        assert!(!snapshot.body.iter().any(|l| l.contains("detail")));
+        assert_eq!(snapshot.labels.len(), GPUS.len());
+        assert!(snapshot.labels.iter().all(|l| l.starts_with("Modal ")));
+        keys.type_text("rtx 4090");
+        keys.wait(|s| s.labels.is_empty());
+        keys.press(CTRL_C);
+        keys.press(CTRL_C);
+    });
+    assert!(matches!(outcome, Outcome::Cancelled(_)));
 }

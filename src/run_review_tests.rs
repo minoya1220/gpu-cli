@@ -284,7 +284,9 @@ fn results_download_retries_then_unpacks_without_implicit_linger() {
     let ctx = env.ctx().runner(&runner).build();
     download(
         &ctx,
-        "vast-123",
+        &VastBackend {
+            alias: "vast-123".into(),
+        },
         "/root/state",
         "/workspace/job",
         "outputs",
@@ -303,7 +305,9 @@ fn download_with(runner: &Arc<FakeRunner>, clock: &Arc<FakeClock>, env: &TestEnv
     let ctx = env.ctx().runner(runner).clock(clock).build();
     download(
         &ctx,
-        "vast-123",
+        &VastBackend {
+            alias: "vast-123".into(),
+        },
         "/root/state",
         "/workspace/job",
         "outputs",

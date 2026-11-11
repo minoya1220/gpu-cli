@@ -88,6 +88,160 @@ fn ssh(alias: &str, command: &str, timeout: f64) -> Cmd {
     .raw_output()
 }
 
+/// The shared runner owns uploads, supervision, logs and downloads. A backend
+/// owns provider planning, paid-resource lifecycle and remote command transport.
+struct RunPlan {
+    gpu: Value,
+    rate: f64,
+    // Report request errors after publishing pricing, preserving partial JSON.
+    request: Result<Value>,
+}
+
+trait RunBackend {
+    fn provider(&self) -> &'static str;
+    fn plan(
+        &self,
+        ctx: &Ctx,
+        flags: &RunFlags,
+        cfg: &Dict,
+        deadline: Timestamp,
+        label: String,
+    ) -> Result<RunPlan>;
+    /// Call `created` as soon as the ID is known, before any fallible readiness
+    /// work, so the shared runner can always clean up a partially launched host.
+    fn launch(
+        &mut self,
+        ctx: &Ctx,
+        request: &Value,
+        deadline: Timestamp,
+        timeout: f64,
+        created: &mut dyn FnMut(&str) -> Result<()>,
+    ) -> Result<String>;
+    fn remote(&self, command: &str, timeout: f64) -> Cmd;
+    fn lost(&self, ctx: &Ctx, id: &str) -> bool;
+    fn restore_expiry(&self, ctx: &Ctx, id: &str, deadline: Timestamp) -> Result<()>;
+    fn hook(&self, id: &str) -> String;
+    fn wait_for_startup(&self) -> bool;
+    fn destroy(&self, ctx: &Ctx, id: &str) -> Result<()>;
+}
+
+#[derive(Default)]
+struct VastBackend {
+    alias: String,
+}
+
+impl RunBackend for VastBackend {
+    fn provider(&self) -> &'static str {
+        "vast"
+    }
+
+    fn plan(
+        &self,
+        ctx: &Ctx,
+        flags: &RunFlags,
+        cfg: &Dict,
+        deadline: Timestamp,
+        label: String,
+    ) -> Result<RunPlan> {
+        let offer = choose(ctx, flags, cfg, &args(flags))?;
+        let rate = offer_price(&offer)?;
+        if !rate.is_finite() || rate < 0.0 {
+            return Err(Error::msg(
+                "Offer has no finite nonnegative hourly price; no instance created.",
+            ));
+        }
+        let request = vast::run_request(&offer, flags.disk, cfg, deadline, label)
+            .and_then(|request| vast::argv(&request).map(|_| Value::List(request)));
+        Ok(RunPlan {
+            gpu: offer.get("gpu_name").cloned().unwrap_or(Value::Null),
+            rate,
+            request,
+        })
+    }
+
+    fn launch(
+        &mut self,
+        ctx: &Ctx,
+        request: &Value,
+        deadline: Timestamp,
+        timeout: f64,
+        created: &mut dyn FnMut(&str) -> Result<()>,
+    ) -> Result<String> {
+        ctx.set_interrupt_notice(Some(format!(
+            "Vast may have created an instance; boot expiry is {deadline}. Check: gpu ls"
+        )));
+        ctx.result("created", Value::Null);
+        let request = request
+            .as_list()
+            .ok_or_else(|| Error::msg("Invalid Vast run request."))?;
+        let reply = Vast::new(ctx).create(request).inspect_err(|_| {
+            if let Some(notice) = ctx.interrupt_notice() {
+                let _ = ctx.eprintln(&notice);
+            }
+        })?;
+        crate::launch::created_summary(reply.as_ref()).inspect_err(|_| {
+            ctx.result("created", Value::Bool(false));
+            ctx.set_interrupt_notice(None);
+        })?;
+        let id = reply.as_ref().and_then(crate::launch::created_id).ok_or_else(|| Error::status(ExitCode::CleanupUnverified, "Create response has no instance ID; cleanup cannot be verified. Check: gpu ls, then gpu down ID --yes"))?;
+        ctx.result("id", Value::str(&id));
+        ctx.result("created", Value::Bool(true));
+        ctx.set_interrupt_notice(Some(format!("Instance {id} may still be running; it self-destroys at {deadline}. Check: gpu ls, gpu down {id} --yes")));
+        created(&id)?;
+        ctx.check_cancelled()?;
+        let remaining =
+            (deadline.as_second() - DOWNLOAD_RESERVE - ctx.clock.now().as_second()) as f64;
+        let wait_timeout = timeout.min(remaining.max(0.0));
+        let cap = if remaining < timeout {
+            let message = format!("SSH wait limited to {}s by --expire (requested --timeout {}s; 10m reserved for results). Use a longer --expire to allow more boot time.", crate::pyfmt::general(wait_timeout), crate::pyfmt::general(timeout));
+            ctx.eprintln(&message)?;
+            message + " "
+        } else {
+            String::new()
+        };
+        let hint = format!(
+            "{cap}Next: retry gpu run with a longer --expire/--timeout or another --offer."
+        );
+        let (alias, _) = crate::commands::wait_for_ssh_with_hint(ctx, &id, wait_timeout, &hint)?;
+        crate::expiry::manage_expiry(ctx, &alias, &id, "arm", Some(deadline))?;
+        self.alias = alias;
+        ctx.result("expiry_armed", Value::Bool(true));
+        Ok(id)
+    }
+
+    fn remote(&self, command: &str, timeout: f64) -> Cmd {
+        ssh(&self.alias, command, timeout)
+    }
+
+    fn lost(&self, ctx: &Ctx, id: &str) -> bool {
+        let live = vast::list_instances(ctx, Some(15.0)).ok();
+        live.as_ref().is_some_and(|live| {
+            vast::find_instance(live, id).is_none_or(|i| {
+                matches!(
+                    i.get("actual_status").and_then(Value::as_str),
+                    Some("stopped" | "exited" | "destroyed")
+                )
+            })
+        })
+    }
+
+    fn restore_expiry(&self, ctx: &Ctx, id: &str, deadline: Timestamp) -> Result<()> {
+        crate::expiry::manage_expiry(ctx, &self.alias, id, "arm", Some(deadline)).map(|_| ())
+    }
+
+    fn hook(&self, id: &str) -> String {
+        format!("#!/bin/bash\nroot=\"${{HOME:-/root}}/.local/state/gpu-expire\"\nGPU_EXPIRE_SOURCE=$(cat \"$root/runner.sh\")\nexport GPU_EXPIRE_SOURCE\nexec bash \"$root/runner.sh\" arm {id} \"$1\"\n")
+    }
+
+    fn wait_for_startup(&self) -> bool {
+        true
+    }
+
+    fn destroy(&self, ctx: &Ctx, id: &str) -> Result<()> {
+        destroy(ctx, id)
+    }
+}
+
 fn control(root: &str, token: &str, action: &str) -> String {
     format!(
         "bash {} {action} {} {}",
@@ -320,8 +474,9 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
             "container_image must be a non-empty string.".into(),
         ));
     }
+    let mut backend = VastBackend::default();
     phase(ctx, "launch");
-    ctx.result("provider", Value::str("vast"));
+    ctx.result("provider", Value::str(backend.provider()));
     ctx.result("dry_run", Value::Bool(flags.dry_run));
     ctx.result("created", Value::Bool(false));
     ctx.result("destroyed", Value::Bool(false));
@@ -360,28 +515,22 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
             Value::str(&setup)
         },
     );
-    let offer = choose(ctx, flags, &cfg, &args)?;
-    let rate = offer_price(&offer)?;
-    if !rate.is_finite() || rate < 0.0 {
-        return Err(Error::msg(
-            "Offer has no finite nonnegative hourly price; no instance created.",
-        ));
-    }
-    crate::guardrails::spending(ctx, &cfg, Some(rate), Some(deadline))?;
-    let estimate = rate * seconds as f64 / 3600.0;
-    ctx.result("estimated_spend", Value::Float(estimate));
-    ctx.result("price_per_hour", Value::Float(rate));
-    ctx.result("gpu", offer.get("gpu_name").cloned().unwrap_or(Value::Null));
     let label = upload
         .root
         .file_name()
         .unwrap_or_default()
         .to_string_lossy()
         .to_string();
-    let request = vast::run_request(&offer, flags.disk, &cfg, deadline, label)?;
-    vast::argv(&request)?;
+    let plan = backend.plan(ctx, flags, &cfg, deadline, label)?;
+    let rate = plan.rate;
+    crate::guardrails::spending(ctx, &cfg, Some(rate), Some(deadline))?;
+    let estimate = rate * seconds as f64 / 3600.0;
+    ctx.result("estimated_spend", Value::Float(estimate));
+    ctx.result("price_per_hour", Value::Float(rate));
+    ctx.result("gpu", plan.gpu);
+    let request = plan.request?;
     if flags.dry_run {
-        ctx.result("request", Value::List(request));
+        ctx.result("request", request);
         ctx.println(&format!("DRY RUN: {} files, {} bytes; setup: {}; maximum compute estimate ${}. No instance created.", upload.files.len(), upload.bytes, setup, crate::pyfmt::fixed(estimate, 3)))?;
         return Ok(());
     }
@@ -420,53 +569,26 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
         .map_err(|e| crate::error::os_error(&e, &staging.path().join("log.txt")))?;
     // Before create, Ctrl-C cancels at once: nothing has been rented yet.
     ctx.begin_run();
-    ctx.set_interrupt_notice(Some(format!(
-        "Vast may have created an instance; boot expiry is {deadline}. Check: gpu ls"
-    )));
-    ctx.result("created", Value::Null);
-    let reply = Vast::new(ctx).create(&request).inspect_err(|_| {
-        if let Some(notice) = ctx.interrupt_notice() {
-            let _ = ctx.eprintln(&notice);
-        }
-    })?;
-    crate::launch::created_summary(reply.as_ref()).inspect_err(|_| {
-        ctx.result("created", Value::Bool(false));
-        ctx.set_interrupt_notice(None);
-    })?;
-    let id = reply.as_ref().and_then(crate::launch::created_id).ok_or_else(|| Error::status(ExitCode::CleanupUnverified, "Create response has no instance ID; cleanup cannot be verified. Check: gpu ls, then gpu down ID --yes"))?;
-    ctx.result("id", Value::str(&id));
-    ctx.result("created", Value::Bool(true));
-    ctx.set_interrupt_notice(Some(format!("Instance {id} may still be running; it self-destroys at {deadline}. Check: gpu ls, gpu down {id} --yes")));
-    // Everything after create is inside this scope: even download/log/disk errors
-    // must reach destroy and provider-state verification.
-    let run_id = format!("{}-{id}", now.strftime("%Y%m%dT%H%M%SZ"));
-    let local = cwd.join("gpu-runs").join(&run_id);
+    let mut created_id = None;
+    let mut run_id = String::new();
+    let mut local = cwd.join("gpu-runs");
     let mut paths = None;
     let mut launched = false;
     let job = (|| {
-        fs::rename(staging.path(), &local).map_err(|e| crate::error::os_error(&e, &local))?;
-        ctx.result("run_id", Value::str(&run_id));
-        ctx.result(
-            "log_path",
-            Value::str(local.join("log.txt").to_string_lossy()),
-        );
-        ctx.check_cancelled()?;
-        let remaining =
-            (deadline.as_second() - DOWNLOAD_RESERVE - ctx.clock.now().as_second()) as f64;
-        let wait_timeout = flags.timeout.min(remaining.max(0.0));
-        let cap = if remaining < flags.timeout {
-            let message = format!("SSH wait limited to {}s by --expire (requested --timeout {}s; 10m reserved for results). Use a longer --expire to allow more boot time.", crate::pyfmt::general(wait_timeout), crate::pyfmt::general(flags.timeout));
-            ctx.eprintln(&message)?;
-            message + " "
-        } else {
-            String::new()
-        };
-        let hint = format!(
-            "{cap}Next: retry gpu run with a longer --expire/--timeout or another --offer."
-        );
-        let (alias, _) = crate::commands::wait_for_ssh_with_hint(ctx, &id, wait_timeout, &hint)?;
-        crate::expiry::manage_expiry(ctx, &alias, &id, "arm", Some(deadline))?;
-        ctx.result("expiry_armed", Value::Bool(true));
+        let id = backend.launch(ctx, &request, deadline, flags.timeout, &mut |id| {
+            // Record ownership before any local I/O can fail. Launch readiness
+            // failures must still reach provider-state-verified destruction.
+            created_id = Some(id.to_string());
+            run_id = format!("{}-{id}", now.strftime("%Y%m%dT%H%M%SZ"));
+            local = cwd.join("gpu-runs").join(&run_id);
+            fs::rename(staging.path(), &local).map_err(|e| crate::error::os_error(&e, &local))?;
+            ctx.result("run_id", Value::str(&run_id));
+            ctx.result(
+                "log_path",
+                Value::str(local.join("log.txt").to_string_lossy()),
+            );
+            Ok(())
+        })?;
         let target = format!("/workspace/gpu-run-{run_id}");
         let jobdir = if upload.relative.as_os_str().is_empty() {
             target.clone()
@@ -474,7 +596,7 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
             format!("{target}/{}", upload.relative.to_string_lossy())
         };
         let root = format!("/root/.local/state/gpu-run/{run_id}");
-        paths = Some((alias.clone(), root.clone(), jobdir.clone()));
+        paths = Some((root.clone(), jobdir.clone()));
         ctx.check_cancelled()?;
         phase(ctx, "upload");
         let command = format!(
@@ -486,7 +608,9 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
             (deadline.as_second() - DOWNLOAD_RESERVE - ctx.clock.now().as_second()).max(1) as f64;
         checked_transfer(
             ctx,
-            &ssh(&alias, &command, remaining).stdin(Input::File(upload.archive.path().into())),
+            &backend
+                .remote(&command, remaining)
+                .stdin(Input::File(upload.archive.path().into())),
             1,
             "Upload failed; instance will be destroyed.",
         )?;
@@ -503,10 +627,14 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
                 (deadline.as_second() - DOWNLOAD_RESERVE).to_string(),
             ),
             ("LINGER", linger.to_string()),
+            (
+                "WAIT_FOR_STARTUP",
+                if backend.wait_for_startup() { "1" } else { "0" }.into(),
+            ),
         ] {
             config.push_str(&format!("{key}={}\n", shell_quote(&value)));
         }
-        let hook = format!("#!/bin/bash\nroot=\"${{HOME:-/root}}/.local/state/gpu-expire\"\nGPU_EXPIRE_SOURCE=$(cat \"$root/runner.sh\")\nexport GPU_EXPIRE_SOURCE\nexec bash \"$root/runner.sh\" arm {id} \"$1\"\n");
+        let hook = backend.hook(&id);
         let payload = format!(
             "GPU_RUN_SOURCE={}\nGPU_RUN_CONFIG={}\nGPU_RUN_HOOK={}\n{REMOTE_SOURCE}",
             shell_quote(REMOTE_SOURCE),
@@ -521,11 +649,15 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
         launched = true;
         checked(
             ctx,
-            &ssh(&alias, &start, 30.0).stdin(Input::Text(payload)),
+            &backend.remote(&start, 30.0).stdin(Input::Text(payload)),
             "Job startup unverified; instance will be destroyed.",
         )?;
-        follow(ctx, &alias, &id, &root, &run_id, deadline, &local)
+        follow(ctx, &backend, &id, &root, &run_id, deadline, &local)
     })();
+    // A create failure without an ID cannot be cleaned up, just as before.
+    let Some(id) = created_id else {
+        return job;
+    };
     let mut outcome = job;
     let mut failure_phase = ctx
         .result_snapshot()
@@ -536,11 +668,11 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
     if ctx.interrupts() > 0 {
         outcome = Err(Error::Cancelled(130));
     }
-    if let Some((alias, root, jobdir)) = paths {
+    if let Some((root, jobdir)) = paths {
         let response = || {
             checked(
                 ctx,
-                &ssh(&alias, &control(&root, &run_id, "status"), 5.0),
+                &backend.remote(&control(&root, &run_id, "status"), 5.0),
                 "Status unavailable.",
             )
             .ok()
@@ -550,7 +682,7 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
         if outcome.is_err() && launched {
             let _ = checked(
                 ctx,
-                &ssh(&alias, &control(&root, &run_id, "stop"), 10.0),
+                &backend.remote(&control(&root, &run_id, "stop"), 10.0),
                 "Stop unverified.",
             );
             // The supervisor runs the linger hook before publishing the final
@@ -574,11 +706,11 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
         if ctx.interrupts() < 2 {
             // Fetch bytes written during cancellation/TERM grace, too.
             if let Some(status) = last.or_else(status) {
-                let _ = finish_log(ctx, &alias, &root, &local, status.size);
+                let _ = finish_log(ctx, &backend, &root, &local, status.size);
             }
             // The finished job shortened expiry to linger; an attached
             // download keeps the original deadline.
-            if crate::expiry::manage_expiry(ctx, &alias, &id, "arm", Some(deadline)).is_err() {
+            if backend.restore_expiry(ctx, &id, deadline).is_err() {
                 let _ = ctx.eprintln(&format!(
                     "Could not restore expiry to {deadline}; downloading anyway."
                 ));
@@ -586,7 +718,7 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
             phase(ctx, "download");
             let downloaded = download(
                 ctx,
-                &alias,
+                &backend,
                 &root,
                 &jobdir,
                 &flags.outputs,
@@ -609,7 +741,7 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
         }
     }
     phase(ctx, "cleanup");
-    let cleaned = destroy(ctx, &id);
+    let cleaned = backend.destroy(ctx, &id);
     if let Err(error) = cleaned {
         outcome = Err(error);
         failure_phase = Value::str("cleanup");
@@ -675,7 +807,7 @@ fn parse_status(text: &str) -> Option<Status> {
 
 fn follow(
     ctx: &Ctx,
-    alias: &str,
+    backend: &dyn RunBackend,
     id: &str,
     root: &str,
     token: &str,
@@ -698,7 +830,7 @@ fn follow(
         }
         let response = checked(
             ctx,
-            &ssh(alias, &control(root, token, "status"), 15.0),
+            &backend.remote(&control(root, token, "status"), 15.0),
             "Job status unavailable.",
         )
         .ok();
@@ -710,15 +842,7 @@ fn follow(
         }
         let status = response.and_then(|o| parse_status(&o.stdout));
         let Some(status) = status else {
-            let live = vast::list_instances(ctx, Some(15.0)).ok();
-            if live.as_ref().is_some_and(|live| {
-                vast::find_instance(live, id).is_none_or(|i| {
-                    matches!(
-                        i.get("actual_status").and_then(Value::as_str),
-                        Some("stopped" | "exited" | "destroyed")
-                    )
-                })
-            }) {
+            if backend.lost(ctx, id) {
                 return Err(Error::status(
                     ExitCode::InstanceLost,
                     "Instance stopped or vanished while the job was running.",
@@ -740,7 +864,7 @@ fn follow(
             );
             if checked(
                 ctx,
-                &ssh(alias, &command, 15.0).stdout_file(chunk.path()),
+                &backend.remote(&command, 15.0).stdout_file(chunk.path()),
                 "Log connection interrupted.",
             )
             .is_err()
@@ -783,7 +907,13 @@ fn follow(
     }
 }
 
-fn finish_log(ctx: &Ctx, alias: &str, root: &str, local: &Path, size: u64) -> Result<()> {
+fn finish_log(
+    ctx: &Ctx,
+    backend: &dyn RunBackend,
+    root: &str,
+    local: &Path,
+    size: u64,
+) -> Result<()> {
     let path = local.join("log.txt");
     let mut offset = fs::metadata(&path)?.len();
     let mut log = OpenOptions::new().append(true).open(path)?;
@@ -796,7 +926,7 @@ fn finish_log(ctx: &Ctx, alias: &str, root: &str, local: &Path, size: u64) -> Re
         );
         checked_transfer(
             ctx,
-            &ssh(alias, &command, 15.0).stdout_file(chunk.path()),
+            &backend.remote(&command, 15.0).stdout_file(chunk.path()),
             2,
             "Final log fetch interrupted.",
         )?;
@@ -823,7 +953,7 @@ const DESTROY_VERIFY_SECONDS: f64 = 60.0;
 
 fn download(
     ctx: &Ctx,
-    alias: &str,
+    backend: &dyn RunBackend,
     root: &str,
     jobdir: &str,
     outputs: &str,
@@ -848,7 +978,9 @@ fn download(
     {
         let remaining = (end - ctx.clock.monotonic()).max(0.1);
         let result = ctx.transfer(
-            &ssh(alias, &command, remaining).stdout_file(archive.path()),
+            &backend
+                .remote(&command, remaining)
+                .stdout_file(archive.path()),
             2,
         );
         let transport = matches!(result, Ok(Output { code: 255, .. }));

@@ -17,7 +17,7 @@ fn remote_run_suite() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.lines().any(|line| line == "11 passed, 0 failed"),
+        stdout.lines().any(|line| line == "12 passed, 0 failed"),
         "{stdout}"
     );
 }

@@ -121,6 +121,33 @@ fn duration(text: &str, now: Timestamp) -> Result<i64> {
         .map_err(Error::Usage)
 }
 
+fn run_duration(text: &str, now: Timestamp) -> Result<i64> {
+    let seconds = duration(text, now)?;
+    if seconds <= DOWNLOAD_RESERVE {
+        return Err(Error::Usage(
+            "gpu run needs --expire longer than 10m to reserve time for downloading results."
+                .into(),
+        ));
+    }
+    Ok(seconds)
+}
+
+fn expiry_screen(now: Timestamp) -> crate::picker::Screen<String, String> {
+    crate::picker::Screen::new(
+        "Run expiry (e.g. 30m, 2h; longer than 10m)",
+        Vec::new,
+        crate::picker::Next::Done,
+    )
+    .text_input(Some(Box::new(move |text| {
+        run_duration(text.trim(), now)
+            .map(|_| ())
+            .map_err(|e| e.text().to_string())
+    })))
+    .input_label("Expiry")
+    .submit_on_right(false)
+    .back_clears_input(false)
+}
+
 fn args(flags: &RunFlags) -> UpArgs {
     UpArgs {
         repo: Some(crate::repos::Repo::NoRepo),
@@ -192,23 +219,25 @@ pub fn run(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> {
 fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> {
     let started = ctx.clock.monotonic();
     let now = ctx.clock.now();
+    let prompted_expire;
     let expire = flags
         .expire
         .as_deref()
         .filter(|s| !s.is_empty())
-        .or_else(|| cfg.get("default_expire").and_then(Value::as_str))
-        .ok_or_else(|| {
-            Error::Usage(
+        .or_else(|| cfg.get("default_expire").and_then(Value::as_str));
+    let expire = match expire {
+        Some(expire) => expire,
+        None if ctx.interactive() => {
+            prompted_expire = crate::picker::pick(ctx, expiry_screen(now))?;
+            prompted_expire.trim()
+        }
+        None => {
+            return Err(Error::Usage(
                 "gpu run requires --expire DURATION or default_expire in config.json.".into(),
-            )
-        })?;
-    let seconds = duration(expire, now)?;
-    if seconds <= DOWNLOAD_RESERVE {
-        return Err(Error::Usage(
-            "gpu run needs --expire longer than 10m to reserve time for downloading results."
-                .into(),
-        ));
-    }
+            ));
+        }
+    };
+    let seconds = run_duration(expire, now)?;
     let deadline = Timestamp::from_second(now.as_second() + seconds)
         .map_err(|_| Error::Usage("Expiry out of range.".into()))?;
     let linger = if flags.linger == "0" {
@@ -880,4 +909,48 @@ fn destroy(ctx: &Ctx, id: &str) -> Result<()> {
     let outcome = cleanup();
     let _ = crate::ssh_config::remove_host(&ctx.env, id);
     outcome.map_err(|_| Error::status(ExitCode::CleanupUnverified, format!("Instance {id}: destruction unverified; billing may continue. Next: gpu down {id} --yes")))
+}
+
+#[cfg(test)]
+mod expiry_prompt_tests {
+    use super::*;
+    use crate::picker::{
+        testing::{drive, BACKSPACE, ENTER},
+        Outcome,
+    };
+
+    #[test]
+    fn expiry_prompt_accepts_duration() {
+        let result = drive(expiry_screen(Timestamp::now()), |keys| {
+            keys.type_text("1h30m");
+            keys.press(ENTER);
+        });
+        assert_eq!(result, Outcome::Done("1h30m".into()));
+    }
+
+    #[test]
+    fn expiry_prompt_rejects_invalid_and_short_values() {
+        let result = drive(expiry_screen(Timestamp::now()), |keys| {
+            keys.type_text("bad");
+            keys.press(ENTER);
+            keys.wait(|s| s.body.iter().any(|line| line.contains("Use a duration")));
+            keys.press(BACKSPACE);
+            keys.press(BACKSPACE);
+            keys.press(BACKSPACE);
+            keys.type_text("10m");
+            keys.press(ENTER);
+            keys.wait(|s| s.body.iter().any(|line| line.contains("longer than 10m")));
+            keys.press(BACKSPACE);
+            keys.press(BACKSPACE);
+            keys.press(BACKSPACE);
+            keys.type_text("30m");
+            keys.press(ENTER);
+        });
+        assert_eq!(result, Outcome::Done("30m".into()));
+        let now = Timestamp::now();
+        for text in ["", "bad", "5m", "10m"] {
+            assert!(run_duration(text, now).is_err());
+        }
+        assert_eq!(run_duration("11m", now).unwrap(), 660);
+    }
 }

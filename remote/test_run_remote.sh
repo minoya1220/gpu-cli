@@ -29,6 +29,9 @@ launch() {
     local dir="$TMP/work/$token" deadline=$(( $(date +%s) + 120 ))
     mkdir -p "$dir"
     GPU_RUN_CONFIG=$(printf 'JOBDIR=%q\nOUTPUTS=outputs\nSETUP=%q\nCOMMAND=%q\nDEADLINE=%s\nJOB_DEADLINE=%s\nLINGER=%s\nFORWARDED=%q\n' "$dir" "$setup" "$command" "$deadline" "$(( $(date +%s) + limit ))" "$linger" "$forwarded")
+    if [ -n "${7:-}" ]; then
+        GPU_RUN_CONFIG+=$'\n'"WAIT_FOR_STARTUP=$7"
+    fi
     GPU_RUN_HOOK=$(printf 'printf "%%s" "$1" >%q\n' "$TMP/hook-$token")
     # Feed a separate bash, just like SSH stdin; it exits immediately after start.
     { printf 'GPU_RUN_SOURCE=%q\nGPU_RUN_CONFIG=%q\nGPU_RUN_HOOK=%q\n' "$GPU_RUN_SOURCE" "$GPU_RUN_CONFIG" "$GPU_RUN_HOOK"; cat "$SOURCE"; } |
@@ -46,6 +49,14 @@ wait_done() {
 }
 
 status_of() { env GPU_RUN_LIBRARY=0 bash "$SOURCE" status "$TMP/state/$1" "$1"; }
+
+# A backend without onstart can run setup and the job without the Vast marker.
+launch nogate 'cat setup-seen; echo ran' 'echo setup >setup-seen' 60 '' 0 0
+status=$(wait_done nogate)
+check test ! -e "$HOME/.works"
+check test "$(printf '%s' "$status" | cut -f2)" = 0
+check test "$(cat "$TMP/state/nogate/log")" = $'setup\nran'
+passed=$((passed+1))
 
 # Setup waits for onstart (uv install) to finish, bounded by the job deadline.
 launch notready 'echo ran'

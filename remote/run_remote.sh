@@ -84,8 +84,9 @@ task() {
     export GPU_RUN_OUTPUTS="$JOBDIR/$OUTPUTS"
     mkdir -p "$GPU_RUN_OUTPUTS" || exit 1
     printf 'setup\n' >"$ROOT/phase"
-    # Onstart installs uv; the supervisor's job deadline bounds this wait.
-    if [ ! -e "$HOME/.works" ]; then
+    # Vast onstart installs uv; other backends can disable this readiness gate
+    # in config. Omitted config retains the original Vast behavior.
+    if [ "${WAIT_FOR_STARTUP:-1}" = 1 ] && [ ! -e "$HOME/.works" ]; then
         printf 'Waiting for instance startup to finish.\n'
         while [ ! -e "$HOME/.works" ]; do
             if [ "$(cat /workspace/.gpu-setup 2>/dev/null)" = failed ]; then

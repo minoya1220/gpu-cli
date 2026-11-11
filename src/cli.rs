@@ -295,7 +295,7 @@ pub struct RunFlags {
     /// Inspect the upload and exact create request without renting
     #[arg(long)]
     pub dry_run: bool,
-    /// Required lifetime ceiling including boot, upload and download
+    /// Lifetime ceiling including boot, upload and download (prompted in a terminal when unset)
     #[arg(long, value_name = "DURATION")]
     pub expire: Option<String>,
     /// SSH readiness timeout, not job runtime

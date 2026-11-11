@@ -1677,3 +1677,53 @@ printf 'test-token\n'
             .any(|c| c.iter().any(|a| a == "create" || a == "create-http-task")));
     }
 }
+
+#[test]
+fn test_run_without_expire_asks_for_it_in_a_terminal_then_opens_the_gpu_picker() {
+    const BACKSPACE: &str = "\x7f";
+    let sandbox = Sandbox::new();
+    let mut term = Terminal::start(&sandbox, &["run", "--dry-run", "--", "true"]);
+    term.wait(with_footer(
+        |t| t.title().starts_with("Run expiry"),
+        "\u{2190} back",
+    ));
+    for c in ["b", "a", "d"] {
+        term.press(c);
+    }
+    term.press_until(ENTER, shows("Use a duration"));
+    for _ in 0..3 {
+        term.press(BACKSPACE);
+    }
+    for c in ["1", "0", "m"] {
+        term.press(c);
+    }
+    term.press_until(ENTER, shows("reserve time for downloading results"));
+    assert!(
+        term.running(),
+        "an invalid expiry must keep the prompt open"
+    );
+    for _ in 0..3 {
+        term.press(BACKSPACE);
+    }
+    for c in ["3", "0", "m"] {
+        term.press(c);
+    }
+    term.press_until(ENTER, on("GPU"));
+    term.wait(shows("Consumer RTX 40 series        from $0.300/hr"));
+    term.press("\x03");
+    assert_eq!(term.exit_status(), 130);
+    assert!(!sandbox
+        .calls()
+        .iter()
+        .any(|call| call.iter().any(|a| a == "create")));
+
+    // Without a terminal the explicit usage error remains.
+    let out = sandbox
+        .command(&["run", "--gpu", "RTX 4090", "--dry-run", "--", "true"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr)
+        .contains("gpu run requires --expire DURATION or default_expire in config.json."));
+}

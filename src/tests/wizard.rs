@@ -457,6 +457,7 @@ fn test_back_walks_every_screen_without_refetching_or_quitting() {
         mode: Some("vm".into()),
         gpu: Some("RTX 4090".into()),
         offer: Some(offer(1, "RTX 4090", 0.5)),
+        modal: None,
         tpu: None,
         cloud: None,
     };
@@ -685,6 +686,7 @@ fn test_auto_prices_are_shared_by_gpu_screens_and_loaded_once_per_mode() {
         mode: Some("vm".into()),
         gpu: Some("RTX 4090".into()),
         offer: None,
+        modal: None,
         tpu: None,
         cloud: None,
     };

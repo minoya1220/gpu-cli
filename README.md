@@ -84,6 +84,48 @@ Job exit codes pass through (`remote_exit` in JSON). **17** `job_timeout`, **18*
 
 Build checks: [Vast's base Dockerfile](https://github.com/vast-ai/base-image/blob/main/Dockerfile) installs uv into `/usr/local/bin`; a fallback installer handles other images. The fallback installs uv **0.10.4** from architecture-specific release archives, checked against pinned SHA-256 digests; VM CUDA keyring **1.1-1** is also checksum-verified before installation. The base image's [entrypoint](https://github.com/vast-ai/base-image/blob/main/ROOT/opt/instance-tools/bin/entrypoint.sh) delegates to the default/custom boot script rather than waiting on portal ports itself; custom images must provide compatible SSH/onstart behavior. Local uv 0.10.4 experiments confirmed that system-site imports alone do **not** guarantee dependency reuse during resolution (an offline reinstall of an already-present requirement was refused). No GPU rental is used in these checks.
 
+### Modal setup and dry runs (preview)
+
+Vast remains the default. Modal planning uses a bundled Python helper with the exact
+`modal==1.6.3` client pin, launched by `uv run --quiet --script`; the `modal`
+executable is not required. Install [uv](https://docs.astral.sh/uv/getting-started/installation/),
+then authenticate and check readiness:
+
+```sh
+uvx modal@1.6.3 token new
+gpu setup --provider modal
+gpu run --provider modal --gpu T4 --expire 30m --dry-run --json -- python train.py
+```
+
+Setup makes read-only calls to validate the token and report its workspace and
+environment; it creates no Modal resources and writes no credentials. Normal Modal
+profiles, `MODAL_CONFIG_PATH`, `MODAL_PROFILE` and token environment variables are
+honored. First use of the pinned helper needs network access to populate uv's cache.
+Dry runs fetch live, workspace-specific rates; offline testing can stub `uv` on PATH.
+They never create apps, Sandboxes, volumes or secrets.
+
+The interactive **run** GPU screen also includes **Modal T4**, **Modal H100**, etc.
+with live total hourly prices; type `modal` to filter them. Selecting one chooses
+Modal rather than a Vast offer. `--provider vast` keeps only the existing choices.
+Prices load in a background job and do not block keyboard input; an unavailable
+quote is not a capacity promise and a missing rate fails planning closed.
+
+Modal accepts its own GPU names (case-insensitive, spaces become hyphens), not
+Vast consumer model aliases. Use `--num-gpus`, `--cpu` (physical cores, default 4)
+and `--memory` (GiB, default 16). The compute estimate is GPU × count + CPU +
+memory at Sandbox rates, with CPU and memory request equal to limit. `--max-price`
+and configured `max_session_spend` apply to that total. Image-build compute and
+egress are not included; this is not an invoice ceiling. No region is requested.
+`--offer`, `--disk`, `--reliability` and `--unverified` are refused. Expiry must be
+longer than 10 minutes and at most 24 hours. The planned default image is Modal's
+Debian slim with Python 3.13 (or pass `--image`). Forwarded `--env` values are
+excluded from the request and process arguments: dry-run JSON contains names only.
+
+**Live Modal runs are not yet supported** in this preview and fail with a usage
+error. Execution, downloads, verified termination and Modal `ls`/`down` recovery
+will follow separately. GPU Sandboxes can be preempted, have ephemeral storage,
+and have a maximum 24-hour lifetime; they are not persistent workspaces.
+
 ## Connect and edit
 
 ```sh

@@ -34,6 +34,7 @@ pub struct Picks {
     pub gpu: Option<String>,
     pub offer: Option<Dict>,
     pub tpu: Option<TpuChoice>,
+    pub modal: Option<String>,
     pub(crate) cloud: Option<crate::gcp_wizard::Selection>,
 }
 
@@ -45,6 +46,7 @@ impl Picks {
             gpu: gpu.map(String::from),
             offer: None,
             tpu: None,
+            modal: None,
             cloud: None,
         }
     }
@@ -60,6 +62,7 @@ pub enum Choice {
     Cloud(String),
     Mode(String),
     Gpu(String),
+    Modal(String),
     Tpu(TpuChoice),
     Category(String),
     Offer(Dict),
@@ -134,7 +137,10 @@ struct State {
     prices: RefCell<HashMap<String, Job<Stats>>>,
     prefetch_attached: Cell<bool>,
     preferred_mode: String,
+    modal: Option<ModalPrices>,
 }
+
+pub type ModalPrices = (Job<crate::modal::Rates>, i64, f64, f64);
 
 /// Builds the screens for whatever `Picks` are still missing.
 ///
@@ -196,12 +202,19 @@ impl LaunchWizard {
                     .unwrap_or_else(|| Job::new(|| Err("needs gpu setup".into()))),
                 prices: RefCell::new(HashMap::new()),
                 prefetch_attached: Cell::new(false),
+                modal: None,
                 preferred_mode: crate::history::recent_picks(env, "mode")
                     .into_iter()
                     .find(|m| MODES.contains(&m.as_str()))
                     .unwrap_or_else(|| MODES[0].into()),
             }),
         }
+    }
+
+    /// Only the run wizard opts into Modal; up's rows and defaults stay intact.
+    pub fn with_modal(mut self, prices: Option<ModalPrices>) -> Self {
+        Rc::get_mut(&mut self.state).expect("unshared wizard").modal = prices;
+        self
     }
 
     pub fn run(&self, ctx: &Ctx, picks: Picks) -> Result<Picks> {
@@ -221,6 +234,9 @@ impl LaunchWizard {
             Next::Screen(mut screen) if !self.state.prefetch_attached.replace(true) => {
                 // Jobs need the picker's Runtime. Attach to its first screen,
                 // not just GPU: reads overlap repository/mode input, never draw.
+                if let Some((job, ..)) = &self.state.modal {
+                    screen = screen.prices(job.clone());
+                }
                 if self.state.search.is_some() {
                     screen = screen.prices(self.price_job(&mode));
                 }
@@ -246,10 +262,10 @@ impl LaunchWizard {
         if picks.mode.is_none() {
             return Next::Screen(self.mode_screen(picks));
         }
-        if picks.gpu.is_none() && picks.tpu.is_none() {
+        if picks.gpu.is_none() && picks.tpu.is_none() && picks.modal.is_none() {
             return Next::Screen(self.gpu_screen(picks));
         }
-        if picks.tpu.is_none() && picks.offer.is_none() && s.choose_offer {
+        if picks.tpu.is_none() && picks.modal.is_none() && picks.offer.is_none() && s.choose_offer {
             return Next::Screen(self.offer_screen(picks));
         }
         if s.entered_repo_screen.get() {
@@ -549,6 +565,27 @@ impl LaunchWizard {
             })
             .collect()
     }
+    fn modal_rows(&self) -> Vec<(Choice, HardwareColumns)> {
+        let Some((job, count, cpu, memory)) = &self.state.modal else {
+            return Vec::new();
+        };
+        let rates = job.result();
+        crate::modal::GPUS
+            .iter()
+            .map(|(name, _, _)| {
+                let price = rates
+                    .as_ref()
+                    .and_then(|r| r.price(name, *count, *cpu, *memory).ok())
+                    .map(|p| format!("${}/hr", crate::pyfmt::fixed(p, 3)))
+                    .unwrap_or_else(|| Self::price_placeholder(job.state()).into());
+                (
+                    Choice::Modal((*name).into()),
+                    [format!("Modal {name}"), price, "Spot -".into(), "-".into()],
+                )
+            })
+            .collect()
+    }
+
     fn gpu_screen(&self, picks: Picks) -> WizardScreen {
         let prices = self.price_job(picks.mode.as_deref().unwrap_or(""));
         let this = self.clone();
@@ -575,6 +612,7 @@ impl LaunchWizard {
                     ));
                 }
                 rows.extend(opts.tpu_rows(Vec::new()));
+                rows.extend(opts.modal_rows());
                 hardware_options(rows, None)
             }
         };
@@ -602,11 +640,16 @@ impl LaunchWizard {
                     crate::gcp_types::generations(&types)
                 };
                 rows.extend(search.tpu_rows(values));
+                rows.extend(search.modal_rows());
                 hardware_options(rows, Some(query))
             }
         };
         let follow = picks.clone();
         let mut screen = Screen::new("GPU", options, move |choice| match choice {
+            Choice::Modal(name) => this.next(Picks {
+                modal: Some(name),
+                ..follow.clone()
+            }),
             Choice::Gpu(gpu) => this.next(Picks {
                 gpu: Some(gpu),
                 ..follow.clone()
@@ -635,7 +678,12 @@ impl LaunchWizard {
         .prices(prices)
         .prices(self.state.tpu_prices.clone())
         .selection_note(move |choice| {
-            if matches!(choice, Choice::Tpu(_)) {
+            if matches!(choice, Choice::Modal(_)) {
+                cloud.state.modal.as_ref().map(|(job, ..)| {
+                    if job.state() == JobState::Failed { crate::redact::redact_text(&job.error()) }
+                    else { "Modal total compute: GPU + capped CPU + memory. Capacity unknown; GPU Sandboxes can be preempted.".into() }
+                }).unwrap_or_default()
+            } else if matches!(choice, Choice::Tpu(_)) {
                 if let Some(prices) = cloud.tpu_prices() {
                     let cache = prices.cache_note();
                     format!(

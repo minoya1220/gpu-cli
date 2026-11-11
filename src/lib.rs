@@ -26,6 +26,7 @@ mod guardrails;
 pub mod history;
 pub mod instances;
 pub mod launch;
+pub mod modal;
 pub mod offers;
 mod output;
 pub mod picker;

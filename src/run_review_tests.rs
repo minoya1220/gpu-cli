@@ -286,6 +286,7 @@ fn results_download_retries_then_unpacks_without_implicit_linger() {
         &ctx,
         &VastBackend {
             alias: "vast-123".into(),
+            ..VastBackend::default()
         },
         "/root/state",
         "/workspace/job",
@@ -307,6 +308,7 @@ fn download_with(runner: &Arc<FakeRunner>, clock: &Arc<FakeClock>, env: &TestEnv
         &ctx,
         &VastBackend {
             alias: "vast-123".into(),
+            ..VastBackend::default()
         },
         "/root/state",
         "/workspace/job",

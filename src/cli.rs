@@ -171,7 +171,7 @@ impl Command {
 #[derive(clap::Args, Debug, Default)]
 pub struct SetupFlags {
     /// Choose a provider explicitly (otherwise open the provider picker)
-    #[arg(long, value_parser = ["vast", "gcp"])]
+    #[arg(long, value_parser = ["vast", "gcp", "modal"])]
     pub provider: Option<String>,
     /// Google Cloud project ID (otherwise choose from your projects)
     #[arg(long)]
@@ -268,6 +268,15 @@ pub struct UpFlags {
 
 #[derive(clap::Args, Clone, Debug)]
 pub struct RunFlags {
+    /// Provider (Vast by default; Modal also available in the GPU picker)
+    #[arg(long, value_parser = ["vast", "modal"])]
+    pub provider: Option<String>,
+    /// Modal physical CPU cores (default: 4; request equals limit)
+    #[arg(long, allow_negative_numbers = true)]
+    pub cpu: Option<f64>,
+    /// Modal memory in GiB (default: 16; request equals limit)
+    #[arg(long, allow_negative_numbers = true)]
+    pub memory: Option<f64>,
     /// GPU model, e.g. 'RTX 4090' (required without a terminal)
     #[arg(long)]
     pub gpu: Option<String>,
@@ -298,7 +307,7 @@ pub struct RunFlags {
     /// Lifetime ceiling including boot, upload and download (prompted in a terminal when unset)
     #[arg(long, value_name = "DURATION")]
     pub expire: Option<String>,
-    /// SSH readiness timeout, not job runtime
+    /// Readiness timeout (SSH or Modal image build/scheduling), not job runtime
     #[arg(long, default_value = "600", value_parser = positive_seconds)]
     pub timeout: f64,
     /// Override the container image
@@ -316,7 +325,7 @@ pub struct RunFlags {
     /// Results directory relative to the job's working directory
     #[arg(long, default_value = "outputs")]
     pub outputs: String,
-    /// Forward a local variable over SSH stdin, never Vast metadata
+    /// Forward a local variable over transport stdin, never provider metadata
     #[arg(long = "env", value_name = "NAME")]
     pub env: Vec<String>,
     /// Maximum upload size, e.g. 500M or 1G

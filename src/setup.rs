@@ -51,8 +51,9 @@ pub(crate) fn provider_screen(ctx: &Ctx, cfg: &Dict) -> Screen<String, String> {
                     "Google Cloud".into(),
                     if ready { "✓ set up" } else { "not set up" }.into(),
                 ],
+                ["Modal".into(), "check readiness".into()],
             ];
-            ["vast", "gcp"]
+            ["vast", "gcp", "modal"]
                 .into_iter()
                 .zip(crate::offers::aligned_rows(
                     &rows,
@@ -138,6 +139,9 @@ pub fn run(ctx: &Ctx, cfg: &Dict, flags: &SetupFlags) -> Result<()> {
             return ctx.println("Next: gpu setup --provider gcp --help");
         }
     };
+    if provider == "modal" {
+        return crate::modal::check(ctx);
+    }
     if provider == "vast" {
         crate::vast::list_instances(ctx, None).map_err(|error| match error {
             Error::Status(_, _) => error,

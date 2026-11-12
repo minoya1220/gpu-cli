@@ -28,7 +28,7 @@ impl Settings {
         let d = cfg
             .get("gcp")
             .and_then(Value::as_dict)
-            .ok_or_else(|| crate::setup::gcp_not_setup(None))?;
+            .ok_or_else(|| crate::gcp::setup::gcp_not_setup(None))?;
         let project = optional(d, "project")?
             .filter(|s| component(s))
             .ok_or_else(|| Error::msg("Set gcp.project in gpu/config.json").next("gpu setup"))?;

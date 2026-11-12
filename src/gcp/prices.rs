@@ -365,7 +365,7 @@ pub(crate) fn cached_project(
 }
 
 pub fn cached(ctx: &Ctx, cfg: &Dict, zone: &str) -> Option<std::sync::Arc<Prices>> {
-    if !crate::setup::gcp_ready(cfg) {
+    if !crate::gcp::setup::gcp_ready(cfg) {
         return None;
     }
     let project = gcp::Settings::load(cfg).ok()?.project;
@@ -572,7 +572,7 @@ pub(crate) fn job_at(ctx: &Ctx, cfg: &Dict, zone: Option<&str>) -> Job<std::sync
     let worker = ctx.clone();
     let cfg = cfg.clone();
     Job::publishing(move |publish| {
-        if !crate::setup::gcp_ready(&cfg) {
+        if !crate::gcp::setup::gcp_ready(&cfg) {
             return Err("needs gpu setup".into());
         }
         let settings = gcp::Settings::load(&cfg).map_err(|e| e.text().to_string())?;

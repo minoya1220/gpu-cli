@@ -489,12 +489,13 @@ impl Ctx {
     pub fn require_gcloud(&self) -> Result<()> {
         if self.gcp.setup_session
             || *self.gcp.ready.get_or_init(|| {
-                crate::config::load_config(&self.env).is_ok_and(|cfg| crate::setup::gcp_ready(&cfg))
+                crate::config::load_config(&self.env)
+                    .is_ok_and(|cfg| crate::gcp::setup::gcp_ready(&cfg))
             })
         {
             Ok(())
         } else {
-            Err(crate::setup::gcp_not_setup(Some(
+            Err(crate::gcp::setup::gcp_not_setup(Some(
                 crate::error::ExitCode::NotSetup,
             )))
         }

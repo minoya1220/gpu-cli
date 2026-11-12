@@ -14,6 +14,7 @@ pub(crate) mod preferences;
 pub(crate) mod prices;
 pub(crate) mod retry;
 pub(crate) mod settings;
+pub(crate) mod setup;
 pub(crate) mod ssh;
 pub(crate) mod startup;
 pub(crate) mod types;

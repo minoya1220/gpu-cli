@@ -71,7 +71,7 @@ impl Provider {
     fn listed(self, ctx: &Ctx, cfg: &Dict) -> bool {
         match self {
             Provider::Vast => true,
-            Provider::Gcp => crate::setup::gcp_ready(cfg),
+            Provider::Gcp => crate::gcp::setup::gcp_ready(cfg),
             Provider::Modal => crate::modal::configured(ctx),
         }
     }
@@ -303,7 +303,7 @@ pub fn selected_id(
             ctx.result("id", Value::str(id));
             return Ok(Some(id.into()));
         }
-        if !crate::setup::gcp_ready(cfg) {
+        if !crate::gcp::setup::gcp_ready(cfg) {
             return Err(Error::status(
                 ExitCode::NotFound,
                 format!("No instance ID like '{id}'. Vast IDs are numeric"),

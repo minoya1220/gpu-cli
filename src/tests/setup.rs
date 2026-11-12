@@ -295,7 +295,7 @@ fn setup_creates_only_one_queue_preserves_config_and_is_idempotent() {
         .apis
         .retain(|s| s != "cloudtasks.googleapis.com");
     assert_eq!(main(&ctx, APPLY), 0, "{}", err(&ctx));
-    assert!(crate::setup::gcp_ready(&cfg(&env)));
+    assert!(crate::gcp::setup::gcp_ready(&cfg(&env)));
     assert_eq!(cfg(&env).get("owner"), Some(&Value::str("me")));
     assert_eq!(
         cfg(&env).get("custom"),
@@ -429,7 +429,7 @@ fn default_identity_without_delete_grant_does_not_create_queue_or_change_iam() {
     state.lock().unwrap().grant = false;
     assert_eq!(main(&ctx, APPLY), 1);
     assert!(err(&ctx).contains("tpu.nodes.delete"));
-    assert!(!crate::setup::gcp_ready(&cfg(&env)));
+    assert!(!crate::gcp::setup::gcp_ready(&cfg(&env)));
     assert!(mutations(&runner).is_empty());
     // The partial journal is undoable even though completion was never recorded.
     assert_eq!(main(&ctx, REMOVE), 0, "{}", err(&ctx));
@@ -536,7 +536,7 @@ fn partial_enable_and_create_are_journaled_and_resumable() {
         }
         assert_eq!(main(&ctx, APPLY), 1);
         assert!(!err(&ctx).contains("secret"));
-        assert!(!crate::setup::gcp_ready(&cfg(&env)));
+        assert!(!crate::gcp::setup::gcp_ready(&cfg(&env)));
         {
             let mut s = state.lock().unwrap();
             s.fail_enable = false;
@@ -567,7 +567,7 @@ fn partial_removal_retains_journal_and_can_resume() {
             s.fail_disable = !fail_delete;
         }
         assert_eq!(main(&ctx, REMOVE), 1);
-        assert!(!crate::setup::gcp_ready(&cfg(&env)));
+        assert!(!crate::gcp::setup::gcp_ready(&cfg(&env)));
         assert!(cfg(&env).get("gcp").is_some());
         {
             let mut s = state.lock().unwrap();

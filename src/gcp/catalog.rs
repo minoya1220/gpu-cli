@@ -158,7 +158,7 @@ pub fn types_job(ctx: &Ctx, cfg: &Dict) -> crate::picker::Job<Vec<String>> {
     let worker = ctx.clone();
     let cfg = cfg.clone();
     crate::picker::Job::new(move || {
-        if !crate::setup::gcp_ready(&cfg) {
+        if !crate::gcp::setup::gcp_ready(&cfg) {
             return Ok(Vec::new());
         }
         let project = gcp::Settings::load(&cfg)

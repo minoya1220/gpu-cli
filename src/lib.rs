@@ -114,7 +114,7 @@ pub fn main_with(argv: &[String], ctx: &Ctx) -> i32 {
 
 fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
     let mut cfg = config::load_config(&ctx.env)?;
-    ctx.set_gcp_ready(setup::gcp_ready(&cfg));
+    ctx.set_gcp_ready(gcp::setup::gcp_ready(&cfg));
     if let Command::Up(flags) = &mut command {
         guardrails::defaults(flags, &cfg)?;
         if flags.target() == provider::Provider::Vast && flags.tpu_flags() {

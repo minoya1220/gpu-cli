@@ -526,6 +526,9 @@ impl RunBackend for ModalBackend {
         )
         .map(|_| ())
     }
+    fn upload(&self, extract: String) -> String {
+        upload(KEEPER_ROOT, &extract)
+    }
     fn start_prelude(&self) -> String {
         // Mark a job as started only after the supervisor has published its
         // status. A failed start must still be covered by the keeper's grace.
@@ -542,6 +545,14 @@ impl RunBackend for ModalBackend {
     fn destroy(&self, ctx: &Ctx, id: &str) -> Result<()> {
         terminate(ctx, id)
     }
+}
+
+/// Refresh the keeper's start grace while the extraction runs, so a slow but
+/// live upload is not cut off and a dead CLI (closed stdin) stops the refresh.
+fn upload(root: &str, extract: &str) -> String {
+    format!(
+        "mkdir -p {root} || exit; {{ {extract}; }} <&0 & p=$!; while date +%s >{root}/upload; kill -0 $p 2>/dev/null; do sleep 5; done; wait $p"
+    )
 }
 
 /// Qualified IDs are deliberately narrow: never pass malformed IDs to another

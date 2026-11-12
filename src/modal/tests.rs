@@ -315,3 +315,44 @@ fn explicit_modal_provider_picker_lists_only_modal_rows_with_a_short_failure_rea
 }
 
 mod lifecycle;
+
+#[test]
+fn upload_heartbeat_follows_extraction() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let t = TestEnv::new();
+    let root = t.root.join("keeper");
+    let target = t.root.join("target");
+    let extract = format!(
+        "mkdir -p {0} && tar -xzf - -C {0}",
+        crate::pyfmt::shell_quote(&target.to_string_lossy())
+    );
+    let mut archive = tar::Builder::new(flate2::write::GzEncoder::new(
+        Vec::new(),
+        flate2::Compression::default(),
+    ));
+    let mut header = tar::Header::new_gnu();
+    header.set_size(3);
+    header.set_mode(0o600);
+    header.set_cksum();
+    archive
+        .append_data(&mut header, "job.py", &b"hi\n"[..])
+        .unwrap();
+    let archive = archive.into_inner().unwrap().finish().unwrap();
+    let run = |stdin: &[u8]| {
+        let mut child = Command::new("bash")
+            .args(["-c", &upload(&root.to_string_lossy(), &extract)])
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(stdin).unwrap();
+        child.wait().unwrap()
+    };
+    assert!(run(&archive).success());
+    assert_eq!(fs::read(target.join("job.py")).unwrap(), b"hi\n");
+    let beat = fs::read_to_string(root.join("upload")).unwrap();
+    assert!(beat.trim().parse::<u64>().is_ok(), "{beat:?}");
+    fs::remove_file(root.join("upload")).unwrap();
+    assert!(!run(b"not an archive").success());
+    assert!(root.join("upload").is_file());
+}

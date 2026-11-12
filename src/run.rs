@@ -143,6 +143,10 @@ pub(crate) trait RunBackend {
     fn lost(&self, ctx: &Ctx, id: &str) -> bool;
     fn restore_expiry(&self, ctx: &Ctx, id: &str, deadline: Timestamp) -> Result<()>;
     fn hook(&self, id: &str) -> String;
+    /// Wrap the source archive extraction, which reads the archive on stdin.
+    fn upload(&self, extract: String) -> String {
+        extract
+    }
     fn start_prelude(&self) -> String {
         String::new()
     }
@@ -720,11 +724,11 @@ fn execute(
     session.paths = Some((root.clone(), jobdir.clone()));
     ctx.check_cancelled()?;
     phase.set("upload");
-    let command = format!(
+    let command = backend.upload(format!(
         "mkdir -p {} && tar -xzf - --no-same-owner -C {}",
         shell_quote(&target),
         shell_quote(&target)
-    );
+    ));
     let remaining =
         (job.deadline.as_second() - DOWNLOAD_RESERVE - ctx.clock.now().as_second()).max(1) as f64;
     checked_transfer(

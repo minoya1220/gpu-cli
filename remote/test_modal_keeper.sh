@@ -21,6 +21,10 @@ case "$SCENARIO:$now" in
     hook:1001|late-hook:1002) touch "$STATE/started";;
     hook:1002) echo 1005 >"$STATE/end";;
     late-hook:1005) echo 1007 >"$STATE/end";;
+    upload:1001|upload:1002|upload-start:1002) echo "$now" >"$STATE/upload";;
+    upload-start:1004) touch "$STATE/started";;
+    upload-start:1006) echo 1008 >"$STATE/end";;
+    bad-beat:1001) echo x >"$STATE/upload";;
 esac
 STUB
 chmod +x "$root/bin/date" "$root/bin/sleep"
@@ -46,4 +50,7 @@ run hook 2000 1005 0
 run late-hook 2000 1007 0
 run cap 1004 1004 0
 run invalid 2000 1000 1
-echo '6 passed, 0 failed'
+run upload 2000 1005 0
+run upload-start 2000 1008 0
+run bad-beat 2000 1003 0
+echo '9 passed, 0 failed'

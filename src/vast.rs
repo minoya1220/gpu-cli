@@ -1,18 +1,22 @@
 //! The authenticated `vastai` CLI: offer search, instance listing, and the
 //! exact `create instance` request.
+pub(crate) mod instance;
+pub mod offers;
+pub(crate) mod ssh_config;
+pub mod startup;
 
 use jiff::Timestamp;
 
 use crate::config::{self, CONTAINER_ENV};
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
-use crate::offers::{offer_number, price_field};
 use crate::process::{Cmd, Output, RunError};
 use crate::pyfmt::{float_repr, py_str};
 use crate::pyjson::{self, Dict, Value};
 use crate::redact::redact_text;
 use crate::repos::{resolve_repo, Repo};
-use crate::startup::startup_script;
+use crate::vast::offers::{offer_number, price_field};
+use crate::vast::startup::startup_script;
 
 /// Deadline for a Vast CLI call that names none.
 const CLI_TIMEOUT: f64 = 60.0;
@@ -169,7 +173,7 @@ pub fn run_request(
         offer,
         &args,
         cfg,
-        crate::startup::run_script(deadline)?,
+        crate::vast::startup::run_script(deadline)?,
         label,
     )
 }
@@ -252,7 +256,7 @@ pub fn list_instances(ctx: &Ctx, timeout: Option<f64>) -> Result<Vec<Dict>> {
     if !matches!(value, Value::List(_)) {
         return Err(unreadable());
     }
-    let instances = crate::offers::offer_dicts(value).map_err(|_| unreadable())?;
+    let instances = crate::vast::offers::offer_dicts(value).map_err(|_| unreadable())?;
     if instances.iter().any(|item| {
         item.get("id")
             .is_none_or(|id| !crate::pyfmt::is_digits(&py_str(id)))

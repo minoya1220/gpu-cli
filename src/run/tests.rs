@@ -20,18 +20,18 @@ fn cleanup_always_sends_destroy_before_any_inventory_and_retries_bad_reads() {
             _ => panic!("{:?}", cmd.argv),
         });
         let ctx = env.ctx().runner(&runner).build();
-        crate::ssh_config::update_host(
+        crate::vast::ssh_config::update_host(
             &ctx.env,
             &testing::dict(r#"{"id":123,"ssh_host":"fake","ssh_port":22}"#),
         )
         .unwrap();
-        crate::commands::destroy_created(&ctx, "123").unwrap();
+        crate::vast::instance::destroy_created(&ctx, "123").unwrap();
         assert_eq!(
             &runner.calls()[0].argv,
             &["vastai", "destroy", "instance", "123", "--yes"]
         );
         assert_eq!(shows.load(Ordering::SeqCst), bad_reads + 1);
-        assert!(!crate::ssh_config::has_host(&ctx.env, "123").unwrap());
+        assert!(!crate::vast::ssh_config::has_host(&ctx.env, "123").unwrap());
     }
 }
 
@@ -47,19 +47,19 @@ fn unverified_cleanup_never_claims_success_and_still_removes_alias() {
         }
     });
     let ctx = env.ctx().runner(&runner).clock(&clock).build();
-    crate::ssh_config::update_host(
+    crate::vast::ssh_config::update_host(
         &ctx.env,
         &testing::dict(r#"{"id":123,"ssh_host":"fake","ssh_port":22}"#),
     )
     .unwrap();
     assert_eq!(
-        crate::commands::destroy_created(&ctx, "123")
+        crate::vast::instance::destroy_created(&ctx, "123")
             .unwrap_err()
             .exit_code(),
         19
     );
     assert_eq!(clock.elapsed(), 60.0);
-    assert!(!crate::ssh_config::has_host(&ctx.env, "123").unwrap());
+    assert!(!crate::vast::ssh_config::has_host(&ctx.env, "123").unwrap());
 }
 
 #[test]
@@ -82,7 +82,7 @@ fn cleanup_resends_destroy_while_the_instance_stays_listed() {
         }
     });
     let ctx = env.ctx().runner(&runner).clock(&clock).build();
-    crate::commands::destroy_created(&ctx, "123").unwrap();
+    crate::vast::instance::destroy_created(&ctx, "123").unwrap();
     let destroys = runner
         .calls()
         .iter()
@@ -105,7 +105,7 @@ fn bounded_cleanup_resends_destroy_a_fixed_number_of_times() {
     });
     let ctx = env.ctx().runner(&runner).clock(&clock).build();
     assert_eq!(
-        crate::commands::destroy_created(&ctx, "123")
+        crate::vast::instance::destroy_created(&ctx, "123")
             .unwrap_err()
             .exit_code(),
         19

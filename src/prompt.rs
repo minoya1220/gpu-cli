@@ -3,9 +3,9 @@
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use crate::history::{by_frequent_recency, recent_picks};
-use crate::offers::{category_label, group_by_category, model_label, Stats};
 use crate::picker::AnyJob;
 use crate::pyfmt::{casefold, is_digits, repr_str};
+use crate::vast::offers::{category_label, group_by_category, model_label, Stats};
 
 const PAGE_SIZE: usize = 12;
 

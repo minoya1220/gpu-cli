@@ -19,7 +19,7 @@ fn unknown_vast_ids_fail_consistently_without_mutating_or_connecting() {
             let t = TestEnv::new();
             // A cached alias must not bypass the fresh account lookup.
             if args[0] != "down" {
-                crate::ssh_config::update_host(
+                crate::vast::ssh_config::update_host(
                     &t.env(),
                     &dict(r#"{"id":99999999,"ssh_host":"ssh1.vast.ai","ssh_port":22}"#),
                 )
@@ -84,12 +84,12 @@ fn failed_or_unreadable_inventory_is_not_proof_of_absence() {
 #[test]
 fn down_of_a_recorded_but_absent_vast_instance_cleans_up_idempotently() {
     let t = TestEnv::new();
-    crate::ssh_config::update_host(
+    crate::vast::ssh_config::update_host(
         &t.env(),
         &dict(r#"{"id":99999999,"ssh_host":"ssh1.vast.ai","ssh_port":22}"#),
     )
     .unwrap();
-    crate::ssh_config::update_host(
+    crate::vast::ssh_config::update_host(
         &t.env(),
         &dict(r#"{"id":123,"ssh_host":"ssh1.vast.ai","ssh_port":22}"#),
     )
@@ -109,8 +109,8 @@ fn down_of_a_recorded_but_absent_vast_instance_cleans_up_idempotently() {
     assert_eq!(object.get("ok"), Some(&Value::Bool(true)));
     let result = object.get("result").unwrap().as_dict().unwrap();
     assert_eq!(result.get("state"), Some(&Value::str("already_absent")));
-    assert!(!crate::ssh_config::has_host(&t.env(), "99999999").unwrap());
-    assert!(crate::ssh_config::has_host(&t.env(), "123").unwrap());
+    assert!(!crate::vast::ssh_config::has_host(&t.env(), "99999999").unwrap());
+    assert!(crate::vast::ssh_config::has_host(&t.env(), "123").unwrap());
     assert_eq!(main(&ctx, &["down", "99999999", "--yes"]), 16);
     assert_eq!(runner.calls().len(), 2);
 }

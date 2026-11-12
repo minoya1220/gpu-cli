@@ -5,14 +5,10 @@ use std::sync::Arc;
 
 use jiff::Timestamp;
 
-use crate::commands::expire_instance;
 use crate::config;
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use crate::history::{recent_picks, record_picks_best_effort as record_picks};
-use crate::offers::{
-    gpu_stats, known_gpu_models, offer_label, offer_price, OfferSearch, NO_OFFERS,
-};
 use crate::picker::Job;
 use crate::process::run;
 use crate::prompt::{choose, choose_gpu, confirm, Choices, Pick};
@@ -20,6 +16,10 @@ use crate::pyfmt::{fixed, py_str, truthy};
 use crate::pyjson::{self, Dict, Value};
 use crate::redact::redact_text;
 use crate::repos::{resolve_repo, save_cached_repos, Repo};
+use crate::vast::instance::expire_instance;
+use crate::vast::offers::{
+    gpu_stats, known_gpu_models, offer_label, offer_price, OfferSearch, NO_OFFERS,
+};
 use crate::vast::{argv, RequestArgs, Vast};
 use crate::wizard::{LaunchWizard, Picks, TpuOptions, WizardOptions, MODES};
 
@@ -243,7 +243,7 @@ pub fn prompt_for_picks(
         None => {
             let mut models = Vec::new();
             for offer in &offers {
-                models.push(py_str(crate::offers::field(offer, "gpu_name")?));
+                models.push(py_str(crate::vast::offers::field(offer, "gpu_name")?));
             }
             models.sort();
             models.dedup();
@@ -552,7 +552,10 @@ pub(crate) fn launch(
     };
     let request = vast.request(&offer, &request_args, cfg)?;
     let rate = if args.interruptible {
-        crate::offers::offer_number("min_bid", crate::offers::field(&offer, "min_bid")?)?
+        crate::vast::offers::offer_number(
+            "min_bid",
+            crate::vast::offers::field(&offer, "min_bid")?,
+        )?
     } else {
         offer_price(&offer)?
     };
@@ -574,7 +577,7 @@ pub(crate) fn launch(
         ctx.println(&format!(
             "Launch {mode} for {} on offer {} at ${}/hr?",
             repo.label(),
-            py_str(crate::offers::field(&offer, "id")?),
+            py_str(crate::vast::offers::field(&offer, "id")?),
             fixed(offer_price(&offer)?, 3)
         ))?;
         if !args.yes && !confirm(ctx, None)? {

@@ -154,7 +154,7 @@ impl Instance for VastId {
         Provider::Vast
     }
     fn wait_ssh(&self, ctx: &Ctx, timeout: f64) -> Result<String> {
-        crate::commands::wait_for_ssh(ctx, &self.0, timeout).map(|(alias, _)| alias)
+        crate::vast::instance::wait_for_ssh(ctx, &self.0, timeout).map(|(alias, _)| alias)
     }
     fn expire(
         &self,
@@ -163,12 +163,12 @@ impl Instance for VastId {
         action: &str,
         deadline: Option<Timestamp>,
     ) -> Result<()> {
-        crate::commands::expire_instance(ctx, &self.0, action, deadline).map(drop)
+        crate::vast::instance::expire_instance(ctx, &self.0, action, deadline).map(drop)
     }
     fn edit(&self, ctx: &Ctx, editor: Option<&str>, nvim_config: Option<&Value>) -> Result<()> {
         crate::editors::open(ctx, &self.0, editor, nvim_config, |_| {
             let (alias, directory) =
-                crate::commands::wait_for_ssh(ctx, &self.0, crate::editors::EDITOR_WAIT)?;
+                crate::vast::instance::wait_for_ssh(ctx, &self.0, crate::editors::EDITOR_WAIT)?;
             Ok(crate::editors::Target {
                 shown: alias.clone(),
                 alias,
@@ -177,13 +177,13 @@ impl Instance for VastId {
         })
     }
     fn ssh(&self, ctx: &Ctx, exec: bool) -> Result<()> {
-        crate::commands::ssh(ctx, &self.0, exec)
+        crate::vast::instance::ssh(ctx, &self.0, exec)
     }
     fn stop(&self, ctx: &Ctx, _cfg: &Dict) -> Result<()> {
-        crate::commands::lifecycle(ctx, &self.0, false, false)
+        crate::vast::instance::lifecycle(ctx, &self.0, false, false)
     }
     fn down(&self, ctx: &Ctx, _cfg: &Dict, yes: bool) -> Result<()> {
-        crate::commands::lifecycle(ctx, &self.0, true, yes)
+        crate::vast::instance::lifecycle(ctx, &self.0, true, yes)
     }
 }
 

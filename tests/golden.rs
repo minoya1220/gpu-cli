@@ -5,16 +5,16 @@ use gpu::ctx::{Clock, Console, Ctx, Env, Ui};
 use gpu::expiry::parse_when;
 use gpu::instances::{format_uptime, instance_label};
 use gpu::launch::UpArgs;
-use gpu::offers::{
-    category_label, gpu_category, group_by_category, model_label, offer_label, offer_rows,
-    valid_gpu_name, OfferSearch, Stats,
-};
 use gpu::prompt::{choose, choose_gpu, Choices, Pick};
 use gpu::pyfmt::{fixed, float_repr, general, parse_float, percent, py_float, py_str, shell_quote};
 use gpu::pyjson::{dumps, loads, Dict, Value};
 use gpu::redact::{redact, redact_text};
 use gpu::repos::{resolve_repo, Repo};
-use gpu::startup::startup_script;
+use gpu::vast::offers::{
+    category_label, gpu_category, group_by_category, model_label, offer_label, offer_rows,
+    valid_gpu_name, OfferSearch, Stats,
+};
+use gpu::vast::startup::startup_script;
 use gpu::vast::{request, RequestArgs, Vast};
 
 fn table(name: &str) -> Value {

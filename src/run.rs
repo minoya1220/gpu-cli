@@ -10,13 +10,13 @@ use crate::cli::RunFlags;
 use crate::ctx::Ctx;
 use crate::error::{Error, ExitCode, Result};
 use crate::launch::UpArgs;
-use crate::offers::{offer_price, OfferSearch};
 use crate::picker::Job;
 use crate::process::{Cmd, Input, Output};
 use crate::provider::Provider;
 use crate::pyfmt::{shell_join, shell_quote};
 use crate::pyjson::{self, Dict, Value};
 use crate::run_files;
+use crate::vast::offers::{offer_price, OfferSearch};
 use crate::vast::{self, Vast};
 
 #[cfg(test)]
@@ -246,7 +246,8 @@ impl RunBackend for VastBackend {
         let hint = format!(
             "{cap}Next: retry gpu run with a longer --expire/--timeout or another --offer."
         );
-        let (alias, _) = crate::commands::wait_for_ssh_with_hint(ctx, &id, wait_timeout, &hint)?;
+        let (alias, _) =
+            crate::vast::instance::wait_for_ssh_with_hint(ctx, &id, wait_timeout, &hint)?;
         crate::expiry::manage_expiry(ctx, &alias, &id, "arm", Some(deadline))?;
         self.alias = alias;
         ctx.result("expiry_armed", Value::Bool(true));
@@ -283,7 +284,7 @@ impl RunBackend for VastBackend {
     }
 
     fn destroy(&self, ctx: &Ctx, id: &str) -> Result<()> {
-        crate::commands::destroy_created(ctx, id)
+        crate::vast::instance::destroy_created(ctx, id)
     }
 }
 
@@ -398,7 +399,7 @@ fn choose(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, args: &UpArgs) -> Result<Sele
                 models: if modal_only {
                     Vec::new()
                 } else {
-                    crate::offers::known_gpu_models(&ctx.env)
+                    crate::vast::offers::known_gpu_models(&ctx.env)
                 },
                 recent_gpus: crate::history::recent_picks(&ctx.env, "gpu"),
                 choose_offer: !flags.yes && flags.offer.is_none(),
@@ -552,7 +553,7 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
     }
     // Vast startup/config do not apply to Modal's default Debian image.
     if flags.provider != Some(Provider::Modal) {
-        crate::startup::run_script(deadline)?;
+        crate::vast::startup::run_script(deadline)?;
     }
     if flags.provider != Some(Provider::Modal)
         && !matches!(cfg.get("container_image"), Some(Value::Str(image)) if !image.is_empty())

@@ -7,7 +7,7 @@ pub(super) fn startup(repo: &crate::repos::Repo, cfg: &Dict) -> Result<String> {
     let (url, name) = crate::repos::resolve_repo(repo.as_arg(), &owner)?;
     let mut script = format!(
         "#!/bin/bash\n{}\nchmod 1777 /workspace\n",
-        crate::startup::SETUP_START
+        crate::vast::startup::SETUP_START
     );
     for (key, field) in [("git_name", "name"), ("git_email", "email")] {
         if let Some(value) = cfg
@@ -31,7 +31,7 @@ pub(super) fn startup(repo: &crate::repos::Repo, cfg: &Dict) -> Result<String> {
             crate::pyfmt::shell_quote(&dir)
         ));
     }
-    script.push_str(crate::startup::SETUP_DONE);
+    script.push_str(crate::vast::startup::SETUP_DONE);
     script.push('\n');
     Ok(script)
 }

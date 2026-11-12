@@ -81,7 +81,7 @@ impl crate::wizard::Search for OfferFixture {
         }
         Ok(rows)
     }
-    fn stats(&self, _: &str) -> crate::error::Result<crate::offers::Stats> {
+    fn stats(&self, _: &str) -> crate::error::Result<crate::vast::offers::Stats> {
         Ok(Default::default())
     }
 }

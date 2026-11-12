@@ -2,16 +2,16 @@
 
 use crate::config::CONTAINER_ENV;
 use crate::launch::{launch, UpArgs};
-use crate::offers::{
-    gpu_cache_path, gpu_category, known_gpu_models, read_gpu_cache, update_gpu_cache,
-};
 use crate::process::{run, Output};
 use crate::prompt::{choose, choose_gpu, Choices, Pick};
 use crate::pyjson::Value;
 use crate::repos::Repo;
-use crate::startup::startup_script;
 use crate::testing::fixture_config as defaults;
 use crate::testing::*;
+use crate::vast::offers::{
+    gpu_cache_path, gpu_category, known_gpu_models, read_gpu_cache, update_gpu_cache,
+};
+use crate::vast::startup::startup_script;
 use crate::vast::{argv, request, RequestArgs, Vast};
 
 pub const EXPECTED_CONTAINER_SCRIPT: &str = r#"#!/bin/bash
@@ -401,7 +401,8 @@ fn test_interactive_offer_selection_does_not_print_second_list() {
         dry_run: true,
         ..up_args()
     };
-    let search = crate::offers::OfferSearch::new(Vast::new(&ctx), &args, &defaults()).unwrap();
+    let search =
+        crate::vast::offers::OfferSearch::new(Vast::new(&ctx), &args, &defaults()).unwrap();
     let offers = search.offers("container", Some("Tesla T4")).unwrap();
     crate::launch::select_offer(&ctx, offers, &args).unwrap();
     let output = out(&ctx);
@@ -527,7 +528,8 @@ fn test_interactive_gpu_stats_and_offers_share_unverified_filter() {
         dry_run: true,
         ..up_args()
     };
-    let search = crate::offers::OfferSearch::new(Vast::new(&ctx), &args, &defaults()).unwrap();
+    let search =
+        crate::vast::offers::OfferSearch::new(Vast::new(&ctx), &args, &defaults()).unwrap();
     let (_, offers) = crate::launch::prompt_for_picks(
         &ctx,
         crate::wizard::Picks::new(args.repo.clone(), args.mode.as_deref(), None),

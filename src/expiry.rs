@@ -16,7 +16,7 @@ use crate::pyjson::{self, Dict, Value};
 /// The remote controller, sent over SSH stdin and run with the instance's bash.
 pub const REMOTE_SOURCE: &str = include_str!("../remote/expiry_remote.sh");
 
-/// The boot-time guard the onstart script starts (`crate::startup::expiry_guard`).
+/// The boot-time guard the onstart script starts (`crate::vast::startup::expiry_guard`).
 pub const GUARD_SOURCE: &str = include_str!("../remote/expiry_guard.sh");
 
 static DURATION: LazyLock<Regex> = LazyLock::new(|| {

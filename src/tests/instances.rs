@@ -12,9 +12,9 @@ use crate::provider::{Instance, VastId};
 use crate::pyfmt::py_str;
 use crate::pyjson::{self, Dict, Value};
 use crate::repos::Repo;
-use crate::ssh_config::{remove_host, update_host};
 use crate::testing::fixture_config as defaults;
 use crate::testing::*;
+use crate::vast::ssh_config::{remove_host, update_host};
 
 pub const INSTANCES: &str = r#"[
     {"id": 12, "gpu_name": "RTX 4090", "actual_status": "running", "dph_total": 0.5,

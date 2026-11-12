@@ -7,12 +7,12 @@ use std::time::Duration;
 
 use super::picker::Gate;
 use crate::error::Result;
-use crate::offers::Stats;
 use crate::picker::testing::*;
 use crate::picker::{Job, Next, Outcome};
 use crate::pyjson::Dict;
 use crate::repos::Repo;
 use crate::testing::{dict, TestEnv};
+use crate::vast::offers::Stats;
 use crate::wizard::{
     LaunchWizard, Picks, Search, TpuChoice, TpuOptions, WizardOptions, TPU_CATEGORY,
 };
@@ -152,15 +152,15 @@ fn line_labels_and_picker_cells_agree_on_unpriced_offers() {
     .into_iter()
     .collect();
     assert_eq!(
-        crate::offers::model_label("Unpriced", &stats),
+        crate::vast::offers::model_label("Unpriced", &stats),
         "Unpriced  - (2 offers)"
     );
     assert_eq!(
-        crate::offers::model_columns("Unpriced", &stats, "-")[1],
+        crate::vast::offers::model_columns("Unpriced", &stats, "-")[1],
         "-"
     );
     assert_eq!(
-        crate::offers::category_label("All", &["Unpriced".into(), "RTX 5090".into()], &stats),
+        crate::vast::offers::category_label("All", &["Unpriced".into(), "RTX 5090".into()], &stats),
         "All (2 models, from $0.441/hr)"
     );
 }
@@ -174,15 +174,15 @@ fn hardware_cells_keep_offer_totals_and_do_not_invent_vast_spot_quotes() {
     .into_iter()
     .collect();
     assert_eq!(
-        crate::offers::model_columns("RTX 5090", &stats, "…"),
+        crate::vast::offers::model_columns("RTX 5090", &stats, "…"),
         ["RTX 5090", "$0.441/hr", "Spot -", "64 offers"]
     );
     assert_eq!(
-        crate::offers::model_columns("missing", &stats, "…"),
+        crate::vast::offers::model_columns("missing", &stats, "…"),
         ["missing", "…", "Spot -", "-"]
     );
     assert_eq!(
-        crate::offers::category_columns(
+        crate::vast::offers::category_columns(
             "All",
             &["RTX 5090".into(), "H100 SXM".into()],
             &stats,

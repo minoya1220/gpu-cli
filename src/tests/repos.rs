@@ -12,9 +12,9 @@ use crate::picker::testing::*;
 use crate::picker::{Job, JobState, Outcome};
 use crate::process::Output;
 use crate::repos::{cache_path, load_cached_repos, resolve_repo, save_cached_repos, Repo};
-use crate::startup::startup_script;
 use crate::testing::fixture_config as defaults;
 use crate::testing::*;
+use crate::vast::startup::startup_script;
 use crate::wizard::Picks;
 
 fn tesla() -> Picks {

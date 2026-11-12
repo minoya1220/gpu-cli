@@ -252,17 +252,20 @@ fn concurrent_ssh_updates_are_lossless_and_unchanged_updates_do_not_replace_file
             let vars = &vars;
             scope.spawn(move || {
                 let item = dict(&format!(r#"{{"id":{id},"ssh_host":"fake","ssh_port":22}}"#));
-                crate::ssh_config::update_host(vars, &item).unwrap();
+                crate::vast::ssh_config::update_host(vars, &item).unwrap();
             });
         }
     });
     for id in 1..=16 {
-        assert!(crate::ssh_config::has_host(&vars, &id.to_string()).unwrap());
+        assert!(crate::vast::ssh_config::has_host(&vars, &id.to_string()).unwrap());
     }
     let path = env.home.join(".ssh/vst_config");
     let inode = std::fs::metadata(&path).unwrap().ino();
-    crate::ssh_config::update_host(&vars, &dict(r#"{"id":1,"ssh_host":"fake","ssh_port":22}"#))
-        .unwrap();
+    crate::vast::ssh_config::update_host(
+        &vars,
+        &dict(r#"{"id":1,"ssh_host":"fake","ssh_port":22}"#),
+    )
+    .unwrap();
     assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
 }
 

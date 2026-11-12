@@ -247,7 +247,7 @@ fn up_reports_no_ssh_alias_until_its_stanza_is_written() {
     let result = object.get("result").unwrap().as_dict().unwrap();
     assert_eq!(result.get("id"), Some(&Value::str("123")));
     assert_eq!(result.get("ssh_alias"), Some(&Value::Null));
-    assert!(!crate::ssh_config::has_host(&t.env(), "123").unwrap());
+    assert!(!crate::vast::ssh_config::has_host(&t.env(), "123").unwrap());
 }
 
 fn transient_then(states: &'static [&'static str]) -> Arc<FakeRunner> {

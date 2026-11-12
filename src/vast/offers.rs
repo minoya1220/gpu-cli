@@ -27,7 +27,7 @@ pub const CATEGORY_ORDER: [&str; 7] = [
     "Consumer RTX 30 and older",
     "Other",
 ];
-const BUNDLED_MODELS: &str = include_str!("../assets/gpu_models.txt");
+const BUNDLED_MODELS: &str = include_str!("../../assets/gpu_models.txt");
 
 /// Cheapest hourly price and offer count per GPU model.
 pub type Stats = HashMap<String, (f64, usize)>;

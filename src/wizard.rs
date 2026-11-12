@@ -7,13 +7,13 @@ use std::sync::Arc;
 
 use crate::ctx::{Ctx, Env};
 use crate::error::{Error, Result};
-use crate::offers::{
-    category_columns, group_by_category, model_columns, offer_rows, OfferSearch, Stats, NO_OFFERS,
-};
 use crate::picker::{pick, AnyJob, Job, JobState, Next, Opt, PickValue, Screen};
 use crate::pyjson::Dict;
 use crate::repos::{load_cached_repos, resolve_repo, Repo};
 use crate::table::{hardware_labels, HardwareColumns};
+use crate::vast::offers::{
+    category_columns, group_by_category, model_columns, offer_rows, OfferSearch, Stats, NO_OFFERS,
+};
 
 pub const MODES: [&str; 2] = ["container", "vm"];
 

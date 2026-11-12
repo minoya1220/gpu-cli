@@ -16,9 +16,9 @@ use crate::process::{Output, RunError};
 use crate::pyjson::{Dict, Value};
 use crate::redact::redact_text;
 use crate::repos::Repo;
-use crate::startup::{startup_script, ONSTART_LIMIT};
 use crate::testing::fixture_config as defaults;
 use crate::testing::*;
+use crate::vast::startup::{startup_script, ONSTART_LIMIT};
 
 const DEADLINE: i64 = 4_102_444_800;
 const CREATED: &str =

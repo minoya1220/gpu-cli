@@ -254,22 +254,20 @@ fn tpu_prices_load_automatically_and_no_setup_note_is_visible() {
         let wizard = crate::wizard::LaunchWizard::new(
             &env.env(),
             crate::wizard::WizardOptions {
-                repos: Job::new(|| Ok(Vec::new())),
                 search: Some(Arc::new(OfferFixture::default())),
                 models: vec!["RTX 4090".into()],
-                recent_gpus: Vec::new(),
-                choose_offer: false,
-                tpu_setup_error: (!configured).then(|| "needs gpu setup".into()),
-                tpu_transition: None,
-                tpu_prices: Some(job),
-                tpu_cached_prices: None,
-                tpu_types: if configured {
-                    vec!["v6e-1".into()]
-                } else {
-                    Vec::new()
-                },
-                tpu_catalog: None,
                 owner: "example".into(),
+                tpu: crate::wizard::TpuOptions {
+                    setup_error: (!configured).then(|| "needs gpu setup".into()),
+                    prices: Some(job),
+                    types: if configured {
+                        vec!["v6e-1".into()]
+                    } else {
+                        Vec::new()
+                    },
+                    ..Default::default()
+                },
+                ..Default::default()
             },
         );
         let Next::Screen(screen) = wizard.next(crate::wizard::Picks::new(

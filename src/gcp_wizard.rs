@@ -1,9 +1,8 @@
 //! TPU choices use the same numbered keyboard picker as Vast. Catalog calls
 //! are Jobs and never execute on a screen transition or the picker thread.
-use crate::cli::UpFlags;
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
-use crate::gcp::{self, Settings};
+use crate::gcp::{self, Settings, TpuArgs};
 use crate::picker::{AnyJob, Job, JobState, Next, Opt, Screen};
 use crate::pyjson::Dict;
 use crate::repos::{resolve_repo, Repo};
@@ -29,7 +28,7 @@ fn missing_flags() -> Error {
 }
 
 #[derive(Clone)]
-pub struct Picks {
+pub struct TpuPicks {
     pub zone: String,
     pub tpu: String,
     pub runtime: String,
@@ -105,7 +104,7 @@ fn catalog_screen_seeded<R: 'static>(
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct Selection {
+pub(crate) struct TpuSelection {
     pub zone: Option<String>,
     pub generation: Option<String>,
     pub tpu: Option<String>,
@@ -116,7 +115,11 @@ pub(crate) struct Selection {
 /// One screen stack for the TPU choices: back restores the previous selection
 /// and its loaded catalog rather than quitting a separate picker.
 #[cfg(test)]
-pub(crate) fn next(ctx: Ctx, settings: Settings, picks: Selection) -> Next<String, Selection> {
+pub(crate) fn next(
+    ctx: Ctx,
+    settings: Settings,
+    picks: TpuSelection,
+) -> Next<String, TpuSelection> {
     match crate::config::load_config(&ctx.env) {
         Ok(cfg) => next_with(ctx, settings, cfg, picks, None),
         Err(e) => Next::Notice(e.text().into()),
@@ -126,9 +129,9 @@ fn next_with(
     ctx: Ctx,
     settings: Settings,
     cfg: Dict,
-    picks: Selection,
+    picks: TpuSelection,
     data: Option<Types>,
-) -> Next<String, Selection> {
+) -> Next<String, TpuSelection> {
     if picks.tpu.is_none() {
         return Next::Screen(type_screen(ctx, settings, cfg, picks, data));
     }
@@ -154,7 +157,7 @@ fn next_with(
                         ctx.clone(),
                         settings.clone(),
                         cfg.clone(),
-                        Selection {
+                        TpuSelection {
                             zone: Some(zone),
                             ..picks.clone()
                         },
@@ -178,7 +181,7 @@ fn next_with(
                         ctx.clone(),
                         settings.clone(),
                         cfg.clone(),
-                        Selection {
+                        TpuSelection {
                             expiry_at: Some(at),
                             ..picks.clone()
                         },
@@ -209,9 +212,9 @@ pub(crate) fn capacity_screen(
     ctx: Ctx,
     settings: Settings,
     cfg: Dict,
-    picks: Selection,
+    picks: TpuSelection,
     data: Option<Types>,
-) -> Screen<String, Selection> {
+) -> Screen<String, TpuSelection> {
     // Carry the size screen's in-flight price job forward instead of starting
     // another read. Explicit --tpu launches enter here without that screen.
     let (rates, cached) = match data {
@@ -259,7 +262,7 @@ pub(crate) fn capacity_screen(
                 ctx.clone(),
                 settings.clone(),
                 cfg.clone(),
-                Selection {
+                TpuSelection {
                     spot: Some(value == "spot"),
                     ..picks.clone()
                 },
@@ -315,9 +318,9 @@ fn type_screen(
     ctx: Ctx,
     settings: Settings,
     cfg: Dict,
-    picks: Selection,
+    picks: TpuSelection,
     data: Option<Types>,
-) -> Screen<String, Selection> {
+) -> Screen<String, TpuSelection> {
     let data = data.unwrap_or_else(|| {
         let initial = crate::gcp_facts::known_types(&ctx, &settings.project, None)
             .into_iter()
@@ -405,7 +408,7 @@ fn type_screen(
                     ctx.clone(),
                     settings.clone(),
                     cfg.clone(),
-                    Selection {
+                    TpuSelection {
                         tpu: Some(value),
                         ..picks.clone()
                     },
@@ -416,7 +419,7 @@ fn type_screen(
                     ctx.clone(),
                     settings.clone(),
                     cfg.clone(),
-                    Selection {
+                    TpuSelection {
                         generation: Some(value),
                         ..picks.clone()
                     },
@@ -569,6 +572,14 @@ pub(crate) fn priced_zone_screen<R: 'static>(
     )
 }
 
+/// The TPU screen value inside the launch wizard's `Choice::Cloud` mapping.
+fn cloud_value(choice: crate::wizard::Choice) -> String {
+    match choice {
+        crate::wizard::Choice::Cloud(value) | crate::wizard::Choice::Text(value) => value,
+        _ => unreachable!("only TPU screens are mapped to Choice::Cloud"),
+    }
+}
+
 pub(crate) fn transition(
     ctx: &Ctx,
     args: &crate::launch::UpArgs,
@@ -580,7 +591,7 @@ pub(crate) fn transition(
     let cfg = cfg.clone();
     std::rc::Rc::new(move |wizard, picks| {
         let settings = match gcp::launch_setup(&ctx, &cfg).and_then(|(settings, _)| {
-            gcp::validate_tpu_flags(&gcp::picker_flags(&args, &picks))?;
+            gcp::TpuArgs::picked(&args, &picks)?;
             Ok(settings)
         }) {
             Ok(s) => s,
@@ -590,27 +601,24 @@ pub(crate) fn transition(
             Some(crate::wizard::TpuChoice::Type(t)) => Some(t.clone()),
             _ => None,
         };
-        let selection = Selection {
+        let selection = TpuSelection {
             generation: tpu.as_ref().filter(|t| !t.contains('-')).cloned(),
             tpu: tpu.filter(|t| t.contains('-')),
             expiry_at: deadline,
-            ..Selection::default()
+            ..TpuSelection::default()
         };
         let data = wizard.tpu_data();
-        let finish = std::rc::Rc::new(move |selection: Selection| {
+        let finish = std::rc::Rc::new(move |selection: TpuSelection| {
             wizard.next(crate::wizard::Picks {
                 tpu: selection.tpu.clone().map(crate::wizard::TpuChoice::Type),
                 cloud: Some(selection),
                 ..picks.clone()
             })
         });
-        let map = |screen: Screen<String, Selection>| {
+        let map = |screen: Screen<String, TpuSelection>| {
             screen.remap(
                 std::rc::Rc::new(crate::wizard::Choice::Cloud),
-                std::rc::Rc::new(|value| match value {
-                    crate::wizard::Choice::Cloud(s) | crate::wizard::Choice::Text(s) => s,
-                    _ => unreachable!("mapped cloud value"),
-                }),
+                std::rc::Rc::new(cloud_value),
                 finish.clone(),
             )
         };
@@ -646,11 +654,11 @@ pub(crate) fn runtime_for(tpu: &str) -> Result<&'static str> {
 
 pub(crate) fn initial_selection(
     ctx: &Ctx,
-    flags: &UpFlags,
+    flags: &TpuArgs,
     settings: &Settings,
     deadline: Option<jiff::Timestamp>,
-) -> Selection {
-    Selection {
+) -> TpuSelection {
+    TpuSelection {
         expiry_at: deadline,
         zone: flags.zone.clone().or_else(|| {
             if ctx.interactive() {
@@ -666,22 +674,19 @@ pub(crate) fn initial_selection(
             .filter(|s| !s.contains('-'))
             .map(|g| crate::gcp_types::family(g).to_string()),
         tpu: flags.tpu.clone().filter(|s| s.contains('-')),
-        spot: if ctx.interactive() && !flags.spot && !flags.on_demand {
-            None
-        } else {
-            Some(flags.spot)
-        },
+        // Non-interactive launches default to on-demand.
+        spot: flags.spot.or((!ctx.interactive()).then_some(false)),
     }
 }
 
 /// Resolve complete selections without a picker or dependency call. Launch
 /// preflight Jobs use this after the repository/zone screens have completed.
 pub(crate) fn complete(
-    flags: &UpFlags,
+    flags: &TpuArgs,
     cfg: &Dict,
-    selected: Selection,
+    selected: TpuSelection,
     repo: Repo,
-) -> Result<Picks> {
+) -> Result<TpuPicks> {
     let missing = missing_flags;
     let deadline = selected.expiry_at.ok_or_else(|| {
         Error::msg("TPU launches require a destruction deadline")
@@ -713,7 +718,7 @@ pub(crate) fn complete(
     } else {
         format!("/workspace/{name}")
     };
-    Ok(Picks {
+    Ok(TpuPicks {
         zone,
         tpu,
         runtime,
@@ -722,14 +727,6 @@ pub(crate) fn complete(
         directory,
         deadline,
     })
-}
-
-fn flag_repo(flags: &UpFlags) -> Option<Repo> {
-    if flags.no_repo {
-        Some(Repo::NoRepo)
-    } else {
-        flags.repo.as_deref().map(Repo::from_arg)
-    }
 }
 
 fn repository_wizard(ctx: &Ctx, cfg: &Dict) -> Result<crate::wizard::LaunchWizard> {
@@ -742,17 +739,8 @@ fn repository_wizard(ctx: &Ctx, cfg: &Dict) -> Result<crate::wizard::LaunchWizar
             repos: Job::new(move || {
                 crate::launch::sync_repos(&worker, &repo_owner).map_err(|e| e.text().into())
             }),
-            search: None,
-            models: Vec::new(),
-            recent_gpus: Vec::new(),
-            choose_offer: false,
-            tpu_setup_error: None,
-            tpu_transition: None,
-            tpu_prices: None,
-            tpu_cached_prices: None,
-            tpu_types: Vec::new(),
-            tpu_catalog: None,
             owner,
+            ..Default::default()
         },
     ))
 }
@@ -761,8 +749,8 @@ fn launch_next(
     ctx: &Ctx,
     settings: &Settings,
     cfg: &Dict,
-    selected: Selection,
-) -> Next<String, Selection> {
+    selected: TpuSelection,
+) -> Next<String, TpuSelection> {
     let type_selected = selected.tpu.is_some();
     let duration_only = type_selected && selected.spot.is_some() && selected.zone.is_some();
     let zone = selected.zone.clone();
@@ -781,11 +769,11 @@ fn launch_next(
 
 pub fn choose(
     ctx: &Ctx,
-    flags: &UpFlags,
+    flags: &TpuArgs,
     settings: &Settings,
     cfg: &Dict,
     deadline: Option<jiff::Timestamp>,
-) -> Result<Picks> {
+) -> Result<TpuPicks> {
     let selected = initial_selection(ctx, flags, settings, deadline);
     let selected = if ctx.interactive() {
         crate::picker::resolve(ctx, launch_next(ctx, settings, cfg, selected))?
@@ -794,13 +782,10 @@ pub fn choose(
     };
     // Preserve validation order before the optional repository picker.
     let draft = complete(flags, cfg, selected.clone(), Repo::NoRepo)?;
-    let repo = match flag_repo(flags) {
+    let repo = match flags.repo.clone() {
         Some(repo) => repo,
         None if ctx.interactive() => repository_wizard(ctx, cfg)?
-            .run(
-                ctx,
-                crate::wizard::Picks::new(None, Some("tpu"), Some(&draft.tpu)),
-            )?
+            .run(ctx, crate::wizard::Picks::for_tpu(None, &draft.tpu))?
             .repo
             .unwrap_or(Repo::NoRepo),
         None => return Err(missing_flags()),
@@ -812,7 +797,7 @@ pub fn choose(
 /// Left from approval therefore restores the actual zone/duration/repo page.
 pub(crate) fn choose_confirmed(
     ctx: &Ctx,
-    flags: &UpFlags,
+    flags: &TpuArgs,
     settings: &Settings,
     cfg: &Dict,
     deadline: Option<jiff::Timestamp>,
@@ -831,19 +816,15 @@ pub(crate) fn choose_confirmed(
     let step = crate::picker::map_next(
         first,
         Rc::new(Choice::Cloud),
-        Rc::new(|choice| match choice {
-            Choice::Cloud(value) | Choice::Text(value) => value,
-            _ => unreachable!("mapped TPU value"),
-        }),
-        Rc::new(move |selection: Selection| {
+        Rc::new(cloud_value),
+        Rc::new(move |selection: TpuSelection| {
             let wizard = match repository_wizard(&worker, &cfg) {
                 Ok(wizard) => wizard,
                 Err(e) => return Next::Notice(e.text().into()),
             };
-            let repo_step = wizard.next(crate::wizard::Picks::new(
-                flag_repo(&flags),
-                Some("tpu"),
-                Some("tpu"),
+            let repo_step = wizard.next(crate::wizard::Picks::for_tpu(
+                flags.repo.clone(),
+                selection.tpu.as_deref().unwrap_or_default(),
             ));
             let worker = worker.clone();
             let flags = flags.clone();

@@ -198,18 +198,13 @@ fn modal_gpu_rows_show_live_total_and_skip_vast_offer_screen() {
     let flow = LaunchWizard::new(
         &t.env(),
         WizardOptions {
-            repos: Job::new(|| Ok(Vec::new())),
-            search: None,
             models: vec!["RTX 4090".into()],
-            recent_gpus: Vec::new(),
             choose_offer: true,
-            tpu_setup_error: Some("not available".into()),
-            tpu_transition: None,
-            tpu_prices: None,
-            tpu_cached_prices: None,
-            tpu_types: Vec::new(),
-            tpu_catalog: None,
-            owner: String::new(),
+            tpu: crate::wizard::TpuOptions {
+                setup_error: Some("not available".into()),
+                ..Default::default()
+            },
+            ..Default::default()
         },
     )
     .with_modal(Some((Job::new(|| Ok(fake_rates())), 1, 4.0, 16.0)), false);
@@ -283,18 +278,13 @@ fn explicit_modal_provider_picker_lists_only_modal_rows_with_a_short_failure_rea
     let flow = LaunchWizard::new(
         &t.env(),
         WizardOptions {
-            repos: Job::new(|| Ok(Vec::new())),
-            search: None,
             models: vec!["RTX 4090".into()],
-            recent_gpus: Vec::new(),
             choose_offer: true,
-            tpu_setup_error: Some("not available".into()),
-            tpu_transition: None,
-            tpu_prices: None,
-            tpu_cached_prices: None,
-            tpu_types: Vec::new(),
-            tpu_catalog: None,
-            owner: String::new(),
+            tpu: crate::wizard::TpuOptions {
+                setup_error: Some("not available".into()),
+                ..Default::default()
+            },
+            ..Default::default()
         },
     )
     .with_modal(

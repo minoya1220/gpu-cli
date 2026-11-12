@@ -35,7 +35,7 @@ pub struct Picks {
     pub offer: Option<Dict>,
     pub tpu: Option<TpuChoice>,
     pub modal: Option<String>,
-    pub(crate) cloud: Option<crate::gcp_wizard::Selection>,
+    pub(crate) cloud: Option<crate::gcp_wizard::TpuSelection>,
 }
 
 impl Picks {
@@ -44,10 +44,17 @@ impl Picks {
             repo,
             mode: mode.map(String::from),
             gpu: gpu.map(String::from),
-            offer: None,
-            tpu: None,
-            modal: None,
-            cloud: None,
+            ..Picks::default()
+        }
+    }
+
+    /// Picks whose hardware is a TPU chosen outside this wizard; only the
+    /// repository is still asked.
+    pub(crate) fn for_tpu(repo: Option<Repo>, tpu: &str) -> Picks {
+        Picks {
+            repo,
+            tpu: Some(TpuChoice::Type(tpu.into())),
+            ..Picks::default()
         }
     }
 }
@@ -127,13 +134,9 @@ struct State {
     categories: Vec<(String, Vec<String>)>,
     recent_gpus: Vec<String>,
     choose_offer: bool,
-    tpu_setup_error: Option<String>,
-    tpu_transition: Option<CloudTransition>,
+    tpu: TpuOptions,
+    /// `tpu.prices`, or a job that reports TPUs as not set up.
     tpu_prices: Job<Arc<crate::gcp_prices::Prices>>,
-    prefetch_tpu_prices: bool,
-    tpu_cached_prices: Option<Arc<crate::gcp_prices::Prices>>,
-    tpu_types: Vec<String>,
-    tpu_catalog: Option<Job<Vec<String>>>,
     prices: RefCell<HashMap<String, Job<Stats>>>,
     prefetch_attached: Cell<bool>,
     preferred_mode: String,
@@ -159,14 +162,36 @@ pub struct WizardOptions {
     pub models: Vec<String>,
     pub recent_gpus: Vec<String>,
     pub choose_offer: bool,
-    /// Local config preflight only; no cloud calls on a screen transition.
-    pub tpu_setup_error: Option<String>,
-    pub tpu_transition: Option<CloudTransition>,
-    pub tpu_prices: Option<Job<Arc<crate::gcp_prices::Prices>>>,
-    pub tpu_cached_prices: Option<Arc<crate::gcp_prices::Prices>>,
-    pub tpu_types: Vec<String>,
-    pub tpu_catalog: Option<Job<Vec<String>>>,
     pub owner: String,
+    pub tpu: TpuOptions,
+}
+
+impl Default for WizardOptions {
+    fn default() -> Self {
+        WizardOptions {
+            repos: Job::new(|| Ok(Vec::new())),
+            search: None,
+            models: Vec::new(),
+            recent_gpus: Vec::new(),
+            choose_offer: false,
+            owner: String::new(),
+            tpu: TpuOptions::default(),
+        }
+    }
+}
+
+/// The Google Cloud TPU rows of the hardware screen.
+#[derive(Default)]
+pub struct TpuOptions {
+    /// Why TPUs are unavailable. Local config preflight only; no cloud calls
+    /// on a screen transition.
+    pub setup_error: Option<String>,
+    pub transition: Option<CloudTransition>,
+    /// Prefetched from the first screen when present.
+    pub prices: Option<Job<Arc<crate::gcp_prices::Prices>>>,
+    pub cached_prices: Option<Arc<crate::gcp_prices::Prices>>,
+    pub types: Vec<String>,
+    pub catalog: Option<Job<Vec<String>>>,
 }
 
 impl LaunchWizard {
@@ -192,15 +217,12 @@ impl LaunchWizard {
                 models: options.models,
                 recent_gpus,
                 choose_offer: options.choose_offer,
-                tpu_setup_error: options.tpu_setup_error,
-                tpu_transition: options.tpu_transition,
-                tpu_cached_prices: options.tpu_cached_prices,
-                tpu_types: options.tpu_types,
-                tpu_catalog: options.tpu_catalog,
-                prefetch_tpu_prices: options.tpu_prices.is_some(),
                 tpu_prices: options
-                    .tpu_prices
+                    .tpu
+                    .prices
+                    .clone()
                     .unwrap_or_else(|| Job::new(|| Err("needs gpu setup".into()))),
+                tpu: options.tpu,
                 prices: RefCell::new(HashMap::new()),
                 prefetch_attached: Cell::new(false),
                 modal: None,
@@ -245,11 +267,11 @@ impl LaunchWizard {
                 if self.state.search.is_some() {
                     screen = screen.prices(self.price_job(&mode));
                 }
-                if self.state.tpu_setup_error.is_none() {
-                    if self.state.prefetch_tpu_prices {
+                if self.state.tpu.setup_error.is_none() {
+                    if self.state.tpu.prices.is_some() {
                         screen = screen.prices(self.state.tpu_prices.clone());
                     }
-                    if let Some(catalog) = &self.state.tpu_catalog {
+                    if let Some(catalog) = &self.state.tpu.catalog {
                         screen = screen.background(catalog.clone());
                     }
                 }
@@ -264,7 +286,8 @@ impl LaunchWizard {
         if picks.repo.is_none() {
             return Next::Screen(self.repo_screen(picks, String::new()));
         }
-        if picks.mode.is_none() {
+        // A TPU needs no Vast mode.
+        if picks.mode.is_none() && picks.tpu.is_none() {
             return Next::Screen(self.mode_screen(picks));
         }
         if picks.gpu.is_none() && picks.tpu.is_none() && picks.modal.is_none() {
@@ -476,15 +499,16 @@ impl LaunchWizard {
     }
 
     fn tpu_types(&self) -> Vec<String> {
-        if self.state.tpu_setup_error.is_some() {
+        if self.state.tpu.setup_error.is_some() {
             return Vec::new();
         }
         let mut types = self
             .state
-            .tpu_catalog
+            .tpu
+            .catalog
             .as_ref()
             .and_then(Job::result)
-            .unwrap_or_else(|| self.state.tpu_types.clone());
+            .unwrap_or_else(|| self.state.tpu.types.clone());
         types = types.into_iter().map(crate::gcp_types::public).collect();
         types.sort();
         types.dedup();
@@ -493,22 +517,22 @@ impl LaunchWizard {
     pub(crate) fn tpu_data(&self) -> crate::gcp_wizard::Types {
         crate::gcp_wizard::Types {
             initial: self.tpu_types(),
-            catalog: self.state.tpu_catalog.clone().unwrap_or_else(|| {
+            catalog: self.state.tpu.catalog.clone().unwrap_or_else(|| {
                 let types = self.tpu_types();
                 Job::new(move || Ok(types.clone()))
             }),
             rates: self.state.tpu_prices.clone(),
-            cached: self.state.tpu_cached_prices.clone(),
+            cached: self.state.tpu.cached_prices.clone(),
         }
     }
     fn tpu_prices(&self) -> Option<Arc<crate::gcp_prices::Prices>> {
-        if self.state.tpu_setup_error.is_some() {
+        if self.state.tpu.setup_error.is_some() {
             None
         } else {
             self.state
                 .tpu_prices
                 .result()
-                .or_else(|| self.state.tpu_cached_prices.clone())
+                .or_else(|| self.state.tpu.cached_prices.clone())
         }
     }
     fn price_placeholder(state: JobState) -> &'static str {
@@ -519,7 +543,7 @@ impl LaunchWizard {
         }
     }
     fn tpu_rows(&self, shortcuts: Vec<String>) -> Vec<(Choice, HardwareColumns)> {
-        let shortcuts = if self.state.tpu_setup_error.is_some() {
+        let shortcuts = if self.state.tpu.setup_error.is_some() {
             Vec::new()
         } else {
             shortcuts
@@ -546,7 +570,7 @@ impl LaunchWizard {
                         &members.iter().map(String::as_str).collect::<Vec<_>>(),
                         minimum,
                     )
-                } else if self.state.tpu_setup_error.is_some() {
+                } else if self.state.tpu.setup_error.is_some() {
                     ["needs gpu setup".into(), "Spot -".into()]
                 } else {
                     let pending = matches!(
@@ -658,14 +682,14 @@ impl LaunchWizard {
                 gpu: Some(gpu),
                 ..follow.clone()
             }),
-            Choice::Tpu(tpu) => match &this.state.tpu_setup_error {
+            Choice::Tpu(tpu) => match &this.state.tpu.setup_error {
                 Some(message) => Next::Notice(format!("{message}\nNo TPU created.")),
                 None => {
                     let picks = Picks {
                         tpu: Some(tpu),
                         ..follow.clone()
                     };
-                    if let Some(flow) = &this.state.tpu_transition {
+                    if let Some(flow) = &this.state.tpu.transition {
                         flow(this.clone(), picks)
                     } else {
                         this.next(picks)
@@ -699,7 +723,7 @@ impl LaunchWizard {
                             format!("  {cache}")
                         }
                     )
-                } else if cloud.state.tpu_setup_error.is_some() {
+                } else if cloud.state.tpu.setup_error.is_some() {
                     String::new()
                 } else {
                     crate::redact::redact_text(&cloud.state.tpu_prices.error())
@@ -716,10 +740,10 @@ impl LaunchWizard {
                     .to_string()
             }
         });
-        if self.state.tpu_setup_error.is_none() {
+        if self.state.tpu.setup_error.is_none() {
             screen = screen.prices(self.state.tpu_prices.clone());
         }
-        if let Some(job) = &self.state.tpu_catalog {
+        if let Some(job) = &self.state.tpu.catalog {
             screen = screen.background(job.clone());
         }
         screen

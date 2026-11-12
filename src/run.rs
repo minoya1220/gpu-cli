@@ -91,6 +91,9 @@ pub(crate) struct RunPlan {
     pub(crate) request: Result<Value>,
 }
 
+/// `gpu run` rents Vast or Modal GPUs, never TPUs.
+const NO_TPU: &str = "gpu run uses Vast or Modal GPUs; TPUs are not supported.";
+
 pub(crate) trait RunBackend {
     fn provider(&self) -> Provider;
     fn plan(
@@ -312,21 +315,24 @@ fn expiry_screen(now: Timestamp) -> crate::picker::Screen<String, String> {
     .back_clears_input(false)
 }
 
-fn args(flags: &RunFlags) -> UpArgs {
-    UpArgs {
-        repo: Some(crate::repos::Repo::NoRepo),
-        mode: Some("container".into()),
-        gpu: flags.gpu.clone(),
-        num_gpus: flags.num_gpus,
-        max_price: flags.max_price,
-        offer: flags.offer,
-        disk: flags.disk,
-        yes: flags.yes || flags.dry_run,
-        dry_run: flags.dry_run,
-        expire: flags.expire.clone(),
-        reliability: flags.reliability,
-        unverified: flags.unverified,
-        interruptible: false,
+/// A run is a container launch without a repository.
+impl From<&RunFlags> for UpArgs {
+    fn from(flags: &RunFlags) -> UpArgs {
+        UpArgs {
+            repo: Some(crate::repos::Repo::NoRepo),
+            mode: Some("container".into()),
+            gpu: flags.gpu.clone(),
+            num_gpus: flags.num_gpus,
+            max_price: flags.max_price,
+            offer: flags.offer,
+            disk: flags.disk,
+            yes: flags.yes || flags.dry_run,
+            dry_run: flags.dry_run,
+            expire: flags.expire.clone(),
+            reliability: flags.reliability,
+            unverified: flags.unverified,
+            interruptible: false,
+        }
     }
 }
 
@@ -355,7 +361,6 @@ fn choose(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, args: &UpArgs) -> Result<Sele
         let wizard = crate::wizard::LaunchWizard::new(
             &ctx.env,
             crate::wizard::WizardOptions {
-                repos: Job::new(|| Ok(Vec::new())),
                 search: search
                     .clone()
                     .map(|s| Arc::new(s) as Arc<dyn crate::wizard::Search>),
@@ -366,13 +371,11 @@ fn choose(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, args: &UpArgs) -> Result<Sele
                 },
                 recent_gpus: crate::history::recent_picks(&ctx.env, "gpu"),
                 choose_offer: !flags.yes && flags.offer.is_none(),
-                owner: String::new(),
-                tpu_setup_error: Some("gpu run phase 1 supports Vast GPUs only.".into()),
-                tpu_transition: None,
-                tpu_prices: None,
-                tpu_cached_prices: None,
-                tpu_types: Vec::new(),
-                tpu_catalog: None,
+                tpu: crate::wizard::TpuOptions {
+                    setup_error: Some(NO_TPU.into()),
+                    ..Default::default()
+                },
+                ..Default::default()
             },
         )
         .with_modal(modal.clone(), modal_only);
@@ -391,7 +394,7 @@ fn choose(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, args: &UpArgs) -> Result<Sele
             ));
         }
         if picks.tpu.is_some() {
-            return Err(Error::usage("gpu run supports Vast GPUs only."));
+            return Err(Error::usage(NO_TPU));
         }
         if let Some(offer) = picks.offer {
             return Ok(Selection::Vast(offer));
@@ -490,7 +493,7 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
         ctx.protect_secret(value);
         env.push_str(&format!("export {key}={}\n", shell_quote(value)));
     }
-    let args = args(flags);
+    let args = UpArgs::from(flags);
     crate::launch::validate_launch_args(&args).map_err(|e| Error::usage(e.text()))?;
     let upload = run_files::prepare(ctx, cwd, run_files::max_bytes(&flags.max_upload)?)?;
     let secrets: Vec<_> = upload

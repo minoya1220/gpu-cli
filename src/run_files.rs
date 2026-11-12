@@ -112,7 +112,9 @@ pub(crate) fn prepare(ctx: &Ctx, cwd: &Path, cap: u64) -> Result<Upload> {
             let stage = git_file(ctx, &root, &["ls-files", "--stage", "-z"])?
                 .ok_or_else(|| Error::msg("Cannot enumerate git files."))?;
             if stage.split(|b| *b == 0).any(|s| s.starts_with(b"160000 ")) {
-                return Err(Error::usage("gpu run phase 1 does not support submodules; upload a project without gitlinks."));
+                return Err(Error::usage(
+                    "gpu run does not upload git submodules; upload a project without gitlinks.",
+                ));
             }
             let list = git_file(
                 ctx,

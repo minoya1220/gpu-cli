@@ -31,12 +31,7 @@ pub(crate) fn nonterminal(ctx: &Ctx, command: &Command, cfg: &Dict) -> Result<()
             if flags.expire.as_deref().is_none_or(str::is_empty) {
                 missing.push("Non-terminal gpu up requires --expire DURATION (e.g. --expire 2h), or default_expire in config.json.");
             }
-            let tpu = flags.provider == Some(crate::provider::Provider::Gcp)
-                || flags.tpu.is_some()
-                || flags.zone.is_some()
-                || flags.runtime.is_some()
-                || flags.spot
-                || flags.on_demand;
+            let tpu = flags.target() == crate::provider::Provider::Gcp;
             if if tpu {
                 flags.tpu.is_none()
             } else {

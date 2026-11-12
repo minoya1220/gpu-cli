@@ -412,9 +412,65 @@ pub fn launch_setup(ctx: &Ctx, cfg: &Dict) -> Result<(Settings, crate::gcp_expir
     })
 }
 
-/// Carry the normal wizard's repository and TPU choice into the cloud flow.
-/// Only the mode chosen *in the UI* is dropped: explicit Vast-only flags remain
-/// present so the TPU adapter can reject them rather than silently ignore them.
+/// What a TPU launch reads from `gpu up` flags or the launch picker.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct TpuArgs {
+    pub tpu: Option<String>,
+    pub zone: Option<String>,
+    pub runtime: Option<String>,
+    /// `Some(true)` for spot, `Some(false)` for on-demand, `None` to ask.
+    pub spot: Option<bool>,
+    pub repo: Option<crate::repos::Repo>,
+    pub yes: bool,
+    pub dry_run: bool,
+}
+
+impl TpuArgs {
+    /// TPU arguments from `gpu up` flags. Vast-only flags are rejected, never
+    /// silently ignored.
+    pub(crate) fn from_flags(flags: &UpFlags) -> Result<TpuArgs> {
+        let args = crate::launch::UpArgs::from(flags);
+        reject_vast_flags(&args)?;
+        Ok(TpuArgs {
+            tpu: flags.tpu.clone(),
+            zone: flags.zone.clone(),
+            runtime: flags.runtime.clone(),
+            spot: match (flags.spot, flags.on_demand) {
+                (true, _) => Some(true),
+                (_, true) => Some(false),
+                _ => None,
+            },
+            repo: args.repo,
+            yes: args.yes,
+            dry_run: args.dry_run,
+        })
+    }
+
+    /// The launch picker's repository and TPU choice. Only the mode chosen
+    /// *in the UI* is dropped: explicit Vast-only flags are still rejected.
+    pub(crate) fn picked(
+        args: &crate::launch::UpArgs,
+        picks: &crate::wizard::Picks,
+    ) -> Result<TpuArgs> {
+        reject_vast_flags(args)?;
+        let cloud = picks.cloud.as_ref();
+        let chosen = match &picks.tpu {
+            Some(crate::wizard::TpuChoice::Type(tpu)) => Some(tpu.clone()),
+            _ => None,
+        };
+        Ok(TpuArgs {
+            tpu: cloud.and_then(|s| s.tpu.clone()).or(chosen),
+            zone: cloud.and_then(|s| s.zone.clone()),
+            runtime: None,
+            spot: cloud.and_then(|s| s.spot),
+            repo: Some(picks.repo.clone().unwrap_or(crate::repos::Repo::NoRepo)),
+            yes: args.yes,
+            dry_run: args.dry_run,
+        })
+    }
+}
+
+/// Launch what the normal wizard picked through the TPU flow.
 pub fn launch_from_picker(
     ctx: &Ctx,
     args: &crate::launch::UpArgs,
@@ -422,61 +478,21 @@ pub fn launch_from_picker(
     cfg: &Dict,
     deadline: Option<Timestamp>,
 ) -> Result<()> {
-    let flags = picker_flags(args, picks);
+    let tpu = TpuArgs::picked(args, picks)?;
     let deadline = picks.cloud.as_ref().and_then(|s| s.expiry_at).or(deadline);
-    launch(ctx, &flags, cfg, deadline)
-}
-pub(crate) fn picker_flags(args: &crate::launch::UpArgs, picks: &crate::wizard::Picks) -> UpFlags {
-    let repo = picks.repo.clone().unwrap_or(crate::repos::Repo::NoRepo);
-    let tpu = match &picks.tpu {
-        Some(crate::wizard::TpuChoice::Type(tpu)) => Some(tpu.clone()),
-        _ => None,
-    };
-    UpFlags {
-        provider: Some(crate::provider::Provider::Gcp),
-        tpu: picks.cloud.as_ref().and_then(|s| s.tpu.clone()).or(tpu),
-        zone: picks.cloud.as_ref().and_then(|s| s.zone.clone()),
-        runtime: None,
-        spot: picks.cloud.as_ref().and_then(|s| s.spot).unwrap_or(false),
-        on_demand: picks
-            .cloud
-            .as_ref()
-            .and_then(|s| s.spot)
-            .is_some_and(|spot| !spot),
-        repo: if repo == crate::repos::Repo::NoRepo {
-            None
-        } else {
-            Some(repo.as_arg().into())
-        },
-        no_repo: repo == crate::repos::Repo::NoRepo,
-        mode: args.mode.clone(),
-        gpu: args.gpu.clone(),
-        num_gpus: args.num_gpus,
-        max_price: args.max_price,
-        interruptible: args.interruptible,
-        offer: args.offer,
-        disk: args.disk,
-        yes: args.yes,
-        dry_run: args.dry_run,
-        expire: args.expire.clone(),
-        reliability: args.reliability,
-        unverified: args.unverified,
-        wait: false,
-        wait_setup: false,
-        timeout: 120.0,
-    }
+    launch(ctx, &tpu, cfg, deadline)
 }
 
-pub(crate) fn validate_tpu_flags(flags: &UpFlags) -> Result<()> {
-    if flags.mode.is_some()
-        || flags.gpu.is_some()
-        || flags.num_gpus != 1
-        || flags.max_price.is_some()
-        || flags.interruptible
-        || flags.offer.is_some()
-        || flags.disk.is_some()
-        || flags.reliability.is_some()
-        || flags.unverified
+fn reject_vast_flags(args: &crate::launch::UpArgs) -> Result<()> {
+    if args.mode.is_some()
+        || args.gpu.is_some()
+        || args.num_gpus != 1
+        || args.max_price.is_some()
+        || args.interruptible
+        || args.offer.is_some()
+        || args.disk.is_some()
+        || args.reliability.is_some()
+        || args.unverified
     {
         return Err(Error::msg("Vast GPU/offer/disk flags do not apply to TPUs")
             .next("gpu up --provider gcp --help"));
@@ -486,13 +502,13 @@ pub(crate) fn validate_tpu_flags(flags: &UpFlags) -> Result<()> {
 
 #[derive(Clone)]
 pub(crate) struct Prepared {
-    pub(crate) picks: crate::gcp_wizard::Picks,
+    pub(crate) picks: crate::gcp_wizard::TpuPicks,
     title: String,
     price: String,
     rate: Option<f64>,
 }
 
-fn quote(ctx: &Ctx, cfg: &Dict, picks: &crate::gcp_wizard::Picks) -> (String, Option<f64>) {
+fn quote(ctx: &Ctx, cfg: &Dict, picks: &crate::gcp_wizard::TpuPicks) -> (String, Option<f64>) {
     match crate::gcp_prices::load_for(ctx, cfg, &picks.zone, Some((&picks.tpu, picks.spot))) {
         Ok(prices) => (
             prices.quote(&picks.tpu, picks.spot),
@@ -502,7 +518,7 @@ fn quote(ctx: &Ctx, cfg: &Dict, picks: &crate::gcp_wizard::Picks) -> (String, Op
     }
 }
 
-fn launch_title(ctx: &Ctx, picks: &crate::gcp_wizard::Picks, price: &str) -> String {
+fn launch_title(ctx: &Ctx, picks: &crate::gcp_wizard::TpuPicks, price: &str) -> String {
     format!(
         "Launch {} {} in {} for {price}, deletes at {}? (storage and networking charges apply)",
         crate::gcp_types::public(picks.tpu.clone()),
@@ -512,7 +528,7 @@ fn launch_title(ctx: &Ctx, picks: &crate::gcp_wizard::Picks, price: &str) -> Str
     )
 }
 
-fn prepare(ctx: &Ctx, cfg: &Dict, picks: crate::gcp_wizard::Picks) -> Result<Prepared> {
+fn prepare(ctx: &Ctx, cfg: &Dict, picks: crate::gcp_wizard::TpuPicks) -> Result<Prepared> {
     let (settings, queue) = launch_setup(ctx, cfg)?;
     crate::gcp_expiry::validate_deadline(ctx, picks.deadline)?;
     startup(&picks.repo, cfg)?;
@@ -531,7 +547,7 @@ fn prepare(ctx: &Ctx, cfg: &Dict, picks: crate::gcp_wizard::Picks) -> Result<Pre
 fn preparation_job(
     ctx: &Ctx,
     cfg: &Dict,
-    picks: crate::gcp_wizard::Picks,
+    picks: crate::gcp_wizard::TpuPicks,
 ) -> crate::picker::Job<crate::prompt::Confirmation<Prepared>> {
     let worker = ctx.clone();
     let cfg = cfg.clone();
@@ -547,7 +563,7 @@ fn preparation_job(
 pub(crate) fn confirmation<V: crate::picker::PickValue>(
     ctx: &Ctx,
     cfg: &Dict,
-    picks: crate::gcp_wizard::Picks,
+    picks: crate::gcp_wizard::TpuPicks,
 ) -> crate::picker::Screen<V, Prepared> {
     crate::prompt::confirmation_screen(preparation_job(ctx, cfg, picks))
 }
@@ -555,7 +571,7 @@ pub(crate) fn confirmation<V: crate::picker::PickValue>(
 fn retry_confirmation(
     ctx: &Ctx,
     cfg: &Dict,
-    picks: &crate::gcp_wizard::Picks,
+    picks: &crate::gcp_wizard::TpuPicks,
     screen: crate::picker::Screen<String, Option<crate::gcp_retry::Choice>>,
     approved: std::rc::Rc<std::cell::RefCell<Option<Prepared>>>,
 ) -> crate::picker::Screen<String, Option<crate::gcp_retry::Choice>> {
@@ -597,7 +613,7 @@ fn retry_confirmation(
 
 pub(crate) fn launch_prepared(
     ctx: &Ctx,
-    flags: &UpFlags,
+    flags: &TpuArgs,
     cfg: &Dict,
     prepared: Prepared,
 ) -> Result<()> {
@@ -611,14 +627,14 @@ pub(crate) fn launch_prepared(
     )
 }
 
-pub fn launch(ctx: &Ctx, flags: &UpFlags, cfg: &Dict, deadline: Option<Timestamp>) -> Result<()> {
+pub fn launch(ctx: &Ctx, flags: &TpuArgs, cfg: &Dict, deadline: Option<Timestamp>) -> Result<()> {
     launch_with_retry(ctx, flags, cfg, deadline, |screen| {
         crate::picker::pick(ctx, screen)
     })
 }
 pub(crate) fn launch_with_retry(
     ctx: &Ctx,
-    flags: &UpFlags,
+    flags: &TpuArgs,
     cfg: &Dict,
     deadline: Option<Timestamp>,
     retry: impl FnMut(
@@ -630,7 +646,7 @@ pub(crate) fn launch_with_retry(
 
 fn launch_loop(
     ctx: &Ctx,
-    flags: &UpFlags,
+    flags: &TpuArgs,
     cfg: &Dict,
     deadline: Option<Timestamp>,
     mut prepared: Option<Prepared>,
@@ -639,7 +655,6 @@ fn launch_loop(
     ) -> Result<Option<crate::gcp_retry::Choice>>,
 ) -> Result<()> {
     let (settings, queue) = launch_setup(ctx, cfg)?;
-    validate_tpu_flags(flags)?;
     if prepared.is_none() && ctx.interactive() && !flags.yes && !flags.dry_run {
         prepared = Some(crate::gcp_wizard::choose_confirmed(
             ctx, flags, &settings, cfg, deadline,

@@ -13,7 +13,9 @@ use crate::picker::{Job, Next, Outcome};
 use crate::pyjson::Dict;
 use crate::repos::Repo;
 use crate::testing::{dict, TestEnv};
-use crate::wizard::{LaunchWizard, Picks, Search, TpuChoice, WizardOptions, TPU_CATEGORY};
+use crate::wizard::{
+    LaunchWizard, Picks, Search, TpuChoice, TpuOptions, WizardOptions, TPU_CATEGORY,
+};
 
 const MODELS: [&str; 5] = ["B200", "H100 SXM", "RTX 4090", "RTX 5090", "Tesla T4"];
 
@@ -92,13 +94,11 @@ fn wizard(
             models: MODELS.map(String::from).to_vec(),
             recent_gpus: recent.iter().map(|s| s.to_string()).collect(),
             choose_offer,
-            tpu_setup_error: None,
-            tpu_transition: None,
-            tpu_prices: None,
-            tpu_cached_prices: None,
-            tpu_types: vec!["v5e-1".into(), "v6e-1".into()],
-            tpu_catalog: None,
             owner: "sampleuser".into(),
+            tpu: TpuOptions {
+                types: vec!["v5e-1".into(), "v6e-1".into()],
+                ..Default::default()
+            },
         },
     )
 }
@@ -191,13 +191,12 @@ fn hardware_grid_aligns_recents_categories_search_and_models_without_new_jobs() 
             models: MODELS.map(String::from).to_vec(),
             recent_gpus: vec!["RTX 4090".into()],
             choose_offer: true,
-            tpu_setup_error: None,
-            tpu_transition: None,
-            tpu_prices: Some(rates),
-            tpu_cached_prices: None,
-            tpu_types: vec!["v6e-1".into()],
-            tpu_catalog: None,
             owner: "example".into(),
+            tpu: TpuOptions {
+                prices: Some(rates),
+                types: vec!["v6e-1".into()],
+                ..Default::default()
+            },
         },
     );
     let result = run(
@@ -291,23 +290,22 @@ fn metadata_jobs_are_running_on_repository_and_reused_through_tpu_capacity() {
                 repos: Job::new(|| Ok(vec!["demo".into()])),
                 search: Some(search.clone()),
                 models: MODELS.map(String::from).to_vec(),
-                recent_gpus: Vec::new(),
-                choose_offer: false,
-                tpu_setup_error: None,
-                tpu_transition: Some(crate::gcp_wizard::transition(
-                    &ctx,
-                    &crate::launch::UpArgs {
-                        num_gpus: 1,
-                        ..Default::default()
-                    },
-                    &cfg,
-                    None,
-                )),
-                tpu_prices: Some(prices),
-                tpu_cached_prices: None,
-                tpu_types: Vec::new(),
-                tpu_catalog: Some(catalog),
                 owner: "example".into(),
+                tpu: TpuOptions {
+                    transition: Some(crate::gcp_wizard::transition(
+                        &ctx,
+                        &crate::launch::UpArgs {
+                            num_gpus: 1,
+                            ..Default::default()
+                        },
+                        &cfg,
+                        None,
+                    )),
+                    prices: Some(prices),
+                    catalog: Some(catalog),
+                    ..Default::default()
+                },
+                ..Default::default()
             },
         );
         let watched = search.clone();
@@ -384,18 +382,15 @@ fn prefetch_without_google_setup_never_calls_cloud_even_after_opening_gpu() {
     let flow = LaunchWizard::new(
         &env.env(),
         WizardOptions {
-            repos: Job::new(|| Ok(Vec::new())),
             search: Some(FakeSearch::new()),
-            models: Vec::new(),
-            recent_gpus: Vec::new(),
-            choose_offer: false,
-            tpu_setup_error: Some("needs gpu setup".into()),
-            tpu_transition: None,
-            tpu_prices: Some(prices),
-            tpu_cached_prices: None,
-            tpu_types: Vec::new(),
-            tpu_catalog: Some(catalog),
             owner: "example".into(),
+            tpu: TpuOptions {
+                setup_error: Some("needs gpu setup".into()),
+                prices: Some(prices),
+                catalog: Some(catalog),
+                ..Default::default()
+            },
+            ..Default::default()
         },
     );
     let result = run(&flow, Picks::default(), move |keys| {
@@ -473,17 +468,9 @@ fn test_repository_shortcuts_full_list_and_global_filter() {
             &t.env(),
             WizardOptions {
                 repos: Job::new(|| Ok((1..=12).map(|i| format!("project-{i}")).collect())),
-                search: None,
                 models: MODELS.map(String::from).to_vec(),
-                recent_gpus: Vec::new(),
-                choose_offer: false,
-                tpu_setup_error: None,
-                tpu_transition: None,
-                tpu_prices: None,
-                tpu_cached_prices: None,
-                tpu_types: Vec::new(),
-                tpu_catalog: None,
                 owner: "sampleuser".into(),
+                ..Default::default()
             },
         );
         let result = run(
@@ -557,17 +544,8 @@ fn test_short_repository_lists_keep_static_digits_and_omit_all() {
             &t.env(),
             WizardOptions {
                 repos: Job::new(move || Ok((1..=count).map(|i| format!("project-{i}")).collect())),
-                search: None,
-                models: Vec::new(),
-                recent_gpus: Vec::new(),
-                choose_offer: false,
-                tpu_setup_error: None,
-                tpu_transition: None,
-                tpu_prices: None,
-                tpu_cached_prices: None,
-                tpu_types: Vec::new(),
-                tpu_catalog: None,
                 owner: "sampleuser".into(),
+                ..Default::default()
             },
         );
         let result = run(

@@ -4,7 +4,7 @@ use crate::{
     ctx::Ctx,
     gcp::Settings,
     gcp_catalog::Zone,
-    gcp_wizard::Picks,
+    gcp_wizard::TpuPicks,
     picker::{Job, Next, Opt, Screen},
     pyjson::Dict,
 };
@@ -25,7 +25,7 @@ struct Offer {
 pub(crate) fn alternatives(
     ctx: &Ctx,
     settings: &Settings,
-    picks: &Picks,
+    picks: &TpuPicks,
     excluded: &BTreeSet<String>,
     count: usize,
 ) -> Vec<Zone> {
@@ -52,7 +52,7 @@ pub(crate) fn alternatives(
     }
     found
 }
-pub(crate) fn command(picks: &Picks, zone: &str) -> String {
+pub(crate) fn command(picks: &TpuPicks, zone: &str) -> String {
     let mut args = vec![
         "gpu".to_string(),
         "up".into(),
@@ -80,7 +80,7 @@ pub(crate) fn screen(
     ctx: &Ctx,
     settings: &Settings,
     cfg: &Dict,
-    picks: &Picks,
+    picks: &TpuPicks,
     excluded: &BTreeSet<String>,
 ) -> Screen<String, Option<Choice>> {
     let worker = ctx.clone();

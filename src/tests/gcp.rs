@@ -1021,7 +1021,7 @@ fn expiry_entry_has_duration_help_validation_and_back_to_capacity() {
     let Next::Screen(first) = crate::gcp_wizard::next(
         ctx,
         settings,
-        crate::gcp_wizard::Selection {
+        crate::gcp_wizard::TpuSelection {
             zone: Some("us-east5-b".into()),
             tpu: Some("v6e-1".into()),
             ..Default::default()
@@ -1264,7 +1264,7 @@ fn capacity_prices_reuse_the_size_job_without_blocking_input() {
         Ok(Arc::new(super::gcp_prices::prices()))
     });
     let settings = crate::gcp::Settings::load(&configuration()).unwrap();
-    let selected = crate::gcp_wizard::Selection {
+    let selected = crate::gcp_wizard::TpuSelection {
         tpu: Some("v6e-4".into()),
         zone: Some("us-east5-b".into()),
         expiry_at: Some("2026-11-03T02:00:00Z".parse().unwrap()),
@@ -1311,7 +1311,7 @@ fn capacity_prices_reuse_the_size_job_without_blocking_input() {
     });
     assert_eq!(
         result,
-        Outcome::Done(crate::gcp_wizard::Selection {
+        Outcome::Done(crate::gcp_wizard::TpuSelection {
             spot: Some(true),
             ..selected
         })
@@ -1326,7 +1326,7 @@ fn failed_or_missing_capacity_prices_still_allow_number_selection() {
     for failed in [false, true] {
         let (_env, ctx, runner, _) = fixture();
         let settings = crate::gcp::Settings::load(&configuration()).unwrap();
-        let selected = crate::gcp_wizard::Selection {
+        let selected = crate::gcp_wizard::TpuSelection {
             tpu: Some("v5e-1".into()),
             zone: Some("us-east5-b".into()),
             expiry_at: Some("2026-11-03T02:00:00Z".parse().unwrap()),
@@ -1364,7 +1364,7 @@ fn failed_or_missing_capacity_prices_still_allow_number_selection() {
         });
         assert_eq!(
             result,
-            Outcome::Done(crate::gcp_wizard::Selection {
+            Outcome::Done(crate::gcp_wizard::TpuSelection {
                 spot: Some(true),
                 ..selected
             })
@@ -1520,7 +1520,7 @@ fn incomplete_inventory_never_proves_absence() {
     }
 }
 
-fn retry_flags() -> crate::cli::UpFlags {
+fn retry_flags() -> crate::gcp::TpuArgs {
     let mut args = UP.to_vec();
     args.extend(["--zone", "us-east5-b", "--spot"]);
     let crate::cli::Parsed::Run(command) = crate::cli::parse(&argv(&args)) else {
@@ -1529,7 +1529,7 @@ fn retry_flags() -> crate::cli::UpFlags {
     let crate::cli::Command::Up(flags) = *command else {
         panic!("up")
     };
-    flags
+    crate::gcp::TpuArgs::from_flags(&flags).unwrap()
 }
 fn restrict_retry_zones(ctx: &Ctx) {
     let mut zones = crate::gcp_facts::known_zones(ctx, "test-project");
@@ -1678,7 +1678,7 @@ fn retry_can_return_to_grouped_zone_picker_without_authorizing_payment() {
     let (env, ctx, _runner, _state) = fixture();
     restrict_retry_zones(&ctx);
     super::gcp_prices::cache(&env);
-    let picks = crate::gcp_wizard::Picks {
+    let picks = crate::gcp_wizard::TpuPicks {
         zone: "us-east5-b".into(),
         tpu: "v6e-1".into(),
         spot: true,
@@ -1969,25 +1969,21 @@ fn mapped_cloud_completion_still_waits_for_cached_repository_validation() {
                 assert!(blocked.wait());
                 Ok(vec!["demo".into()])
             }),
-            search: None,
-            models: Vec::new(),
-            recent_gpus: Vec::new(),
-            choose_offer: false,
-            tpu_setup_error: None,
-            tpu_transition: Some(crate::gcp_wizard::transition(
-                &ctx,
-                &crate::launch::UpArgs {
-                    num_gpus: 1,
-                    ..Default::default()
-                },
-                &cfg,
-                Some("2026-11-03T02:00:00Z".parse().unwrap()),
-            )),
-            tpu_prices: None,
-            tpu_cached_prices: None,
-            tpu_types: crate::gcp_facts::known_types(&ctx, "test-project", None),
-            tpu_catalog: None,
             owner: "owner".into(),
+            tpu: crate::wizard::TpuOptions {
+                transition: Some(crate::gcp_wizard::transition(
+                    &ctx,
+                    &crate::launch::UpArgs {
+                        num_gpus: 1,
+                        ..Default::default()
+                    },
+                    &cfg,
+                    Some("2026-11-03T02:00:00Z".parse().unwrap()),
+                )),
+                types: crate::gcp_facts::known_types(&ctx, "test-project", None),
+                ..Default::default()
+            },
+            ..Default::default()
         },
     );
     let Next::Screen(first) = wizard.next(crate::wizard::Picks::new(None, Some("container"), None))

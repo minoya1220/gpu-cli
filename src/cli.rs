@@ -277,6 +277,27 @@ pub struct UpFlags {
     pub unverified: bool,
 }
 
+impl UpFlags {
+    /// Whether any flag that only a TPU launch reads is present.
+    pub fn tpu_flags(&self) -> bool {
+        self.tpu.is_some()
+            || self.zone.is_some()
+            || self.runtime.is_some()
+            || self.spot
+            || self.on_demand
+    }
+
+    /// The launch's provider: `--provider`, else Google Cloud when TPU flags
+    /// are present, else Vast.
+    pub fn target(&self) -> Provider {
+        self.provider.unwrap_or(if self.tpu_flags() {
+            Provider::Gcp
+        } else {
+            Provider::Vast
+        })
+    }
+}
+
 #[derive(clap::Args, Clone, Debug)]
 pub struct RunFlags {
     /// Provider (Vast by default; Modal also available in the GPU picker)

@@ -64,7 +64,6 @@ use cli::{Command, Parsed};
 use ctx::Ctx;
 use error::{Error, Result};
 use launch::UpArgs;
-use repos::Repo;
 
 /// Run the CLI with `argv` (program name first); the exit status.
 pub fn main_with(argv: &[String], ctx: &Ctx) -> i32 {
@@ -125,35 +124,17 @@ pub fn main_with(argv: &[String], ctx: &Ctx) -> i32 {
     outcome.err().map_or(0, |error| error.exit_code())
 }
 
-fn up_args(flags: cli::UpFlags) -> UpArgs {
-    let repo = if flags.no_repo {
-        Some(Repo::NoRepo)
-    } else {
-        flags.repo.as_deref().map(Repo::from_arg)
-    };
-    UpArgs {
-        repo,
-        mode: flags.mode,
-        gpu: flags.gpu,
-        num_gpus: flags.num_gpus,
-        max_price: flags.max_price,
-        interruptible: flags.interruptible,
-        offer: flags.offer,
-        disk: flags.disk,
-        yes: flags.yes,
-        dry_run: flags.dry_run,
-        expire: flags.expire,
-        reliability: flags.reliability,
-        unverified: flags.unverified,
-    }
-}
-
 fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
     let mut cfg = config::load_config(&ctx.env)?;
     ctx.set_gcp_ready(setup::gcp_ready(&cfg));
     if let Command::Up(flags) = &mut command {
         guardrails::defaults(flags, &cfg)?;
-        launch::validate_launch_args(&up_args(flags.clone()))?;
+        if flags.target() == provider::Provider::Vast && flags.tpu_flags() {
+            return Err(
+                Error::msg("TPU flags do not apply to Vast").next("gpu up --provider gcp --help")
+            );
+        }
+        launch::validate_launch_args(&UpArgs::from(&*flags))?;
         // Syntax validation does not need an inferred account name.
         if let Some(repo) = &flags.repo {
             repos::resolve_repo(repo, "owner")?;
@@ -245,24 +226,12 @@ fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
                 ctx.set_ssh_timeout(timeout);
             }
             ctx.result("dry_run", pyjson::Value::Bool(flags.dry_run));
-            let tpu_flags = flags.tpu.is_some()
-                || flags.zone.is_some()
-                || flags.runtime.is_some()
-                || flags.spot
-                || flags.on_demand;
-            // TPU flags imply Google Cloud; only an explicit --provider vast rejects them.
-            if flags.provider == Some(crate::provider::Provider::Gcp)
-                || (flags.provider.is_none() && tpu_flags)
-            {
-                gcp::launch(ctx, &flags, &cfg, up_deadline)?;
+            if flags.target() == provider::Provider::Gcp {
+                gcp::launch(ctx, &gcp::TpuArgs::from_flags(&flags)?, &cfg, up_deadline)?;
                 return remote::after_up(ctx, wait && !flags.dry_run, timeout, wait_setup);
             }
-            if tpu_flags {
-                return Err(Error::msg("TPU flags do not apply to Vast")
-                    .next("gpu up --provider gcp --help"));
-            }
             let dry_run = flags.dry_run;
-            launch::launch(ctx, &up_args(flags), &cfg, up_deadline)?;
+            launch::launch(ctx, &UpArgs::from(&flags), &cfg, up_deadline)?;
             remote::after_up(ctx, wait && !dry_run, timeout, wait_setup)
         }
         Command::Ls {

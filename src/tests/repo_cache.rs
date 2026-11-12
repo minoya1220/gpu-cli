@@ -14,17 +14,8 @@ pub fn flow(t: &TestEnv, job: Job<Vec<String>>) -> LaunchWizard {
         &t.env(),
         WizardOptions {
             repos: job,
-            search: None,
-            models: Vec::new(),
-            recent_gpus: Vec::new(),
-            choose_offer: false,
-            tpu_setup_error: None,
-            tpu_transition: None,
-            tpu_prices: None,
-            tpu_cached_prices: None,
-            tpu_types: Vec::new(),
-            tpu_catalog: None,
             owner: "sampleuser".into(),
+            ..Default::default()
         },
     )
 }

@@ -21,7 +21,7 @@ use crate::pyjson::{self, Dict, Value};
 use crate::redact::redact_text;
 use crate::repos::{resolve_repo, save_cached_repos, Repo};
 use crate::vast::{argv, RequestArgs, Vast};
-use crate::wizard::{LaunchWizard, Picks, WizardOptions, MODES};
+use crate::wizard::{LaunchWizard, Picks, TpuOptions, WizardOptions, MODES};
 
 const CLONE_URL: &str = ":clone-url:";
 
@@ -41,6 +41,30 @@ pub struct UpArgs {
     pub expire: Option<String>,
     pub reliability: Option<f64>,
     pub unverified: bool,
+}
+
+impl From<&crate::cli::UpFlags> for UpArgs {
+    fn from(flags: &crate::cli::UpFlags) -> UpArgs {
+        UpArgs {
+            repo: if flags.no_repo {
+                Some(Repo::NoRepo)
+            } else {
+                flags.repo.as_deref().map(Repo::from_arg)
+            },
+            mode: flags.mode.clone(),
+            gpu: flags.gpu.clone(),
+            num_gpus: flags.num_gpus,
+            max_price: flags.max_price,
+            interruptible: flags.interruptible,
+            offer: flags.offer,
+            disk: flags.disk,
+            yes: flags.yes,
+            dry_run: flags.dry_run,
+            expire: flags.expire.clone(),
+            reliability: flags.reliability,
+            unverified: flags.unverified,
+        }
+    }
 }
 
 impl UpArgs {
@@ -188,18 +212,7 @@ pub fn prompt_for_picks(
             gpu
         }
     };
-    Ok((
-        Picks {
-            repo: Some(repo),
-            mode: Some(mode),
-            gpu: Some(gpu),
-            offer: None,
-            tpu: None,
-            modal: None,
-            cloud: None,
-        },
-        offers,
-    ))
+    Ok((Picks::new(Some(repo), Some(&mode), Some(&gpu)), offers))
 }
 
 /// `github_repos` for the line prompt: CLI failures are reported, not fatal.
@@ -312,7 +325,7 @@ fn interrupt_notice(ctx: &Ctx, id: Option<&str>, deadline: Option<Timestamp>) ->
 #[derive(Clone)]
 enum ApprovedLaunch {
     Vast(Box<(Picks, Dict)>),
-    Gcp(Box<(crate::cli::UpFlags, crate::gcp::Prepared)>),
+    Gcp(Box<(crate::gcp::TpuArgs, crate::gcp::Prepared)>),
 }
 
 fn confirmation(
@@ -324,19 +337,20 @@ fn confirmation(
 ) -> crate::picker::Next<crate::wizard::Choice, ApprovedLaunch> {
     use crate::picker::Next;
     if picks.tpu.is_some() {
-        let flags = crate::gcp::picker_flags(args, &picks);
         let selection = match picks.cloud.clone() {
             Some(selection) => selection,
             None => return Next::Notice("Choose a TPU type and zone".into()),
         };
-        let prepared = crate::gcp::validate_tpu_flags(&flags).and_then(|_| {
-            crate::gcp_wizard::complete(
-                &flags,
-                cfg,
-                selection,
-                picks.repo.clone().unwrap_or(Repo::NoRepo),
-            )
-        });
+        let flags = match crate::gcp::TpuArgs::picked(args, &picks) {
+            Ok(flags) => flags,
+            Err(e) => return Next::Notice(e.text().into()),
+        };
+        let prepared = crate::gcp_wizard::complete(
+            &flags,
+            cfg,
+            selection,
+            picks.repo.clone().unwrap_or(Repo::NoRepo),
+        );
         return match prepared {
             Ok(picks) => Next::Screen(
                 crate::gcp::confirmation::<crate::wizard::Choice>(ctx, cfg, picks).remap(
@@ -412,15 +426,7 @@ pub fn launch(ctx: &Ctx, args: &UpArgs, cfg: &Dict, deadline: Option<Timestamp>)
     }
     let vast = Vast::new(ctx);
     let search = OfferSearch::new(vast.clone(), args, cfg)?;
-    let picks = Picks {
-        repo: args.repo.clone(),
-        mode: args.mode.clone(),
-        gpu: args.gpu.clone(),
-        offer: None,
-        tpu: None,
-        modal: None,
-        cloud: None,
-    };
+    let picks = Picks::new(args.repo.clone(), args.mode.as_deref(), args.gpu.as_deref());
     let mut tty_confirmed = false;
     let (picks, offer) = if ctx.interactive() {
         let repo_ctx = ctx.clone();
@@ -438,22 +444,24 @@ pub fn launch(ctx: &Ctx, args: &UpArgs, cfg: &Dict, deadline: Option<Timestamp>)
                 models: known_gpu_models(&ctx.env),
                 recent_gpus: recent,
                 choose_offer: !args.yes && args.offer.is_none(),
-                tpu_prices: Some(crate::gcp_prices::job(ctx, cfg)),
-                tpu_cached_prices: crate::gcp_prices::cached_default(ctx, cfg),
-                tpu_types: crate::gcp_facts::known_types(
-                    ctx,
-                    cfg.get("gcp")
-                        .and_then(crate::pyjson::Value::as_dict)
-                        .and_then(|d| crate::gcp::text(d, "project"))
-                        .unwrap_or(""),
-                    None,
-                ),
-                tpu_catalog: Some(crate::gcp_catalog::types_job(ctx, cfg)),
-                tpu_transition: Some(crate::gcp_wizard::transition(ctx, args, cfg, deadline)),
-                tpu_setup_error: crate::gcp::launch_setup(ctx, cfg)
-                    .err()
-                    .map(|e| e.text().to_string()),
                 owner: owner.clone(),
+                tpu: TpuOptions {
+                    prices: Some(crate::gcp_prices::job(ctx, cfg)),
+                    cached_prices: crate::gcp_prices::cached_default(ctx, cfg),
+                    types: crate::gcp_facts::known_types(
+                        ctx,
+                        cfg.get("gcp")
+                            .and_then(crate::pyjson::Value::as_dict)
+                            .and_then(|d| crate::gcp::text(d, "project"))
+                            .unwrap_or(""),
+                        None,
+                    ),
+                    catalog: Some(crate::gcp_catalog::types_job(ctx, cfg)),
+                    transition: Some(crate::gcp_wizard::transition(ctx, args, cfg, deadline)),
+                    setup_error: crate::gcp::launch_setup(ctx, cfg)
+                        .err()
+                        .map(|e| e.text().to_string()),
+                },
             },
         );
         if !args.yes && !args.dry_run {

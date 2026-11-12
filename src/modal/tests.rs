@@ -316,43 +316,89 @@ fn explicit_modal_provider_picker_lists_only_modal_rows_with_a_short_failure_rea
 
 mod lifecycle;
 
-#[test]
-fn upload_heartbeat_follows_extraction() {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
-    let t = TestEnv::new();
-    let root = t.root.join("keeper");
-    let target = t.root.join("target");
-    let extract = format!(
-        "mkdir -p {0} && tar -xzf - -C {0}",
-        crate::pyfmt::shell_quote(&target.to_string_lossy())
-    );
+fn archive(data: &[u8]) -> Vec<u8> {
     let mut archive = tar::Builder::new(flate2::write::GzEncoder::new(
         Vec::new(),
         flate2::Compression::default(),
     ));
     let mut header = tar::Header::new_gnu();
-    header.set_size(3);
+    header.set_size(data.len() as u64);
     header.set_mode(0o600);
     header.set_cksum();
-    archive
-        .append_data(&mut header, "job.py", &b"hi\n"[..])
-        .unwrap();
-    let archive = archive.into_inner().unwrap().finish().unwrap();
-    let run = |stdin: &[u8]| {
-        let mut child = Command::new("bash")
-            .args(["-c", &upload(&root.to_string_lossy(), &extract)])
-            .stdin(Stdio::piped())
-            .spawn()
-            .unwrap();
-        child.stdin.take().unwrap().write_all(stdin).unwrap();
-        child.wait().unwrap()
-    };
-    assert!(run(&archive).success());
-    assert_eq!(fs::read(target.join("job.py")).unwrap(), b"hi\n");
-    let beat = fs::read_to_string(root.join("upload")).unwrap();
-    assert!(beat.trim().parse::<u64>().is_ok(), "{beat:?}");
-    fs::remove_file(root.join("upload")).unwrap();
-    assert!(!run(b"not an archive").success());
-    assert!(root.join("upload").is_file());
+    archive.append_data(&mut header, "job.py", data).unwrap();
+    archive.into_inner().unwrap().finish().unwrap()
+}
+
+fn spawn_upload(t: &TestEnv) -> std::process::Child {
+    let extract = format!(
+        "mkdir -p {0} && tar -xzf - -C {0}",
+        crate::pyfmt::shell_quote(&t.root.join("target").to_string_lossy())
+    );
+    std::process::Command::new("bash")
+        .args([
+            "-c",
+            &upload(&t.root.join("keeper").to_string_lossy(), &extract),
+        ])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+#[test]
+fn upload_extracts_small_archives_promptly_and_keeps_tar_status() {
+    use std::io::Write;
+    let t = TestEnv::new();
+    for (input, ok) in [
+        (archive(b"hi\n"), true),
+        (b"not an archive".to_vec(), false),
+    ] {
+        let started = std::time::Instant::now();
+        let mut child = spawn_upload(&t);
+        child.stdin.take().unwrap().write_all(&input).unwrap();
+        assert_eq!(child.wait().unwrap().success(), ok);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+    assert_eq!(fs::read(t.root.join("target/job.py")).unwrap(), b"hi\n");
+}
+
+/// GNU tar is what Modal's Debian images ship; macOS has bsdtar.
+#[cfg(target_os = "linux")]
+#[test]
+fn upload_beats_only_while_bytes_arrive() {
+    use std::io::Write;
+    use std::time::{Duration, Instant};
+    let t = TestEnv::new();
+    let beat = t.root.join("keeper/upload");
+    let mut seed = 0x2545_f491_u32;
+    let data: Vec<u8> = (0..4 << 20)
+        .map(|_| {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed as u8
+        })
+        .collect();
+    let input = archive(&data);
+    let (head, tail) = input.split_at(input.len() / 2);
+    let mut child = spawn_upload(&t);
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(head).unwrap();
+    stdin.flush().unwrap();
+    let until = Instant::now() + Duration::from_secs(10);
+    while !beat.is_file() {
+        assert!(Instant::now() < until, "no beat while bytes arrived");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let stamp = fs::read_to_string(&beat).unwrap();
+    assert!(stamp.trim().parse::<u64>().is_ok(), "{stamp:?}");
+    std::thread::sleep(Duration::from_millis(500));
+    fs::remove_file(&beat).unwrap();
+    std::thread::sleep(Duration::from_secs(2));
+    assert!(!beat.exists(), "stalled stdin must not refresh the beat");
+    assert!(child.try_wait().unwrap().is_none());
+    stdin.write_all(tail).unwrap();
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+    assert!(beat.is_file());
+    assert_eq!(fs::read(t.root.join("target/job.py")).unwrap(), data);
 }

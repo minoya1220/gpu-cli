@@ -547,11 +547,12 @@ impl RunBackend for ModalBackend {
     }
 }
 
-/// Refresh the keeper's start grace while the extraction runs, so a slow but
-/// live upload is not cut off and a dead CLI (closed stdin) stops the refresh.
+/// Refresh the keeper's start grace only as archive records arrive, so a slow
+/// but progressing upload finishes while a stalled one (dead CLI) does not.
+/// GNU tar runs the checkpoint action; other tars keep the fixed grace.
 fn upload(root: &str, extract: &str) -> String {
     format!(
-        "mkdir -p {root} || exit; {{ {extract}; }} <&0 & p=$!; while date +%s >{root}/upload; kill -0 $p 2>/dev/null; do sleep 5; done; wait $p"
+        "mkdir -p {root} && printf '#!/bin/sh\\ndate +%%s >{root}/upload\\n' >{root}/beat && chmod 700 {root}/beat || exit; case $(tar --version 2>/dev/null) in *'GNU tar'*) export TAR_OPTIONS='--checkpoint=100 --checkpoint-action=exec={root}/beat';; esac; {extract}"
     )
 }
 

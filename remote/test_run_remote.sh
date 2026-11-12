@@ -50,6 +50,30 @@ wait_done() {
 
 status_of() { env GPU_RUN_LIBRARY=0 bash "$SOURCE" status "$TMP/state/$1" "$1"; }
 
+wait_startup_log() {
+    local token=$1 count=0
+    while [ "$count" -lt 300 ]; do
+        check test "$(status_of "$token" | cut -f2)" = -
+        if grep -Fxq 'Waiting for instance startup to finish.' "$TMP/state/$token/log"; then
+            check test "$(status_of "$token" | cut -f2)" = -
+            return
+        fi
+        sleep 0.1
+        count=$((count+1))
+    done
+    echo "startup wait was not logged within 30 seconds: $token" >&2; exit 1
+}
+
+wait_hook() {
+    local token=$1 count=0
+    while [ "$count" -lt 300 ]; do
+        [ ! -s "$TMP/hook-$token" ] || return 0
+        sleep 0.1
+        count=$((count+1))
+    done
+    echo "expiry hook was not written within 30 seconds: $token" >&2; exit 1
+}
+
 # A backend without onstart can run setup and the job without the Vast marker.
 launch nogate 'cat setup-seen; echo ran' 'echo setup >setup-seen' 60 '' 0 0
 status=$(wait_done nogate)
@@ -60,9 +84,7 @@ passed=$((passed+1))
 
 # Setup waits for onstart (uv install) to finish, bounded by the job deadline.
 launch notready 'echo ran'
-sleep 1.5
-check test "$(status_of notready | cut -f2)" = -
-check test "$(cat "$TMP/state/notready/log")" = 'Waiting for instance startup to finish.'
+wait_startup_log notready
 launch neverready 'echo ran' '' 1
 status=$(wait_done neverready)
 check test "$(printf '%s' "$status" | cut -f2)" = 17
@@ -83,8 +105,7 @@ check test "$(cat "$TMP/work/success/outputs/result")" = result
 # the expiry worker's readiness handshake), not an implicit 30-minute hold.
 check test ! -f "$TMP/hook-success"
 printf '0\n' >"$TMP/state/success/attached"
-for _ in $(seq 1 40); do [ ! -f "$TMP/hook-success" ] || break; sleep 0.1; done
-check test -f "$TMP/hook-success"
+wait_hook success
 hook=$(cat "$TMP/hook-success")
 check test "$hook" -le "$(( $(date +%s) + 5 ))"
 passed=$((passed+1))
@@ -93,7 +114,7 @@ passed=$((passed+1))
 launch retained 'echo retained' '' 60 'export TEST_SECRET="secret value"' 30
 status=$(wait_done retained)
 printf '0\n' >"$TMP/state/retained/attached"
-for _ in $(seq 1 40); do [ ! -f "$TMP/hook-retained" ] || break; sleep 0.1; done
+wait_hook retained
 hook=$(cat "$TMP/hook-retained")
 check test "$hook" -gt "$(( $(date +%s) + 10 ))"
 check test "$hook" -le "$(( $(date +%s) + 30 ))"

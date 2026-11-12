@@ -14,12 +14,15 @@ pub struct Queue {
     service_account: String,
 }
 
+pub(crate) const EXPIRY_SECONDS: std::ops::RangeInclusive<i64> = 60..=29 * 86400;
+pub(crate) const EXPIRY_BOUND: &str = "Expiry must be 1 minute–29 days away; selection/boot uses that time. Next: gpu up --provider gcp --expire 2h";
+
 pub fn validate_deadline(ctx: &Ctx, at: Timestamp) -> Result<()> {
     let seconds = at.as_second() - ctx.clock.now().as_second();
     // Tasks permits 30 days ahead with 31-day retention from creation. Leave
     // two days for retries and a minute for submitting the create request.
-    if !(60..=29 * 86400).contains(&seconds) {
-        return Err(Error::msg("Expiry must be 1 minute–29 days away; selection/boot uses that time. Next: gpu up --provider gcp --expire 2h"));
+    if !EXPIRY_SECONDS.contains(&seconds) {
+        return Err(Error::msg(EXPIRY_BOUND));
     }
     Ok(())
 }
@@ -218,21 +221,8 @@ impl Queue {
         {
             return None;
         }
-        let path = text(http, "url")?.strip_prefix("https://tpu.googleapis.com/v2/projects/")?;
-        let p: Vec<_> = path.split('/').collect();
-        if p.len() != 5
-            || p[0] != self.project
-            || p[1] != "locations"
-            || p[3] != "nodes"
-            || ![p[0], p[2], p[4]].iter().all(|s| gcp::component(s))
-        {
-            return None;
-        }
-        Some(TpuId {
-            project: p[0].into(),
-            zone: p[2].into(),
-            name: p[4].into(),
-        })
+        let resource = text(http, "url")?.strip_prefix("https://tpu.googleapis.com/v2/")?;
+        TpuId::from_resource(resource).filter(|id| id.project == self.project)
     }
     pub(crate) fn reconcile_inventory(
         &self,
@@ -312,25 +302,18 @@ pub fn queue_for_node(cfg: &Dict, id: &TpuId, node: &Dict) -> Result<Queue> {
         .and_then(Value::as_dict)
         .and_then(|m| text(m, "gpu-expiry-queue"))
     {
-        let parts: Vec<_> = resource.split('/').collect();
-        if parts.len() != 6
-            || parts[0] != "projects"
-            || parts[2] != "locations"
-            || parts[4] != "queues"
-            || ![parts[1], parts[3], parts[5]].iter().all(|s| component(s))
-            || parts[1] != id.project
-        {
-            return Err(gcp::bad_reply());
-        }
+        let (project, location, name) = gcp::resource_parts(resource, "queues")
+            .filter(|(project, _, _)| *project == id.project)
+            .ok_or_else(gcp::bad_reply)?;
         let sa = configured
             .ok()
             .filter(|q| q.resource() == resource)
             .map(|q| q.service_account)
             .unwrap_or_default();
         return Ok(Queue {
-            project: parts[1].into(),
-            location: parts[3].into(),
-            name: parts[5].into(),
+            project: project.into(),
+            location: location.into(),
+            name: name.into(),
             service_account: sa,
         });
     }
@@ -355,9 +338,7 @@ pub fn manage(
     }
     // Listing also lets cancel clean up tasks left by a failed/expired create.
     // Authentication failures are not confused with absence.
-    let node = gcp::nodes(ctx, &id.project, &id.zone)?
-        .into_iter()
-        .find(|d| text(d, "name").is_some_and(|n| n.rsplit('/').next() == Some(&id.name)));
+    let node = gcp::find_node(&gcp::nodes(ctx, &id.project, &id.zone)?, &id.name).cloned();
     if node.is_none() && action == "arm" {
         return Err(Error::not_found(&id.cli()));
     }

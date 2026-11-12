@@ -670,7 +670,7 @@ esac
             term.wait(with_footer(on("Destroy after (e.g. 2h)"), "← back"));
             assert!(shows("30m, 2h or 1d")(&term));
             term.press("30s");
-            term.press_until(RIGHT, shows("Choose 1 minute to 29 days"));
+            term.press_until(RIGHT, shows("Expiry must be 1 minute–29 days"));
             term.press_until(BACK, on("TPU zone"));
             term.press_until(RIGHT, on("Destroy after (e.g. 2h)"));
             term.press("2h");

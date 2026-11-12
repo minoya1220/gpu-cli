@@ -4,6 +4,7 @@ use crate::{
     ctx::Ctx,
     error::{Error, Result},
     gcp,
+    gcp_types::chips,
     picker::Job,
     pyjson::{Dict, Value},
 };
@@ -18,30 +19,13 @@ pub struct Prices {
     pub(crate) clock: Option<std::sync::Arc<dyn crate::ctx::Clock>>,
     pub unavailable: Option<String>,
 }
+fn cache_file(project: &str) -> String {
+    format!("tpu-prices-{project}.json")
+}
 fn number(d: &Dict, key: &str) -> Option<f64> {
     crate::pyfmt::py_float(d.get(key)?)
         .ok()
         .filter(|n| n.is_finite())
-}
-fn generation(s: &str) -> Option<&'static str> {
-    crate::gcp_facts::generation(s)
-}
-fn chips(tpu: &str) -> Option<(&'static str, f64)> {
-    let (g, n) = tpu.rsplit_once('-')?;
-    let g = generation(g)?;
-    let n: u32 = n.parse().ok()?;
-    if n == 0 {
-        return None;
-    }
-    let n = f64::from(n);
-    Some((
-        g,
-        if matches!(g, "v5e" | "v6e") {
-            n
-        } else {
-            n / 2.0
-        },
-    ))
 }
 impl Prices {
     /// Normalize Catalog chip/core/VM-hours to the entire requested TPU slice.
@@ -59,24 +43,10 @@ impl Prices {
                 continue;
             };
             let identity = format!("{} {}", desc, gcp::text(cat, "resourceGroup").unwrap_or(""));
-            if generation(&identity) != Some(gen) {
+            if crate::gcp_types::classify(&identity) != Some(gen) {
                 continue;
             }
-            let usage = gcp::text(cat, "usageType").unwrap_or("");
-            if (spot && !matches!(usage, "Preemptible" | "Spot"))
-                || (!spot && usage != "OnDemand")
-                || [
-                    "commit",
-                    "dws",
-                    "flex",
-                    "calendar",
-                    "reservation",
-                    "subscription",
-                    "capacity optimized",
-                ]
-                .iter()
-                .any(|s| desc.contains(s))
-            {
+            if crate::gcp_facts::capacity(sku) != Some(spot) {
                 continue;
             }
             if !sku
@@ -306,7 +276,7 @@ struct Entry {
     sku: Dict,
 }
 fn entries(ctx: &Ctx, project: &str) -> std::collections::BTreeMap<String, Entry> {
-    crate::gcp_http::read_cache(ctx, &format!("tpu-prices-{project}.json"), i64::MAX)
+    crate::gcp_http::read_cache(ctx, &cache_file(project), i64::MAX)
         .and_then(|d| d.get("entries").cloned())
         .and_then(|v| gcp::objects(v).ok())
         .unwrap_or_default()
@@ -577,7 +547,7 @@ pub fn load_for(ctx: &Ctx, cfg: &Dict, zone: &str, wanted: Option<(&str, bool)>)
                 .collect(),
         ),
     );
-    crate::gcp_http::write_cache(ctx, &format!("tpu-prices-{project}.json"), cache);
+    crate::gcp_http::write_cache(ctx, &cache_file(&project), cache);
     let ids = metas
         .iter()
         .filter_map(|m| gcp::text(m, "id"))

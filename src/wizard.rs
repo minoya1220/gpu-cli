@@ -485,14 +485,7 @@ impl LaunchWizard {
             .as_ref()
             .and_then(Job::result)
             .unwrap_or_else(|| self.state.tpu_types.clone());
-        types = types
-            .into_iter()
-            .map(|s| {
-                s.strip_prefix("v5litepod-")
-                    .map(|n| format!("v5e-{n}"))
-                    .unwrap_or(s)
-            })
-            .collect();
+        types = types.into_iter().map(crate::gcp_types::public).collect();
         types.sort();
         types.dedup();
         types

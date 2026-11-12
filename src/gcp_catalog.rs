@@ -9,20 +9,10 @@ pub struct Zone {
     pub name: String,
     pub types: Vec<String>,
 }
-pub fn canonical(tpu: &str) -> String {
-    tpu.strip_prefix("v5e-")
-        .map(|n| format!("v5litepod-{n}"))
-        .unwrap_or_else(|| tpu.into())
-}
 fn invalid() -> Error {
     Error::msg("Google returned an incomplete TPU catalog. Next: gpu up --provider gcp")
 }
-fn type_rows(data: &Dict) -> Result<Vec<String>> {
-    let rows = gcp::objects(
-        data.get("acceleratorTypes")
-            .cloned()
-            .unwrap_or(Value::List(Vec::new())),
-    )?;
+fn type_names(rows: &[Dict]) -> Result<Vec<String>> {
     rows.iter()
         .map(|d| {
             gcp::text(d, "type")
@@ -49,36 +39,32 @@ pub fn types(ctx: &Ctx, project: &str, zone: &str) -> Result<Vec<String>> {
         "acceleratorTypes",
         1000,
     )?;
-    let mut data = Dict::new();
-    data.insert(
-        "acceleratorTypes",
-        Value::List(rows.into_iter().map(Value::Dict).collect()),
-    );
-    type_rows(&data)
+    type_names(&rows)
 }
-fn file(project: &str) -> String {
+
+pub(crate) fn file(project: &str) -> String {
     format!("tpu-catalog-{project}.json")
+}
+pub(crate) fn parse_zone(d: &Dict) -> Option<Zone> {
+    let name = gcp::text(d, "name")
+        .filter(|s| gcp::component(s))?
+        .to_string();
+    let types = d
+        .get("types")?
+        .as_list()?
+        .iter()
+        .map(|v| match v {
+            Value::Str(s) if gcp::component(s) => Some(s.clone()),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(Zone { name, types })
 }
 fn cached(ctx: &Ctx, project: &str) -> Option<Vec<Zone>> {
     let data = gcp_http::read_cache(ctx, &file(project), i64::MAX)?;
     let rows = data.get("zones")?.as_list()?;
     rows.iter()
-        .map(|v| {
-            let d = v.as_dict()?;
-            let name = gcp::text(d, "name")
-                .filter(|s| gcp::component(s))?
-                .to_string();
-            let types = d
-                .get("types")?
-                .as_list()?
-                .iter()
-                .map(|v| match v {
-                    Value::Str(s) if gcp::component(s) => Some(s.clone()),
-                    _ => None,
-                })
-                .collect::<Option<Vec<_>>>()?;
-            Some(Zone { name, types })
-        })
+        .map(|v| v.as_dict().and_then(parse_zone))
         .collect()
 }
 #[cfg(test)]
@@ -121,29 +107,20 @@ pub fn refresh(ctx: &Ctx, project: &str) -> Result<Vec<Zone>> {
         .collect::<Result<Vec<_>>>()?;
     let responses = gcp_http::many(ctx, project, &urls)?;
     let mut zones = Vec::new();
-    for (name, mut response) in names.into_iter().zip(responses) {
-        let mut types = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        loop {
-            types.extend(type_rows(&response)?);
-            let next = gcp::text(&response, "nextPageToken").unwrap_or("");
-            if next.is_empty() {
-                break;
-            }
-            if seen.len() >= 30 || !seen.insert(next.to_string()) {
-                return Err(invalid());
-            }
-            response = gcp_http::get(
-                ctx,
-                project,
-                &format!(
-                    "{}?pageSize=1000&pageToken={}",
-                    base(project, &name)?,
-                    gcp_http::encode(next)
-                ),
-            )?;
-        }
-        zones.push(Zone { name, types });
+    for (name, response) in names.into_iter().zip(responses) {
+        let rows = gcp_http::pages_from(
+            ctx,
+            project,
+            &base(project, &name)?,
+            "acceleratorTypes",
+            1000,
+            response,
+            invalid,
+        )?;
+        zones.push(Zone {
+            name,
+            types: type_names(&rows)?,
+        });
     }
     let mut data = Dict::new();
     data.insert(
@@ -167,12 +144,15 @@ pub fn refresh(ctx: &Ctx, project: &str) -> Result<Vec<Zone>> {
     Ok(zones)
 }
 pub fn known(ctx: &Ctx, project: &str, tpu: Option<&str>) -> Vec<Zone> {
-    let wanted = tpu.map(canonical);
-    let mut zones = crate::gcp_facts::known_zones(ctx, project);
+    select_zones(ctx, crate::gcp_facts::known_zones(ctx, project), tpu)
+}
+fn select_zones(ctx: &Ctx, mut zones: Vec<Zone>, tpu: Option<&str>) -> Vec<Zone> {
+    let wanted = tpu.map(crate::gcp_types::canonical);
     zones.retain(|z| !z.types.is_empty() && wanted.as_ref().is_none_or(|t| z.types.contains(t)));
     crate::gcp_geo::order(&ctx.env, &mut zones, |z| &z.name);
     zones
 }
+
 pub fn types_job(ctx: &Ctx, cfg: &Dict) -> crate::picker::Job<Vec<String>> {
     let worker = ctx.clone();
     let cfg = cfg.clone();
@@ -199,17 +179,15 @@ pub fn zones(ctx: &Ctx, project: &str, tpu: Option<&str>) -> Result<Vec<Zone>> {
     if !gcp::component(project) {
         return Err(invalid());
     }
-    let mut result = match cached(ctx, project) {
+    let result = match cached(ctx, project) {
         Some(zones) => zones,
         None => refresh(ctx, project)?,
     };
-    let wanted = tpu.map(canonical);
-    result.retain(|z| !z.types.is_empty() && wanted.as_ref().is_none_or(|t| z.types.contains(t)));
-    crate::gcp_geo::order(&ctx.env, &mut result, |z| &z.name);
-    Ok(result)
+    Ok(select_zones(ctx, result, tpu))
 }
+
 pub fn verify(ctx: &Ctx, project: &str, zone: &str, tpu: &str) -> Result<()> {
-    if types(ctx, project, zone)?.contains(&canonical(tpu)) {
+    if types(ctx, project, zone)?.contains(&crate::gcp_types::canonical(tpu)) {
         return Ok(());
     }
     // A stale discovery entry must not recommend the just-rejected zone.

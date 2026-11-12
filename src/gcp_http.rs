@@ -95,39 +95,61 @@ fn body(ctx: &Ctx, project: &str, raw: &str, status: u16) -> Result<Dict> {
         .and_then(|v| v.as_dict().cloned())
         .ok_or_else(|| error("unreadable API reply"))
 }
+fn allowed(url: &str, parallel: bool) -> bool {
+    let prefixes = [
+        ("https://cloudbilling.googleapis.com/v1/", false),
+        ("https://cloudbilling.googleapis.com/v1beta/skus/", true),
+        ("https://tpu.googleapis.com/v2/", true),
+        ("https://tpu.googleapis.com/v1/", false),
+        ("https://cloudtasks.googleapis.com/v2/", false),
+    ];
+    prefixes
+        .iter()
+        .any(|(prefix, batch)| (!parallel || *batch) && url.starts_with(prefix))
+        && (!parallel || !url.contains(['"', '\n', '\r']))
+}
+fn curl(config: String, parallel: bool) -> Cmd {
+    let mut cmd = Cmd::new(&[
+        "curl",
+        "--disable",
+        "--silent",
+        "--show-error",
+        "--noproxy",
+        "*",
+        "--proto",
+        "=https",
+        "--max-time",
+        "15",
+    ]);
+    if parallel {
+        cmd.argv
+            .extend(["--parallel", "--parallel-max", "8"].map(String::from));
+    }
+    cmd.argv.extend(
+        [
+            "--config",
+            "-",
+            "--write-out",
+            if parallel {
+                "%{filename_effective}\t%{http_code}\t%{time_total}\n"
+            } else {
+                "\n%{http_code}"
+            },
+        ]
+        .map(String::from),
+    );
+    cmd.stdin(Input::Text(config))
+        .timeout(Some(if parallel { 90.0 } else { 20.0 }))
+}
 pub fn get(ctx: &Ctx, project: &str, url: &str) -> Result<Dict> {
     ctx.require_gcloud()?;
-    if !(url.starts_with("https://cloudbilling.googleapis.com/v1/")
-        || url.starts_with("https://cloudbilling.googleapis.com/v1beta/skus/")
-        || url.starts_with("https://tpu.googleapis.com/v2/")
-        || url.starts_with("https://tpu.googleapis.com/v1/")
-        || url.starts_with("https://cloudtasks.googleapis.com/v2/"))
-    {
+    if !allowed(url, false) {
         return Err(error("unexpected API endpoint"));
     }
-    let config = headers(ctx, project)?;
+    let mut cmd = curl(headers(ctx, project)?, false);
+    cmd.argv.push(url.into());
     let out = ctx
-        .run(
-            &Cmd::new(&[
-                "curl",
-                "--disable",
-                "--silent",
-                "--show-error",
-                "--noproxy",
-                "*",
-                "--proto",
-                "=https",
-                "--max-time",
-                "15",
-                "--config",
-                "-",
-                "--write-out",
-                "\n%{http_code}",
-                url,
-            ])
-            .stdin(Input::Text(config))
-            .timeout(Some(20.0)),
-        )
+        .run(&cmd)
         .map_err(|_| error("could not run HTTPS request"))?;
     let (raw, status) = out
         .stdout
@@ -163,10 +185,7 @@ pub fn many_results(ctx: &Ctx, project: &str, urls: &[String]) -> Result<Vec<Res
     }
     let mut config = headers(ctx, project)?;
     for (i, url) in urls.iter().enumerate() {
-        if !(url.starts_with("https://tpu.googleapis.com/v2/")
-            || url.starts_with("https://cloudbilling.googleapis.com/v1beta/skus/"))
-            || url.contains(['"', '\n', '\r'])
-        {
+        if !allowed(url, true) {
             return Err(error("unexpected API endpoint"));
         }
         let path = dir.path().join(i.to_string());
@@ -177,29 +196,7 @@ pub fn many_results(ctx: &Ctx, project: &str, urls: &[String]) -> Result<Vec<Res
         config.push_str(&format!("url = \"{url}\"\noutput = \"{path}\"\n"));
     }
     let out = ctx
-        .run(
-            &Cmd::new(&[
-                "curl",
-                "--disable",
-                "--silent",
-                "--show-error",
-                "--noproxy",
-                "*",
-                "--proto",
-                "=https",
-                "--max-time",
-                "15",
-                "--parallel",
-                "--parallel-max",
-                "8",
-                "--config",
-                "-",
-                "--write-out",
-                "%{filename_effective}\t%{http_code}\t%{time_total}\n",
-            ])
-            .stdin(Input::Text(config))
-            .timeout(Some(90.0)),
-        )
+        .run(&curl(config, true))
         .map_err(|_| error("parallel HTTPS request failed"))?;
     if out.code != 0 {
         return Err(error("parallel HTTPS request failed"));
@@ -232,32 +229,65 @@ pub fn many_results(ctx: &Ctx, project: &str, urls: &[String]) -> Result<Vec<Res
         .collect())
 }
 pub fn pages(ctx: &Ctx, project: &str, base: &str, key: &str, size: usize) -> Result<Vec<Dict>> {
+    collect_pages(ctx, project, base, key, size, None, None)
+}
+/// Continue a prefetched first page, retaining batch acquisition of catalog rows.
+pub(crate) fn pages_from(
+    ctx: &Ctx,
+    project: &str,
+    base: &str,
+    key: &str,
+    size: usize,
+    first: Dict,
+    invalid: fn() -> Error,
+) -> Result<Vec<Dict>> {
+    collect_pages(ctx, project, base, key, size, Some(first), Some(invalid))
+}
+fn collect_pages(
+    ctx: &Ctx,
+    project: &str,
+    base: &str,
+    key: &str,
+    size: usize,
+    mut first: Option<Dict>,
+    invalid: Option<fn() -> Error>,
+) -> Result<Vec<Dict>> {
     let mut result = Vec::new();
     let mut next = String::new();
     let mut seen = std::collections::HashSet::new();
-    for _ in 0..30 {
-        let url = format!(
-            "{base}{}pageSize={size}&pageToken={}",
-            if base.contains('?') { "&" } else { "?" },
-            encode(&next)
-        );
-        let data = get(ctx, project, &url)?;
+    // Catalog batching historically permits its prefetched page plus 30
+    // continuation tokens; ordinary paginated reads permit 30 total pages.
+    let limit = if first.is_some() { 31 } else { 30 };
+    for _ in 0..limit {
+        let data = match first.take() {
+            Some(data) => data,
+            None => get(
+                ctx,
+                project,
+                &format!(
+                    "{base}{}pageSize={size}&pageToken={}",
+                    if base.contains('?') { "&" } else { "?" },
+                    encode(&next)
+                ),
+            )?,
+        };
         result.extend(gcp::objects(
             data.get(key).cloned().unwrap_or(Value::List(Vec::new())),
         )?);
         next = match data.get("nextPageToken") {
             None => String::new(),
             Some(Value::Str(s)) => s.clone(),
+            _ if invalid.is_some() => String::new(),
             _ => return Err(error("invalid page token")),
         };
         if next.is_empty() {
             return Ok(result);
         }
         if !seen.insert(next.clone()) {
-            return Err(error("repeated page token"));
+            return Err(invalid.map_or_else(|| error("repeated page token"), |f| f()));
         }
     }
-    Err(error("pagination limit reached"))
+    Err(invalid.map_or_else(|| error("pagination limit reached"), |f| f()))
 }
 pub fn read_cache(ctx: &Ctx, name: &str, ttl: i64) -> Option<Dict> {
     let path = ctx

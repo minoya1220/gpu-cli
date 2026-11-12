@@ -977,7 +977,7 @@ fn expiry_entry_has_duration_help_validation_and_back_to_capacity() {
             .snapshot()
             .body
             .iter()
-            .any(|s| s.contains("1 minute to 29 days")));
+            .any(|s| s.contains("1 minute–29 days")));
         keys.press_until(BACK, on("TPU capacity"));
         keys.press_until(RIGHT, on("Destroy after (e.g. 2h)"));
         keys.type_text("1d");

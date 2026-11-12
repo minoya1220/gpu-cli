@@ -22,7 +22,7 @@ pub(crate) fn preview(ctx: &Ctx, settings: &Settings) -> Option<String> {
 }
 pub(crate) fn remember(ctx: &Ctx, project: &str, zone: &str) {
     if gcp::component(project) && gcp::component(zone) {
-        let _ = crate::history::record_picks(&ctx.env, &[(&key(project), zone)]);
+        crate::history::record_picks_best_effort(ctx, &[(&key(project), zone)]);
     }
 }
 
@@ -41,8 +41,8 @@ pub(crate) fn remember_type(ctx: &Ctx, project: &str, tpu: &str) {
         return;
     };
     let public = crate::gcp_types::public(tpu.into());
-    let _ = crate::history::record_picks(
-        &ctx.env,
+    crate::history::record_picks_best_effort(
+        ctx,
         &[
             (&format!("gcp_generation:{project}"), generation),
             (&format!("gcp_size:{project}:{generation}"), &public),

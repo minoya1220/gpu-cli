@@ -84,6 +84,33 @@ fn normalizes_units_slice_sizes_and_capacity_without_guessing_missing_rates() {
     assert_eq!(foreign.hourly("v6e-1", false), None);
 }
 #[test]
+fn facts_and_prices_exclude_the_same_normalized_capacity_keywords() {
+    let mut price = prices();
+    price.skus.truncate(1);
+    assert_eq!(price.hourly("v6e-1", false), Some(2.75));
+    assert_eq!(crate::gcp_facts::capacity(&price.skus[0]), Some(false));
+    for keyword in [
+        "capacity optimized",
+        "capacityoptimized",
+        "Capacity-Optimized",
+        "commit",
+        "dws",
+        "flex",
+        "calendar",
+        "reservation",
+        "subscription",
+    ] {
+        price.skus[0].insert("description", Value::str(format!("TPU v6e chip {keyword}")));
+        assert_eq!(
+            crate::gcp_facts::capacity(&price.skus[0]),
+            None,
+            "{keyword}"
+        );
+        assert_eq!(price.hourly("v6e-1", false), None, "{keyword}");
+    }
+}
+
+#[test]
 fn future_tiered_monthly_or_malformed_money_is_never_quoted_as_an_hourly_rate() {
     for (at, unit, money, rates) in [
         (

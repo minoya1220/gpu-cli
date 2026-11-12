@@ -43,7 +43,7 @@ pub(crate) fn alternatives(
             // proof that a zone lacks this type. Manual selection stays usable.
             Err(_) => break,
         };
-        if types.contains(&crate::gcp_catalog::canonical(&picks.tpu)) {
+        if types.contains(&crate::gcp_types::canonical(&picks.tpu)) {
             found.push(zone);
             if found.len() == count {
                 break;

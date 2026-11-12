@@ -4,11 +4,14 @@ pub(crate) fn generation(tpu: &str) -> Option<&str> {
     if generation.is_empty() || size.parse::<u32>().ok()? == 0 {
         return None;
     }
-    Some(if generation == "v5litepod" {
+    Some(family(generation))
+}
+pub(crate) fn family(name: &str) -> &str {
+    if name == "v5litepod" {
         "v5e"
     } else {
-        generation
-    })
+        name
+    }
 }
 pub(crate) fn size(tpu: &str) -> Option<u32> {
     tpu.rsplit_once('-')?
@@ -64,6 +67,50 @@ pub(crate) fn label(tpu: &str) -> String {
         Some("v2" | "v3" | "v4" | "v5p") => format!("{n} TensorCores"),
         _ => format!("Size {n}"),
     }
+}
+pub fn canonical(tpu: &str) -> String {
+    tpu.strip_prefix("v5e-")
+        .map(|n| format!("v5litepod-{n}"))
+        .unwrap_or_else(|| tpu.into())
+}
+pub(crate) fn classify(text: &str) -> Option<&'static str> {
+    let s = text
+        .to_ascii_lowercase()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect::<String>();
+    if s.contains("v6e") || s.contains("trillium") {
+        Some("v6e")
+    } else if s.contains("v5enterprise") || s.contains("v5p") {
+        Some("v5p")
+    } else if s.contains("v5lite") || s.contains("v5e") {
+        Some("v5e")
+    } else if s.contains("v4") {
+        Some("v4")
+    } else if s.contains("v3") {
+        Some("v3")
+    } else if s.contains("v2") {
+        Some("v2")
+    } else {
+        None
+    }
+}
+pub(crate) fn chips(tpu: &str) -> Option<(&'static str, f64)> {
+    let (g, n) = tpu.rsplit_once('-')?;
+    let g = classify(g)?;
+    let n: u32 = n.parse().ok()?;
+    if n == 0 {
+        return None;
+    }
+    let n = f64::from(n);
+    Some((
+        g,
+        if matches!(g, "v5e" | "v6e") {
+            n
+        } else {
+            n / 2.0
+        },
+    ))
 }
 #[cfg(test)]
 mod tests {

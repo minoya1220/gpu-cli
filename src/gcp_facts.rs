@@ -8,36 +8,22 @@ use crate::{
     gcp_http,
     pyjson::{Dict, Value},
 };
+pub(crate) const SKU_CACHE: &str = "tpu-sku-facts.json";
+
 fn rows(d: &Dict, key: &str) -> Vec<Dict> {
     d.get(key)
         .cloned()
         .and_then(|v| gcp::objects(v).ok())
         .unwrap_or_default()
 }
-fn parse_zones(data: &Dict) -> Vec<Zone> {
-    rows(data, "zones")
-        .into_iter()
-        .filter_map(|d| {
-            let name = gcp::text(&d, "name").filter(|s| gcp::component(s))?.into();
-            let types = d
-                .get("types")?
-                .as_list()?
-                .iter()
-                .map(|v| match v {
-                    Value::Str(s) if gcp::component(s) => Some(s.clone()),
-                    _ => None,
-                })
-                .collect::<Option<Vec<_>>>()?;
-            Some(Zone { name, types })
-        })
-        .collect()
-}
 pub fn known_zones(ctx: &Ctx, project: &str) -> Vec<Zone> {
     if gcp::component(project) {
-        if let Some(cache) =
-            gcp_http::read_cache(ctx, &format!("tpu-catalog-{project}.json"), i64::MAX)
+        if let Some(cache) = gcp_http::read_cache(ctx, &crate::gcp_catalog::file(project), i64::MAX)
         {
-            return parse_zones(&cache);
+            return rows(&cache, "zones")
+                .iter()
+                .filter_map(crate::gcp_catalog::parse_zone)
+                .collect();
         }
     }
     Vec::new()
@@ -53,36 +39,14 @@ pub fn known_types(ctx: &Ctx, project: &str, zone: Option<&str>) -> Vec<String> 
     types
 }
 pub fn skus(ctx: &Ctx) -> Vec<Dict> {
-    gcp_http::read_cache(ctx, "tpu-sku-facts.json", i64::MAX)
+    gcp_http::read_cache(ctx, SKU_CACHE, i64::MAX)
         .map(|data| rows(&data, "skus"))
         .unwrap_or_default()
-}
-pub fn generation(text: &str) -> Option<&'static str> {
-    let s = text
-        .to_ascii_lowercase()
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .collect::<String>();
-    if s.contains("v6e") || s.contains("trillium") {
-        Some("v6e")
-    } else if s.contains("v5enterprise") || s.contains("v5p") {
-        Some("v5p")
-    } else if s.contains("v5lite") || s.contains("v5e") {
-        Some("v5e")
-    } else if s.contains("v4") {
-        Some("v4")
-    } else if s.contains("v3") {
-        Some("v3")
-    } else if s.contains("v2") {
-        Some("v2")
-    } else {
-        None
-    }
 }
 pub fn sku_generation(meta: &Dict) -> Option<&'static str> {
     let desc = gcp::text(meta, "description")?;
     let category = meta.get("category")?.as_dict()?;
-    generation(&format!(
+    crate::gcp_types::classify(&format!(
         "{desc} {}",
         gcp::text(category, "resourceGroup").unwrap_or("")
     ))
@@ -212,7 +176,7 @@ fn fetch_skus(ctx: &Ctx, project: &str) -> Result<()> {
     let mut cache = Dict::new();
     cache.insert("services", Value::List(services));
     cache.insert("skus", Value::List(skus));
-    gcp_http::write_cache(ctx, "tpu-sku-facts.json", cache);
+    gcp_http::write_cache(ctx, SKU_CACHE, cache);
     Ok(())
 }
 #[cfg(test)]
@@ -267,7 +231,7 @@ mod tests {
         let id = gcp::text(&cached, "id").unwrap().to_string();
         let mut data = Dict::new();
         data.insert("skus", Value::List(vec![Value::Dict(cached.clone())]));
-        gcp_http::write_cache(&ctx, "tpu-sku-facts.json", data);
+        gcp_http::write_cache(&ctx, SKU_CACHE, data);
         assert_eq!(
             skus(&ctx)
                 .into_iter()

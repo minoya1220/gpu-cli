@@ -15,6 +15,36 @@ pub struct TpuId {
     pub name: String,
 }
 
+pub(crate) fn resource_parts<'a>(
+    resource: &'a str,
+    kind: &str,
+) -> Option<(&'a str, &'a str, &'a str)> {
+    let parts = resource.split('/').collect::<Vec<_>>();
+    if parts.len() != 6
+        || parts[0] != "projects"
+        || parts[2] != "locations"
+        || parts[4] != kind
+        || ![parts[1], parts[3], parts[5]].into_iter().all(component)
+    {
+        return None;
+    }
+    Some((parts[1], parts[3], parts[5]))
+}
+pub(crate) fn find_node<'a>(nodes: &'a [Dict], name: &str) -> Option<&'a Dict> {
+    nodes
+        .iter()
+        .find(|d| text(d, "name").is_some_and(|n| n.rsplit('/').next() == Some(name)))
+}
+fn is_spot(node: &Dict) -> bool {
+    node.get("schedulingConfig")
+        .and_then(Value::as_dict)
+        .is_some_and(|schedule| {
+            ["spot", "preemptible"]
+                .iter()
+                .any(|key| schedule.get(key) == Some(&Value::Bool(true)))
+        })
+}
+
 pub fn component(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 100
@@ -34,6 +64,14 @@ impl TpuId {
             project: parts[1].into(),
             zone: parts[2].into(),
             name: parts[3].into(),
+        })
+    }
+    pub(crate) fn from_resource(resource: &str) -> Option<Self> {
+        let (project, zone, name) = resource_parts(resource, "nodes")?;
+        Some(Self {
+            project: project.into(),
+            zone: zone.into(),
+            name: name.into(),
         })
     }
     pub fn cli(&self) -> String {
@@ -304,24 +342,9 @@ fn nodes_timeout(ctx: &Ctx, project: &str, zone: &str, timeout: f64) -> Result<V
     Ok(found)
 }
 pub(crate) fn node_id(node: &Dict, project: &str) -> Result<TpuId> {
-    let parts: Vec<_> = text(node, "name")
-        .ok_or_else(bad_reply)?
-        .split('/')
-        .collect();
-    if parts.len() != 6
-        || parts[0] != "projects"
-        || parts[1] != project
-        || parts[2] != "locations"
-        || parts[4] != "nodes"
-        || ![parts[1], parts[3], parts[5]].iter().all(|s| component(s))
-    {
-        return Err(bad_reply());
-    }
-    Ok(TpuId {
-        project: project.into(),
-        zone: parts[3].into(),
-        name: parts[5].into(),
-    })
+    TpuId::from_resource(text(node, "name").ok_or_else(bad_reply)?)
+        .filter(|id| id.project == project)
+        .ok_or_else(bad_reply)
 }
 /// One authenticated cross-location list, never one process per TPU zone.
 pub fn all_nodes(ctx: &Ctx, project: &str) -> Result<Vec<Dict>> {
@@ -419,14 +442,7 @@ pub fn list(ctx: &Ctx, settings: &Settings) -> Result<Vec<Dict>> {
                     item.insert("duration", Value::Int(seconds));
                 }
             }
-            let spot = node
-                .get("schedulingConfig")
-                .and_then(Value::as_dict)
-                .is_some_and(|schedule| {
-                    ["spot", "preemptible"]
-                        .iter()
-                        .any(|key| schedule.get(key) == Some(&Value::Bool(true)))
-                });
+            let spot = is_spot(node);
             if let Some(hourly) = crate::gcp_geo::region(&id.zone)
                 .and_then(|region| prices.get(region))
                 .and_then(|price| price.hourly(text(node, "acceleratorType").unwrap_or(""), spot))
@@ -926,15 +942,16 @@ pub(crate) fn deadline_label(ctx: &Ctx, deadline: Timestamp) -> String {
 }
 
 pub fn unique_name(ctx: &Ctx, prefix: &str) -> Result<String> {
-    // A random suffix from tempfile avoids collisions even across processes and
-    // clocks. Never offer user-chosen names: a lingering delete must not hit a replacement.
-    let random = tempfile::Builder::new().prefix("").tempfile()?;
-    let suffix = random
-        .path()
-        .file_name()
-        .unwrap()
-        .to_string_lossy()
-        .to_ascii_lowercase();
+    // Generate directly, without creating a throwaway file. Never offer user
+    // names: a lingering deletion task must not target a replacement instance.
+    let mut random = [0u8; 6];
+    getrandom::fill(&mut random)
+        .map_err(|_| Error::msg("Could not generate a unique TPU name."))?;
+    let alphabet = b"abcdefghijklmnopqrstuvwxyz0123456789";
+    let suffix: String = random
+        .into_iter()
+        .map(|byte| alphabet[byte as usize % alphabet.len()] as char)
+        .collect();
     Ok(format!("{prefix}-{}-{suffix}", ctx.clock.now().as_second()))
 }
 
@@ -991,10 +1008,7 @@ fn forget_absent(ctx: &Ctx, id: &TpuId, cfg: &Dict) -> Result<()> {
 }
 
 pub fn lifecycle(ctx: &Ctx, id: &TpuId, cfg: &Dict, destroy: bool, yes: bool) -> Result<()> {
-    let Some(node) = nodes(ctx, &id.project, &id.zone)?
-        .into_iter()
-        .find(|d| text(d, "name").is_some_and(|n| n.rsplit('/').next() == Some(&id.name)))
-    else {
+    let Some(node) = find_node(&nodes(ctx, &id.project, &id.zone)?, &id.name).cloned() else {
         return if destroy {
             forget_absent(ctx, id, cfg)
         } else {
@@ -1026,12 +1040,7 @@ pub fn lifecycle(ctx: &Ctx, id: &TpuId, cfg: &Dict, destroy: bool, yes: bool) ->
             queued-resources list --project={} --zone={}", id.project, id.zone)));
     }
     if !destroy {
-        let schedule = node.get("schedulingConfig").and_then(Value::as_dict);
-        if schedule.is_some_and(|d| {
-            ["spot", "preemptible"]
-                .iter()
-                .any(|k| d.get(k) == Some(&Value::Bool(true)))
-        }) {
+        if is_spot(&node) {
             return Err(Error::msg(format!(
                 "Spot/preemptible TPUs cannot be stopped and restarted. Next: gpu down {}",
                 id.cli()
@@ -1069,9 +1078,7 @@ pub fn lifecycle(ctx: &Ctx, id: &TpuId, cfg: &Dict, destroy: bool, yes: bool) ->
             }
             Err(error) => return Err(error),
         };
-        let live = listed.iter().find(|d| {
-            text(d, "name").is_some_and(|n| n.rsplit('/').next() == Some(id.name.as_str()))
-        });
+        let live = find_node(&listed, &id.name);
         if (destroy && live.is_none())
             || (!destroy && live.is_some_and(|d| text(d, "state") == Some("STOPPED")))
         {

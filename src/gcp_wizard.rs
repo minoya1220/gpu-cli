@@ -8,6 +8,25 @@ use crate::picker::{AnyJob, Job, JobState, Next, Opt, Screen};
 use crate::pyjson::Dict;
 use crate::repos::{resolve_repo, Repo};
 
+fn cached_rates(
+    ctx: &Ctx,
+    cfg: &Dict,
+    zone: Option<&str>,
+) -> Option<std::sync::Arc<crate::gcp_prices::Prices>> {
+    zone.and_then(|zone| crate::gcp_prices::cached(ctx, cfg, zone))
+        .or_else(|| crate::gcp_prices::cached_default(ctx, cfg))
+}
+fn estimates(price: std::sync::Arc<crate::gcp_prices::Prices>) -> String {
+    format!(
+        "Estimates: {}  USD list {}",
+        price.region,
+        price.cache_note()
+    )
+}
+fn missing_flags() -> Error {
+    Error::msg("Specify --tpu, --zone and --repo or --no-repo (zone may come from config). Next: gpu up --provider gcp --help")
+}
+
 #[derive(Clone)]
 pub struct Picks {
     pub zone: String,
@@ -169,8 +188,11 @@ fn next_with(
             )
             .text_input(Some(Box::new(|s| {
                 let seconds = crate::expiry::parse_duration(s)?;
-                if !(60..=29 * 86400).contains(&seconds) {
-                    return Err("Choose 1 minute to 29 days".into());
+                if !i64::try_from(seconds)
+                    .ok()
+                    .is_some_and(|seconds| crate::gcp_expiry::EXPIRY_SECONDS.contains(&seconds))
+                {
+                    return Err(crate::gcp_expiry::EXPIRY_BOUND.into());
                 }
                 Ok(())
             })))
@@ -195,11 +217,7 @@ pub(crate) fn capacity_screen(
         Some(data) => (data.rates, data.cached),
         None => (
             crate::gcp_prices::job_at(&ctx, &cfg, picks.zone.as_deref()),
-            picks
-                .zone
-                .as_deref()
-                .and_then(|z| crate::gcp_prices::cached(&ctx, &cfg, z))
-                .or_else(|| crate::gcp_prices::cached_default(&ctx, &cfg)),
+            cached_rates(&ctx, &cfg, picks.zone.as_deref()),
         ),
     };
     let rows = rates.clone();
@@ -253,7 +271,7 @@ pub(crate) fn capacity_screen(
         context
             .result()
             .or_else(|| context_cache.clone())
-            .map(|p| format!("Estimates: {}  USD list {}", p.region, p.cache_note()))
+            .map(estimates)
             .unwrap_or_default()
     })
 }
@@ -308,11 +326,7 @@ fn type_screen(
             initial,
             catalog: crate::gcp_catalog::types_job(&ctx, &cfg),
             rates: crate::gcp_prices::job_at(&ctx, &cfg, picks.zone.as_deref()),
-            cached: picks
-                .zone
-                .as_deref()
-                .and_then(|z| crate::gcp_prices::cached(&ctx, &cfg, z))
-                .or_else(|| crate::gcp_prices::cached_default(&ctx, &cfg)),
+            cached: cached_rates(&ctx, &cfg, picks.zone.as_deref()),
         }
     });
     let generation = picks.generation.clone();
@@ -424,10 +438,7 @@ fn type_screen(
             .unwrap_or(0)
     })
     .selection_note(move |value| {
-        let rate = context
-            .price()
-            .map(|p| format!("Estimates: {}  USD list {}", p.region, p.cache_note()))
-            .unwrap_or_default();
+        let rate = context.price().map(estimates).unwrap_or_default();
         if size_step && rate.is_empty() {
             value.clone()
         } else if size_step {
@@ -615,9 +626,9 @@ pub(crate) fn transition(
 /// https://cloud.google.com/tpu/docs/runtimes#pytorch_and_jax
 /// Never use a saved runtime: a later type selection can change generations.
 pub(crate) fn runtime_for(tpu: &str) -> Result<&'static str> {
-    match tpu.split_once('-').map(|(generation, _)| generation) {
+    match tpu.split_once('-').map(|(generation, _)| crate::gcp_types::family(generation)) {
         Some("v2" | "v3" | "v4") => Ok("tpu-ubuntu2204-base"),
-        Some("v5e" | "v5litepod") => Ok("v2-alpha-tpuv5-lite"),
+        Some("v5e") => Ok("v2-alpha-tpuv5-lite"),
         Some("v5p") => Ok("v2-alpha-tpuv5"),
         Some("v6e") => Ok("v2-alpha-tpuv6e"),
         _ => Err(Error::msg(format!("Unknown runtime for {tpu}; supply --runtime. Next: gpu up --tpu {} --runtime <image> --expire 2h", crate::pyfmt::shell_quote(tpu)))),
@@ -640,13 +651,11 @@ pub(crate) fn initial_selection(
                     .or_else(|| settings.zone.clone())
             }
         }),
-        generation: flags.tpu.as_ref().filter(|s| !s.contains('-')).map(|g| {
-            if g == "v5litepod" {
-                "v5e".into()
-            } else {
-                g.clone()
-            }
-        }),
+        generation: flags
+            .tpu
+            .as_ref()
+            .filter(|s| !s.contains('-'))
+            .map(|g| crate::gcp_types::family(g).to_string()),
         tpu: flags.tpu.clone().filter(|s| s.contains('-')),
         spot: if ctx.interactive() && !flags.spot && !flags.on_demand {
             None
@@ -664,9 +673,7 @@ pub(crate) fn complete(
     selected: Selection,
     repo: Repo,
 ) -> Result<Picks> {
-    let missing = || {
-        Error::msg("Specify --tpu, --zone and --repo or --no-repo (zone may come from config). Next: gpu up --provider gcp --help")
-    };
+    let missing = missing_flags;
     let deadline = selected.expiry_at.ok_or_else(|| {
         Error::msg(
             "TPU launches require a destruction deadline. Next: gpu up --provider gcp --expire 2h",
@@ -676,10 +683,7 @@ pub(crate) fn complete(
     let tpu = selected.tpu.ok_or_else(missing)?;
     let spot = selected.spot.unwrap_or(false);
     // v5e's TPU API accelerator name predates its public product name.
-    let tpu = tpu
-        .strip_prefix("v5e-")
-        .map(|size| format!("v5litepod-{size}"))
-        .unwrap_or(tpu);
+    let tpu = crate::gcp_types::canonical(&tpu);
     let runtime = match &flags.runtime {
         Some(runtime) => runtime.clone(),
         None => runtime_for(&tpu)?.to_string(),
@@ -784,9 +788,14 @@ pub fn choose(
     let draft = complete(flags, cfg, selected.clone(), Repo::NoRepo)?;
     let repo = match flag_repo(flags) {
         Some(repo) => repo,
-        None if ctx.interactive() => repository_wizard(ctx, cfg)?.run(ctx,
-            crate::wizard::Picks::new(None, Some("tpu"), Some(&draft.tpu)))?.repo.unwrap_or(Repo::NoRepo),
-        None => return Err(Error::msg("Specify --tpu, --zone and --repo or --no-repo (zone may come from config). Next: gpu up --provider gcp --help")),
+        None if ctx.interactive() => repository_wizard(ctx, cfg)?
+            .run(
+                ctx,
+                crate::wizard::Picks::new(None, Some("tpu"), Some(&draft.tpu)),
+            )?
+            .repo
+            .unwrap_or(Repo::NoRepo),
+        None => return Err(missing_flags()),
     };
     complete(flags, cfg, selected, repo)
 }

@@ -114,7 +114,8 @@ pub(crate) fn spending(
         return Err(usage("max_session_spend must be a positive dollar amount."));
     }
     let error = || {
-        Error::status(ExitCode::SpendLimit, "Cannot satisfy max_session_spend. Pass --expire, choose cheaper hardware/a shorter duration, or change the opt-in cap in config.json.")
+        Error::status(ExitCode::SpendLimit, "Cannot satisfy max_session_spend. Pass --expire, choose cheaper hardware/a shorter duration, or change \
+            the opt-in cap in config.json.")
     };
     let (Some(rate), Some(deadline)) = (rate, deadline) else {
         return Err(error());

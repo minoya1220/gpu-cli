@@ -43,7 +43,6 @@ fn repo(name: &str) -> Repo {
     Repo::from_arg(name)
 }
 
-/// The Python tests' `args()` defaults plus what `_launch` reads.
 pub fn up_args() -> UpArgs {
     UpArgs {
         repo: Some(repo("gpu-kernels")),
@@ -215,8 +214,6 @@ fn test_adapter_search_generates_exact_read_only_cli_call() {
     );
 }
 
-// Expected values from CPython 3.13: shlex.quote returns '' for falsy values
-// and raises TypeError for other non-strings.
 #[test]
 fn test_non_string_git_identity_is_quoted_like_shlex() {
     let gpu_kernels = repo("gpu-kernels");
@@ -257,8 +254,6 @@ fn test_non_string_git_identity_is_quoted_like_shlex() {
     }
 }
 
-// Python puts the raw image value into the argument list: json.dumps prints
-// it in a dry run, and subprocess.run raises TypeError before starting vastai.
 #[test]
 fn test_non_string_image_is_printed_raw_and_never_reaches_vastai() {
     let mut cfg = defaults();

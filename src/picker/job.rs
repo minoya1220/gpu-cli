@@ -132,11 +132,13 @@ impl<T> Clone for Job<T> {
 }
 
 /// Reads a job's state from another thread (tests).
+#[cfg(test)]
 #[derive(Clone)]
 pub struct JobObserver {
     observed: Arc<Mutex<(JobState, String)>>,
 }
 
+#[cfg(test)]
 impl JobObserver {
     pub fn state(&self) -> JobState {
         self.observed.lock().unwrap_or_else(|p| p.into_inner()).0
@@ -201,6 +203,7 @@ impl<T: Clone + Send + 'static> Job<T> {
         })
     }
 
+    #[cfg(test)]
     pub fn observer(&self) -> JobObserver {
         JobObserver {
             observed: self.inner.observed.clone(),

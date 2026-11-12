@@ -98,7 +98,8 @@ fn workspace_setup(ctx: &Ctx, alias: &str, timeout: f64, required: bool) -> Resu
                         ctx.result("setup_done", Value::Bool(true));
                         ctx.result("setup_ok", Value::Bool(false));
                         if required {
-                            return Err(Error::msg("Workspace setup failed (installer or repository clone). Inspect the instance startup log; SSH remains available."));
+                            return Err(Error::msg("Workspace setup failed (installer or repository clone). Inspect the instance startup log; SSH remains \
+                                available."));
                         }
                         return Ok(());
                     }
@@ -116,7 +117,8 @@ fn workspace_setup(ctx: &Ctx, alias: &str, timeout: f64, required: bool) -> Resu
             .sleep((end - ctx.clock.monotonic()).clamp(0.0, 2.0));
     }
     if required {
-        Err(Error::status(crate::error::ExitCode::WaitTimeout, "Timed out waiting for workspace setup; instance is still running. Next: gpu wait ID --wait-setup --timeout 120"))
+        Err(Error::status(crate::error::ExitCode::WaitTimeout, "Timed out waiting for workspace setup; instance is still running. Next: gpu wait ID --wait-setup \
+            --timeout 120"))
     } else {
         Ok(())
     }

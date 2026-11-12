@@ -96,8 +96,6 @@ impl Vast {
     }
 }
 
-/// The create request as Python builds it: every item is a string except the
-/// image, which is the raw config value.
 pub fn request(offer: &Dict, args: &RequestArgs, cfg: &Dict) -> Result<Vec<Value>> {
     let mode = args.mode;
     let script = startup_script(args.repo, mode, cfg, args.deadline)?;

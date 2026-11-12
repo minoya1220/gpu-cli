@@ -45,11 +45,8 @@ pub fn after_up_screen(last: Option<String>) -> Screen<String, String> {
     let labels = last.clone();
     let options = move || {
         let mut options = Vec::new();
-        if let Some(last) = &labels {
-            options.push(Opt::new(
-                "default".to_string(),
-                format!("Open in {}", editor_label(last).unwrap_or(last)),
-            ));
+        if labels.is_some() {
+            options.push(Opt::new("default".to_string(), "Open editor"));
         }
         options.push(Opt::new("select".to_string(), "Select editor..."));
         options.push(Opt::new("none".to_string(), "Don't open"));
@@ -155,7 +152,8 @@ fi
 
 pub fn nvim_session(directory: &str) -> String {
     format!(
-        "export PATH=\"$HOME/.local/bin:$PATH\"; cd -- {} && if command -v tmux >/dev/null 2>&1; then exec tmux new-session -A -s gpu-nvim nvim; else exec nvim; fi",
+        "export PATH=\"$HOME/.local/bin:$PATH\"; cd -- {} && if command -v tmux >/dev/null 2>&1; then exec tmux \
+            new-session -A -s gpu-nvim nvim; else exec nvim; fi",
         shell_quote(directory)
     )
 }

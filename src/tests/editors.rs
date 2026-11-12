@@ -10,8 +10,8 @@ use sha2::{Digest, Sha256};
 use super::instances::{editor_stubs, fake_vast, instances, ssh_ready};
 use crate::commands::{edit_instance, last_editor};
 use crate::editors::{
-    after_up_screen, editor_label, editor_screen, launch_editor, nvim_bootstrap,
-    nvim_bootstrap_with, nvim_session, EDITORS, NVIM_VERSION,
+    after_up_screen, editor_screen, launch_editor, nvim_bootstrap, nvim_bootstrap_with,
+    nvim_session, EDITORS, NVIM_VERSION,
 };
 use crate::history::recent_picks;
 use crate::picker::testing::*;
@@ -191,8 +191,6 @@ fn test_history_only_after_success() {
 
 #[test]
 fn test_nvim_config_type_only_matters_for_nvim() {
-    // Python passes cfg["editor"]["nvim_config"] through unchecked and calls
-    // config.startswith only on the Neovim path.
     let t = with_stubs();
     let runner = fake_vast(vec![instances()[0].clone()], |_| Ok(Output::status(0)));
     let ctx = t.ctx().runner(&runner).build();
@@ -231,8 +229,8 @@ fn test_after_up_real_keys() {
         let result = drive(after_up_screen(last.map(String::from)), move |keys| {
             keys.wait(on("Open workspace"));
             let mut labels = Vec::new();
-            if let Some(last) = last {
-                labels.push(format!("Open in {}", editor_label(last).unwrap()));
+            if last.is_some() {
+                labels.push("Open editor".to_string());
             }
             labels.extend(["Select editor...".to_string(), "Don't open".to_string()]);
             assert_eq!(keys.labels(), labels);
@@ -312,9 +310,6 @@ fn test_edit_flag_config_override_and_alias() {
         err(&ctx)
     );
     assert!(bootstrap(&runner).contains("git clone -- https://example.com/stored.git"));
-    let ctx = t.ctx().runner(&runner).build();
-    assert_eq!(main(&ctx, &["cursor", "12"]), 0, "{}", err(&ctx));
-    assert_eq!(runner.argvs().last().unwrap()[0], "cursor");
 }
 
 fn executable(path: &Path, body: &str) {

@@ -9,8 +9,6 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Answers like the Python tests' FAKE_CLI: logs the call, waits 0.3 s like a
-/// network-bound CLI, and knows only the repository list and offer search.
 pub const FAKE_CLI: &str = r#"#!/bin/sh
 set -f
 tool=$(basename "$0")

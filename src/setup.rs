@@ -446,7 +446,8 @@ impl Plan {
             false
         };
         if !granted {
-            return Err(Error::msg(format!("No recognized tpu.nodes.delete grant for {}.\nAsk an admin to review conditional/inherited/custom grants. gpu changes no IAM.", self.account())));
+            return Err(Error::msg(format!("No recognized tpu.nodes.delete grant for {}.\nAsk an admin to review conditional/inherited/custom \
+                grants. gpu changes no IAM.", self.account())));
         }
         ctx.println("TPU-delete grant found. Deny policies or IAM changes can block expiry.")
     }
@@ -573,7 +574,8 @@ fn setup_gcp(ctx: &Ctx, cfg: &Dict, flags: &SetupFlags) -> Result<()> {
         "  VM + expiry identity: {}. VM users inherit its roles.",
         plan.account()
     ))?;
-    ctx.println("Adds only the gpu-expiry queue. No project/identity/IAM/network/billing/quota edits.\nEnabling APIs may add Google-managed defaults. Undo keeps those.")?;
+    ctx.println("Adds only the gpu-expiry queue. No project/identity/IAM/network/billing/quota edits.\nEnabling APIs may \
+        add Google-managed defaults. Undo keeps those.")?;
     ctx.println(&format!(
         "Keep undo record: {}.\nNo concurrent setup or cloud edits.",
         crate::config::config_path(&ctx.env).display()

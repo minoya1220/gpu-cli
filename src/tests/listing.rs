@@ -1,4 +1,3 @@
-//! Human listing is intentionally independent of the historical Python table.
 use crate::instances::{display_ids, render_table};
 use crate::testing::*;
 

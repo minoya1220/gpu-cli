@@ -69,7 +69,6 @@ impl Terminal {
             .stdin(Stdio::from(slave.try_clone().unwrap()))
             .stdout(Stdio::from(slave.try_clone().unwrap()))
             .stderr(Stdio::from(slave));
-        // A new session without a controlling terminal, like Python's start_new_session.
         unsafe {
             command.pre_exec(|| {
                 rustix::process::setsid().map_err(std::io::Error::from)?;
@@ -1451,7 +1450,7 @@ fn test_tpu_wait_timer_clears_before_a_create_error() {
 }
 
 #[test]
-fn test_tpu_post_launch_editor_then_edit_and_cursor_use_instance_picker() {
+fn test_tpu_post_launch_editor_then_edit_uses_instance_picker() {
     let sandbox = Sandbox::new();
     sandbox.gcp_lifecycle();
     let history = sandbox.history_path();
@@ -1471,7 +1470,7 @@ fn test_tpu_post_launch_editor_then_edit_and_cursor_use_instance_picker() {
     term.press_until("yes\r", |t| {
         shows("Open workspace")(t) && shows("Don't open")(t)
     });
-    assert!(shows("Open in Cursor")(&term));
+    assert!(shows("Open editor")(&term));
     assert!(shows("Select editor...")(&term));
     assert!(shows("Don't open")(&term));
     term.press(DOWN);
@@ -1481,7 +1480,8 @@ fn test_tpu_post_launch_editor_then_edit_and_cursor_use_instance_picker() {
     assert_eq!(term.exit_status(), 0, "{}", term.output_text());
     assert!(term.output_text().contains("CREATING"));
     assert!(term.output_text().contains("Opened VS Code"));
-    for (command, tool) in [("edit", "code"), ("cursor", "cursor")] {
+    {
+        let (command, tool) = ("edit", "code");
         if command == "edit" {
             let nodes = sandbox.root.join("gcp-nodes.json");
             let data = std::fs::read_to_string(&nodes).unwrap();

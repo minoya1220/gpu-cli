@@ -236,12 +236,6 @@ pub fn bad_reply() -> Error {
         "Google Cloud returned an incomplete reply. Retry: gpu ls --provider gcp".into(),
     )
 }
-pub fn describe(ctx: &Ctx, id: &TpuId) -> Result<Dict> {
-    match json(ctx, id.args("describe"), "gpu ls --provider gcp")? {
-        Value::Dict(d) => Ok(d),
-        _ => Err(bad_reply()),
-    }
-}
 /// Only an authenticated node GET returning a definite 404 proves absence.
 /// List failures, malformed responses, auth failures and process errors never do.
 pub fn absent(ctx: &Ctx, id: &TpuId) -> Result<bool> {
@@ -279,31 +273,6 @@ pub fn absent(ctx: &Ctx, id: &TpuId) -> Result<bool> {
     }
 }
 
-pub fn locations(ctx: &Ctx, project: &str) -> Result<Vec<String>> {
-    let value = json(
-        ctx,
-        vec![
-            "gcloud".into(),
-            "compute".into(),
-            "tpus".into(),
-            "locations".into(),
-            "list".into(),
-            format!("--project={project}"),
-            "--quiet".into(),
-        ],
-        "gpu ls --provider gcp",
-    )?;
-    objects(value)?
-        .iter()
-        .map(|d| {
-            text(d, "locationId")
-                .or_else(|| text(d, "name").and_then(|s| s.rsplit('/').next()))
-                .filter(|s| component(s))
-                .map(String::from)
-                .ok_or_else(bad_reply)
-        })
-        .collect()
-}
 pub fn nodes(ctx: &Ctx, project: &str, zone: &str) -> Result<Vec<Dict>> {
     nodes_timeout(ctx, project, zone, 60.0)
 }
@@ -1053,7 +1022,8 @@ pub fn lifecycle(ctx: &Ctx, id: &TpuId, cfg: &Dict, destroy: bool, yes: bool) ->
         crate::gcp_expiry::reconcile(ctx, cfg)?;
     }
     if node.get("queuedResource").is_some_and(crate::pyfmt::truthy) {
-        return Err(Error::msg(format!("Queued-resource TPU: manage its owning request, not just the node. Next: gcloud compute tpus queued-resources list --project={} --zone={}", id.project, id.zone)));
+        return Err(Error::msg(format!("Queued-resource TPU: manage its owning request, not just the node. Next: gcloud compute tpus \
+            queued-resources list --project={} --zone={}", id.project, id.zone)));
     }
     if !destroy {
         let schedule = node.get("schedulingConfig").and_then(Value::as_dict);

@@ -14,7 +14,6 @@ use crate::pyjson::{self, Value};
 pub const ERROR: &str =
     "Use a bare repo name, owner/name, https://host/path/repo.git, or git@host:path/repo.git (no credentials or query).";
 
-/// A repository pick. `NoRepo` is written as `""` wherever Python writes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Repo {
     NoRepo,
@@ -22,7 +21,6 @@ pub enum Repo {
 }
 
 impl Repo {
-    /// The flag value: an empty string means no repository, as in Python.
     pub fn from_arg(value: &str) -> Repo {
         if value.is_empty() {
             Repo::NoRepo

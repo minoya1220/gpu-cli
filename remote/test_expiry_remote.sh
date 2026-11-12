@@ -69,7 +69,7 @@ run_test() {
     fi
 }
 
-# The Python tests' `timer` fixture: scoped credentials, a live worker.
+# Timer fixture: scoped credentials and a live worker.
 fake_timer() {
     credentials() { KEY=scoped-key; }
     running() { return 0; }
@@ -317,8 +317,7 @@ test_exact_destroy_request_mocked() {
     check "top-level true" destroy 123 scoped-key
 }
 
-# Expected values follow Python: json.loads(body), then
-# isinstance(result, dict) and result.get("success") is True.
+# Only a parsed object's top-level boolean success=true is accepted.
 test_destroy_reply_acceptance() {
     local body
     for body in '{"success": true}' ' { "success" :true } ' $'{\n "a": [1, {"success": false}],\n "success": true\n}\n' \

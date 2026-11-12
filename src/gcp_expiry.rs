@@ -38,7 +38,8 @@ impl Queue {
             (default_compute || s.ends_with(&format!("@{}.iam.gserviceaccount.com", settings.project)))
                 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"-@.".contains(&b))
         })
-            .ok_or_else(|| Error::msg("Set gcp.expiry.service_account to a service account in the queue's project. Next: gpu up --provider gcp --help"))?.into();
+            .ok_or_else(|| Error::msg("Set gcp.expiry.service_account to a service account in the queue's project. Next: gpu up --provider gcp \
+                --help"))?.into();
         Ok(Self {
             project: settings.project.clone(),
             location: get("location")?,
@@ -91,7 +92,8 @@ impl Queue {
             || !short_backoff
             || d.get("httpTarget").is_some()
         {
-            return Err(Error::msg(format!("Expiry queue must be RUNNING with unlimited retries, max backoff <=60s and no HTTP target override. Next: gcloud tasks queues describe {} --project={} --location={}", self.name, self.project, self.location)));
+            return Err(Error::msg(format!("Expiry queue must be RUNNING with unlimited retries, max backoff <=60s and no HTTP target override. \
+                Next: gcloud tasks queues describe {} --project={} --location={}", self.name, self.project, self.location)));
         }
         Ok(())
     }
@@ -422,7 +424,8 @@ pub fn manage(
             ),
         ])),
     );
-    queue.delete_tasks(ctx, id, &old).map_err(|_| Error::msg(format!("New expiry is armed but old tasks remain; an earlier deadline may still destroy this TPU. Next: gpu expire {} show", id.cli())))?;
+    queue.delete_tasks(ctx, id, &old).map_err(|_| Error::msg(format!("New expiry is armed but old tasks remain; an earlier deadline may still destroy this TPU. Next: gpu \
+        expire {} show", id.cli())))?;
     ctx.println(&format!(
         "Delete {} at {deadline}; works offline.\nNext: gpu expire {} show",
         id.cli(),

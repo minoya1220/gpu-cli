@@ -72,7 +72,8 @@ pub fn expiry_guard(deadline: Timestamp) -> Vec<String> {
     vec![
         "GPU_EXPIRE=${HOME:-/root}/.local/state/gpu-expire".into(),
         format!(
-            "mkdir -p \"$GPU_EXPIRE\" && chmod 700 \"$GPU_EXPIRE\" && echo {packed} | base64 -d | gunzip >\"$GPU_EXPIRE/guard.sh\" && (setsid bash \"$GPU_EXPIRE/guard.sh\" boot {} </dev/null >/dev/null 2>&1 &)",
+            "mkdir -p \"$GPU_EXPIRE\" && chmod 700 \"$GPU_EXPIRE\" && echo {packed} | base64 -d | gunzip \
+                >\"$GPU_EXPIRE/guard.sh\" && (setsid bash \"$GPU_EXPIRE/guard.sh\" boot {} </dev/null >/dev/null 2>&1 &)",
             deadline_seconds(deadline)
         ),
     ]
@@ -168,8 +169,14 @@ pub fn startup_script(
         );
     } else {
         lines.extend([
-            "if ! command -v ncu >/dev/null 2>&1; then cd /tmp; wget -q --timeout=120 https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb; echo 'd93190d50b98ad4699ff40f4f7af50f16a76dac3bb8da1eaaf366d47898ff8df  cuda-keyring_1.1-1_all.deb' | sha256sum -c -; dpkg -i cuda-keyring_1.1-1_all.deb; apt update || true; apt install -y gh git curl build-essential nsight-compute-2025.4.0 cuda-nvcc-12-8; fi".to_string(),
-            "grep -q nsight-compute /root/.bashrc || cat >> /root/.bashrc <<'EOF'\nexport PATH=$PATH:/opt/nvidia/nsight-compute/2025.4.0:/usr/local/cuda-12.8/bin\nexport LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}:/usr/local/cuda-12.8/lib64\nexport PATH=\"/root/.local/bin:$PATH\"\nEOF".to_string(),
+            "if ! command -v ncu >/dev/null 2>&1; then cd /tmp; wget -q --timeout=120 \
+                https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb; \
+                echo 'd93190d50b98ad4699ff40f4f7af50f16a76dac3bb8da1eaaf366d47898ff8df  cuda-keyring_1.1-1_all.deb' | \
+                sha256sum -c -; dpkg -i cuda-keyring_1.1-1_all.deb; apt update || true; apt install -y gh git curl \
+                build-essential nsight-compute-2025.4.0 cuda-nvcc-12-8; fi".to_string(),
+            "grep -q nsight-compute /root/.bashrc || cat >> /root/.bashrc <<'EOF'\nexport \
+                PATH=$PATH:/opt/nvidia/nsight-compute/2025.4.0:/usr/local/cuda-12.8/bin\nexport \
+                LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}:/usr/local/cuda-12.8/lib64\nexport PATH=\"/root/.local/bin:$PATH\"\nEOF".to_string(),
             "export PATH=$PATH:/opt/nvidia/nsight-compute/2025.4.0:/usr/local/cuda-12.8/bin".to_string(),
             UV_INSTALL.to_string(),
         ]);

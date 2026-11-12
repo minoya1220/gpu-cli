@@ -15,7 +15,9 @@ pub mod testing;
 use std::cell::RefCell;
 use std::rc::{Rc, Weak};
 
-pub use job::{AnyJob, Job, JobObserver, JobState};
+#[cfg(test)]
+pub use job::JobObserver;
+pub use job::{AnyJob, Job, JobState};
 use keys::Key;
 
 use crate::ctx::Ctx;

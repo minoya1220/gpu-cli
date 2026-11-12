@@ -21,6 +21,16 @@ pub const HELPER: &str = include_str!("../remote/modal_helper.py");
 pub const KEEPER: &str = include_str!("../remote/modal_keeper.sh");
 const KEEPER_ROOT: &str = "/tmp/gpu-modal-keeper";
 
+fn client_version() -> &'static str {
+    HELPER
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("# dependencies = [\"modal==")?
+                .strip_suffix("\"]")
+        })
+        .expect("bundled helper has an exact Modal dependency pin")
+}
+
 // Names and rate keys only; prices always come from this workspace's live rates.
 pub const GPUS: &[(&str, &str, i64)] = &[
     ("T4", "t4", 8),
@@ -210,7 +220,7 @@ pub fn check(ctx: &Ctx) -> Result<()> {
         .and_then(Value::as_str)
         .filter(|v| !v.is_empty())
         .ok_or_else(|| Error::msg("Modal readiness response has no workspace."))?;
-    if reply.get("client_version").and_then(Value::as_str) != Some("1.6.3") {
+    if reply.get("client_version").and_then(Value::as_str) != Some(client_version()) {
         return Err(Error::msg(
             "Modal client version is incompatible. Update gpu.",
         ));

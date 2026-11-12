@@ -1,7 +1,3 @@
-//! Discovery is project-scoped, retained for offline use, and fetched with one
-//! parallel curl process rather than a Python/gcloud process per location.
-//! v1 locations matches gcloud; v2 locations omits v4-only zones.
-//! Launch preflight still checks its selected zone fresh before confirmation.
 use crate::{
     ctx::Ctx,
     error::{Error, Result},
@@ -85,6 +81,7 @@ fn cached(ctx: &Ctx, project: &str) -> Option<Vec<Zone>> {
         })
         .collect()
 }
+#[cfg(test)]
 pub fn cached_types(ctx: &Ctx, project: &str, zone: &str) -> Result<Vec<String>> {
     ctx.require_gcloud()?;
     if !gcp::component(project) || !gcp::component(zone) {
@@ -210,19 +207,6 @@ pub fn zones(ctx: &Ctx, project: &str, tpu: Option<&str>) -> Result<Vec<Zone>> {
     result.retain(|z| !z.types.is_empty() && wanted.as_ref().is_none_or(|t| z.types.contains(t)));
     crate::gcp_geo::order(&ctx.env, &mut result, |z| &z.name);
     Ok(result)
-}
-pub fn label(zone: &Zone) -> String {
-    let mut generations: Vec<_> = zone
-        .types
-        .iter()
-        .filter_map(|t| {
-            t.split_once('-')
-                .map(|(g, _)| if g == "v5litepod" { "v5e" } else { g })
-        })
-        .collect();
-    generations.sort();
-    generations.dedup();
-    format!("{}  {}", zone.name, generations.join(", "))
 }
 pub fn verify(ctx: &Ctx, project: &str, zone: &str, tpu: &str) -> Result<()> {
     if types(ctx, project, zone)?.contains(&canonical(tpu)) {

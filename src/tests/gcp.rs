@@ -179,7 +179,8 @@ fn fixture() -> (TestEnv, Ctx, Arc<FakeRunner>, Arc<Mutex<State>>) {
                 ok("{}")
             },
             "delete" => { state.nodes.clear(); ok("{}") },
-            "ssh" if a.contains(&"--dry-run") => ok("/usr/bin/ssh -t -i /tmp/test-key -o CheckHostIP=no -o HostKeyAlias=compute.123 -o UserKnownHostsFile=/tmp/known_hosts developer@192.0.2.10"),
+            "ssh" if a.contains(&"--dry-run") => ok("/usr/bin/ssh -t -i /tmp/test-key -o CheckHostIP=no -o HostKeyAlias=compute.123 -o \
+                UserKnownHostsFile=/tmp/known_hosts developer@192.0.2.10"),
             "ssh" => {
                 assert!(a.contains(&"--command=true"));
                 if state.deny_ssh {return Ok(Output::failed(1,"PERMISSION_DENIED token=do-not-print"));}
@@ -529,7 +530,6 @@ fn short_tpu_ids_resolve_freshly_for_ssh_edit_expire_stop_and_down() {
     for args in [
         vec!["ssh", "gpu-uwhcp7"],
         vec!["edit", "gpu-uwhcp7", "--editor", "code"],
-        vec!["cursor", "gpu-uwhcp7"],
         vec!["expire", "gpu-uwhcp7", "2h"],
         vec!["stop", "gpu-uwhcp7"],
         vec!["down", "gpu-uwhcp7", "--yes"],

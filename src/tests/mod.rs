@@ -1,6 +1,3 @@
-//! Ported Python tests, one module per Python test file (`tests/test_X.py`
-//! maps to `X.rs`, keeping each test's name).
-
 mod automation;
 mod boot_guard;
 mod cli;

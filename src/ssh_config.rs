@@ -142,7 +142,8 @@ pub fn update_host(env: &Env, instance: &Dict) -> std::result::Result<String, Ho
     ensure_include(env)?;
     let path = managed_path(env);
     let entry = format!(
-        "Host vast-{instance_id}\n  HostName {host}\n  Port {port}\n  User root\n  IdentityFile ~/.ssh/id_ed25519\n  StrictHostKeyChecking accept-new\n  ServerAliveInterval 15\n  ServerAliveCountMax 4\n"
+        "Host vast-{instance_id}\n  HostName {host}\n  Port {port}\n  User root\n  IdentityFile \
+            ~/.ssh/id_ed25519\n  StrictHostKeyChecking accept-new\n  ServerAliveInterval 15\n  ServerAliveCountMax 4\n"
     );
     crate::atomic_file::update(&path, |original| {
         let current = String::from_utf8_lossy(original)

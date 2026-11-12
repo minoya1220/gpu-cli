@@ -8,7 +8,6 @@ use crate::pyjson::{self, Dict, Value};
 
 pub const CONTAINER_ENV: &str = r#"-p 1111:1111 -p 6006:6006 -p 8080:8080 -p 8384:8384 -e OPEN_BUTTON_PORT=1111 -e OPEN_BUTTON_TOKEN=1 -e JUPYTER_DIR=/ -e DATA_DIRECTORY=/workspace/ -e PORTAL_CONFIG="localhost:1111:11111:/:Instance Portal|localhost:8080:18080:/:Jupyter|localhost:8080:8080:/terminals/1:Jupyter Terminal|localhost:8384:18384:/:Syncthing|localhost:6006:16006:/:Tensorboard""#;
 
-/// The defaults every config starts from, in Python's key order.
 pub fn defaults() -> Dict {
     let mut cfg = Dict::new();
     cfg.insert("owner", Value::str(""));
@@ -77,7 +76,6 @@ pub(crate) fn infer_identity(ctx: &crate::ctx::Ctx, cfg: &mut Dict) {
     }
 }
 
-/// `cfg[key]`, or Python's `KeyError`.
 pub fn get<'a>(cfg: &'a Dict, key: &str) -> Result<&'a Value> {
     cfg.get(key).ok_or_else(|| Error::key(key))
 }

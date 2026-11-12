@@ -1,7 +1,3 @@
-//! The seams that replace Python's monkeypatching: environment snapshot,
-//! process runner, clock, console and picker UI. Nothing reads process-wide
-//! state after `Ctx::real()` builds the snapshot, so tests run in parallel.
-
 use std::collections::{BTreeMap, VecDeque};
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;

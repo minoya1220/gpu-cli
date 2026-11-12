@@ -167,7 +167,7 @@ destroy() {
 }
 
 # Whether a reply is a JSON object whose top-level "success" is true, like
-# Python's `isinstance(result, dict) and result.get("success") is True`.
+# Accept only an object's top-level boolean success=true.
 # Nested values and string contents are skipped; a reply that is not a
 # complete object counts as not accepted.
 accepted() {

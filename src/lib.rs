@@ -1,52 +1,52 @@
-//! `gpu`: launch Vast.ai GPU and Google Cloud TPU workspaces through
-//! authenticated provider CLIs. External work always crosses the Runner seam.
+//! GPU jobs and workspaces on Vast.ai, Google Cloud and Modal.
+//! External work always crosses the Runner seam.
 
 mod atomic_file;
-pub mod cli;
-pub mod commands;
+pub(crate) mod cli;
+pub(crate) mod commands;
 pub mod config;
 pub mod ctx;
-pub mod editors;
+pub(crate) mod editors;
 pub mod error;
 pub mod expiry;
-pub mod gcp;
-pub mod gcp_catalog;
-pub mod gcp_expiry;
+pub(crate) mod gcp;
+pub(crate) mod gcp_catalog;
+pub(crate) mod gcp_expiry;
 mod gcp_facts;
-pub mod gcp_geo;
+pub(crate) mod gcp_geo;
 mod gcp_http;
 mod gcp_preferences;
-pub mod gcp_prices;
+pub(crate) mod gcp_prices;
 mod gcp_retry;
-pub mod gcp_ssh;
+pub(crate) mod gcp_ssh;
 mod gcp_types;
-pub mod gcp_wizard;
+pub(crate) mod gcp_wizard;
 mod gcp_zones;
 mod guardrails;
-pub mod history;
+pub(crate) mod history;
 pub mod instances;
 pub mod launch;
-pub mod modal;
+pub(crate) mod modal;
 pub mod offers;
 mod output;
 pub mod picker;
 pub mod process;
 mod progress;
 pub mod prompt;
-pub mod provider;
+pub(crate) mod provider;
 mod provider_errors;
 pub mod pyfmt;
 pub mod pyjson;
 pub mod redact;
-pub mod remote;
+pub(crate) mod remote;
 pub mod repos;
-pub mod run;
+pub(crate) mod run;
 mod run_files;
-pub mod setup;
-pub mod ssh_config;
+pub(crate) mod setup;
+pub(crate) mod ssh_config;
 pub mod startup;
 pub mod vast;
-pub mod wizard;
+pub(crate) mod wizard;
 
 #[cfg(test)]
 mod run_files_tests;
@@ -82,7 +82,7 @@ pub fn main_with(argv: &[String], ctx: &Ctx) -> i32 {
                 if let Some(usage) = text.lines().find(|line| line.starts_with("Usage:")) {
                     ctx.result("usage", pyjson::Value::str(usage));
                 }
-                let _ = output::finish(&ctx, command, &error);
+                let _ = output::finish(&ctx, &command, &error);
                 return code;
             }
             let _ = if to_stdout {
@@ -304,21 +304,6 @@ fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
                 ),
                 provider::InstanceId::Gcp(id) => {
                     gcp_ssh::edit(ctx, &cfg, &id, editor.as_deref(), nvim_config.as_ref())
-                }
-                provider::InstanceId::Modal(_) => Err(modal::unsupported()),
-            }
-        }
-        Command::Cursor { id } => {
-            let Some(id) = provider::selected_id(ctx, &cfg, id.as_deref(), "cursor")? else {
-                return Ok(());
-            };
-            // Compatibility alias for `gpu edit --editor cursor`.
-            match provider::InstanceId::parse(&id)? {
-                provider::InstanceId::Vast(id) => {
-                    commands::edit_instance(ctx, &id, Some("cursor"), None, 120.0)
-                }
-                provider::InstanceId::Gcp(id) => {
-                    gcp_ssh::edit(ctx, &cfg, &id, Some("cursor"), None)
                 }
                 provider::InstanceId::Modal(_) => Err(modal::unsupported()),
             }

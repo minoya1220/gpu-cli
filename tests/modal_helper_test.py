@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import tomllib
 import unittest
 
 STUB = r'''
@@ -109,7 +110,13 @@ class HelperTest(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         package = Path(self.temp.name) / "modal"
         package.mkdir()
-        (package / "__init__.py").write_text(STUB)
+        # PEP 723 metadata is the uv dependency contract: consume it as TOML
+        # and make the stub report that version, so runtime checks cannot drift.
+        source = Path(os.environ["HELPER_PATH"]).read_text()
+        metadata = source.split("# /// script\n", 1)[1].split("# ///", 1)[0]
+        dependencies = tomllib.loads("\n".join(line.removeprefix("# ") for line in metadata.splitlines()))["dependencies"]
+        self.version = dependencies[0].removeprefix("modal==")
+        (package / "__init__.py").write_text(STUB.replace('__version__ = "1.6.3"', f'__version__ = {self.version!r}'))
         (package / "config.py").write_text('import os\nclass Config:\n def get(self, key): return None if os.getenv("NO_TOKEN") else {"token_id":"test-id", "token_secret":"private-canary"}.get(key)\nconfig=Config()\n')
         self.env = {"PATH": os.environ.get("PATH", ""), "PYTHONPATH": self.temp.name,
                     "PYTHONDONTWRITEBYTECODE": "1"}
@@ -124,7 +131,7 @@ class HelperTest(unittest.TestCase):
 
     def test_check_and_rates(self):
         self.assertEqual(json.loads(self.call("check").stdout),
-                         {"workspace": "offline", "environment": "main", "client_version": "1.6.3"})
+                         {"workspace": "offline", "environment": "main", "client_version": self.version})
         self.assertEqual(json.loads(self.call("rates").stdout)["gpu_hour_cost_t4"], "0.59")
 
     def test_errors_are_typed_and_never_echo_secrets(self):

@@ -2,7 +2,7 @@
 name = "gpu-cli"
 version = "0.1.0"
 edition = "2021"
-description = "Local CLI to launch Vast.ai GPU workspaces with an optional git repository"
+description = "GPU jobs and workspaces on Vast.ai, Google Cloud and Modal"
 publish = false
 
 [lib]

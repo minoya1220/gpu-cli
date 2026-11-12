@@ -266,6 +266,7 @@ impl Prices {
             format!("Spot {}", money(rate(true))),
         ]
     }
+    #[cfg(test)]
     pub fn category_label(&self, types: &[&str]) -> String {
         let [demand, spot] = self.rate_columns(types, true);
         crate::offers::aligned_rows(
@@ -278,6 +279,7 @@ impl Prices {
         )
         .remove(0)
     }
+    #[cfg(test)]
     pub fn label(&self, tpu: &str) -> String {
         let [demand, spot] = self.rate_columns(&[tpu], false);
         crate::offers::aligned_rows(

@@ -183,7 +183,7 @@ gpu edit 12345678               # reuse the last editor, or choose one
 gpu edit 12345678 --editor code # cursor, code, zed, or nvim
 ```
 
-In a terminal, omit the ID to pick an instance, even if only one exists. `gpu ls` shows one aligned table with provider, type, lowercase status, hourly price and uptime. TPU IDs are shortened when unambiguous. `gpu ls --long` keeps full IDs; `gpu ls --json` prints credential-redacted JSON with full IDs and original numeric precision. `gpu cursor ID` is an alias for `gpu edit ID --editor cursor`.
+In a terminal, omit the ID to pick an instance, even if only one exists. `gpu ls` shows one aligned table with provider, type, lowercase status, hourly price and uptime. TPU IDs are shortened when unambiguous. `gpu ls --long` keeps full IDs; `gpu ls --json` prints credential-redacted JSON with full IDs and original numeric precision.
 
 After an interactive launch, choose an editor or **Don't open**. `gpu edit` waits up to 120 seconds for the instance and SSH. It opens `/workspace/<repo>` from the instance label, or `/workspace` without a repository. Non-interactive first use needs `--editor`.
 
@@ -377,7 +377,7 @@ v6e `v2-alpha-tpuv6e`. `v5e-N` aliases `v5litepod-N`. Use `--runtime IMAGE` to
 override or support a new generation; old saved `gcp.runtime` is ignored.
 
 Short TPU IDs from `gpu ls`, such as `gpu-uwhcp7`, work with `ssh`, `edit`,
-`cursor`, `stop`, `down` and `expire`. They resolve against a fresh inventory of
+`stop`, `down` and `expire`. They resolve against a fresh inventory of
 the **configured project**. Ambiguous IDs fail without acting; the table falls
 back to a longer, unique name or full ID. Full `gcp:PROJECT:ZONE:NAME` IDs from
 `gpu ls --long` or `--json` retain their embedded scope after config changes and
@@ -545,7 +545,7 @@ Failures set `ok:false` and add `error:{code,message,exit_code}`; `result` retai
 - `wait`: `id`, `ssh_alias`, `ready`, `setup_done` (null if unknown, false while pending, true when finished), plus `setup_ok` when finished; SSH-ready can still mean setup failed. `up` reports the same setup fields when observed. `exec`/`cp` also carry these readiness fields; `exec`/`cp` add `exit_code`, `stdout`, `stderr`; `cp` also returns `source`, `destination`. Captured streams are UTF-8 text (invalid bytes replaced); plain execution preserves bytes.
 - `stop`/`down`: `id`, `state` (`stopped`/`destroyed`/`already_absent`); unknown IDs fail before mutation rather than claiming billing stopped. `down` of an ID gpu recorded (SSH alias or pending TPU expiry task) whose instance is already gone cleans those up and reports `already_absent`. `expire`: `id`, `action`, `expiry:{status,deadlines}` (UTC list).
 - `setup`: `provider`, `project`, `action`, `dry_run`, plus `ready` for a selected provider or `vast_ready`/`gcp_ready` for status. GCP plans also report `queue` and `enable_apis` when applicable. Modal also reports `workspace`, `environment` and `client_version`.
-- `ssh`: `id`, `ssh_command`; `edit`/`cursor`: `id`, `ssh_alias`, `directory`, `editor`.
+- `ssh`: `id`, `ssh_command`; `edit`: `id`, `ssh_alias`, `directory`, `editor`.
 
 Exit codes: **0** success, **1** other failure, **2** usage/missing flags, **10** no capacity, including a Vast offer that cannot start now (change model/zone), **11** over max price (raise limit/change hardware), **12** not set up (`gpu setup`), **13** authentication expired (sign in again), **14** readiness timeout (inspect state/retry with a longer timeout), **15** spending guardrail (shorten expiry/choose cheaper hardware/change cap), **16** `not_found` (refresh IDs with `gpu ls`). `exec`/`cp`/`run` preserve the job/subprocess status, which may overlap these codes; JSON distinguishes `remote_exit`. `run` also uses **17** `job_timeout`, **18** `instance_lost`, **19** `cleanup_unverified`. `exec`/`cp` use **20** `command_timeout` for their optional execution deadline; Modal also uses it for a timed-out helper. Transient/unreadable provider reads use `provider_unavailable` (exit 1); wait loops retry until their deadline, while authentication and definite not-found errors stop early. Unlike `up`, `run` attempts verified destruction after any failure once its created ID is known.
 
@@ -585,7 +585,7 @@ cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
 ```
 
-Tests use `Runner` mocks and PATH stubs (including a stubbed `uv` for the Modal helper), never real Vast, Google Cloud or Modal accounts. Use a temporary HOME for SSH config tests. `tests/golden/` pins serialization, numeric formatting, and other byte contracts; update prose expectations deliberately, not unrelated formats. `docs/PLAN.md` is historical implementation context.
+Tests use `Runner` mocks and PATH stubs (including a stubbed `uv` for the Modal helper), never real Vast, Google Cloud or Modal accounts. Use a temporary HOME for SSH config tests. `tests/golden/` pins serialization, numeric formatting, and other byte contracts; update prose expectations deliberately, not unrelated formats.
 
 ### Workspace and local files
 

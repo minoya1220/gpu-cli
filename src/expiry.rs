@@ -75,8 +75,6 @@ pub fn parse_expire_arguments(
     Ok((id, values.remove(0)))
 }
 
-/// The system time zone: `TZ` from the environment snapshot, else the OS
-/// default (`/etc/localtime`), as Python's `astimezone()` uses.
 pub fn local_zone(env: &Env) -> TimeZone {
     let Some(tz) = env.get("TZ") else {
         return TimeZone::try_system().unwrap_or(TimeZone::UTC);
@@ -242,7 +240,6 @@ fn digits(s: &[u8], pos: usize, n: usize) -> Option<(i64, usize)> {
     Some((value, pos + n))
 }
 
-/// Where the date ends, following CPython's `_find_isoformat_datetime_separator`.
 fn separator_position(s: &[u8]) -> Option<usize> {
     let len = s.len();
     if len == 7 {
@@ -351,8 +348,6 @@ fn parse_date(s: &[u8], end: usize) -> std::result::Result<(i64, i64, i64), Date
     Ok((year, month, day))
 }
 
-/// `[HH[:?MM[:?SS[.ffffff]]]]` between `start` and `end`, as CPython's
-/// `parse_hh_mm_ss_ff`; the flag says whether text follows what was parsed.
 fn parse_hms(s: &[u8], start: usize, end: usize) -> Option<([i64; 4], bool)> {
     let mut values = [0i64; 4];
     let mut p = start;
@@ -395,7 +390,6 @@ fn invalid_iso(text: &str) -> String {
     )
 }
 
-/// `datetime.fromisoformat` as in CPython 3.11+.
 pub fn fromisoformat(text: &str) -> std::result::Result<IsoDateTime, String> {
     let s = text.as_bytes();
     let invalid = || invalid_iso(text);
@@ -635,6 +629,7 @@ pub fn expiry_summary(ctx: &Ctx, instance_id: &str, reply: &Dict) -> Result<Stri
     let (hours, rest) = (total / 3600, total % 3600);
     let (minutes, secs) = (rest / 60, rest % 60);
     Ok(format!(
-        "Instance {instance_id}: auto-DESTROY at {text} (in {hours}h {minutes}m {secs}s); timer {status}. Disk will be deleted; all billing stops on destruction."
+        "Instance {instance_id}: auto-DESTROY at {text} (in {hours}h {minutes}m {secs}s); timer {status}. Disk \
+            will be deleted; all billing stops on destruction."
     ))
 }

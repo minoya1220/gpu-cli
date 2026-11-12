@@ -1,5 +1,3 @@
-//! Subprocesses: the `Runner` seam and Python's `run()` helper.
-
 use std::io::{Read, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -31,7 +29,6 @@ pub struct Cmd {
     /// Capture stdout and stderr; otherwise they are inherited.
     pub capture: bool,
     pub timeout: Option<f64>,
-    /// Python-compatible text mode by default; remote command data opts out.
     pub normalize_newlines: bool,
     /// Binary stdout destination (archives and byte-exact log chunks).
     pub stdout_file: Option<std::path::PathBuf>,
@@ -90,7 +87,6 @@ impl Cmd {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Output {
-    /// Exit status; a signal is reported as its negative number, like Python.
     pub code: i32,
     pub stdout: String,
     pub stderr: String,
@@ -130,7 +126,6 @@ pub enum RunError {
 }
 
 impl RunError {
-    /// The text Python's subprocess exceptions carry when not handled.
     pub fn python_text(&self, program: &str) -> String {
         match self {
             RunError::NotFound => format!(
@@ -382,8 +377,6 @@ impl Runner for RealRunner {
     }
 }
 
-/// Run a CLI and return its stripped stdout. It never reads the terminal,
-/// which the picker owns. Failures keep Python's messages, redacted.
 pub fn run<S: AsRef<str>>(ctx: &Ctx, argv: &[S], timeout: Option<f64>) -> Result<String> {
     run_output(ctx, argv, timeout).map(|output| output.stdout.trim().to_string())
 }

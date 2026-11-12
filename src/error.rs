@@ -38,6 +38,46 @@ impl ExitCode {
     }
 }
 
+/// Render command help from the same status definitions used by failures.
+pub(crate) fn help_codes(run: bool) -> String {
+    use ExitCode::*;
+    let codes = [
+        NoCapacity,
+        OverMaxPrice,
+        NotSetup,
+        AuthExpired,
+        WaitTimeout,
+        SpendLimit,
+        NotFound,
+        JobTimeout,
+        InstanceLost,
+        CleanupUnverified,
+        CommandTimeout,
+    ];
+    codes
+        .into_iter()
+        .filter(|code| run || !matches!(code, JobTimeout | InstanceLost | CleanupUnverified))
+        .map(|code| {
+            let label = match code {
+                NoCapacity => "capacity",
+                OverMaxPrice => "price",
+                NotSetup => "setup",
+                AuthExpired => "auth",
+                WaitTimeout => "readiness timeout",
+                SpendLimit => "spend cap",
+                NotFound => "not found",
+                JobTimeout => "job timeout",
+                InstanceLost => "instance lost",
+                CleanupUnverified => "cleanup unverified",
+                CommandTimeout if run => "helper timeout",
+                CommandTimeout => "command timeout",
+            };
+            format!("{} {label}", code as i32)
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 /// How a command ends other than success.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Error {
@@ -102,7 +142,6 @@ impl Error {
         matches!(self, Self::ProviderUnavailable(_) | Self::Timeout(_))
     }
 
-    /// Python's `KeyError` text for a missing key.
     pub fn key(key: &str) -> Error {
         Error::Msg(format!("Required field missing: {}.", repr_str(key)))
     }
@@ -141,7 +180,6 @@ impl From<io::Error> for Error {
     }
 }
 
-/// Python's `OSError` text: `[Errno 2] No such file or directory: 'path'`.
 pub fn os_message(err: &io::Error, path: Option<&Path>) -> String {
     let Some(code) = err.raw_os_error() else {
         return err.to_string();

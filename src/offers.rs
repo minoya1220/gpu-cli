@@ -8,7 +8,7 @@ use std::sync::{LazyLock, Mutex};
 use regex::Regex;
 
 use crate::config;
-use crate::ctx::{Ctx, Env};
+use crate::ctx::Env;
 use crate::error::{Error, Result};
 use crate::history::stable_sort_by_key;
 use crate::launch::UpArgs;
@@ -143,13 +143,9 @@ impl OfferSearch {
     pub fn stats(&self, mode: &str) -> Result<Stats> {
         gpu_stats(&self.offers(mode, None)?)
     }
-
-    pub fn ctx(&self) -> &Ctx {
-        &self.vast.ctx
-    }
 }
 
-/// The search result as offer dicts, or Python's error for other shapes.
+/// The search result as offer dicts, rejecting unsupported response shapes.
 pub fn offer_dicts(value: Value) -> Result<Vec<Dict>> {
     match value {
         Value::List(items) => items
@@ -173,7 +169,6 @@ pub fn offer_dicts(value: Value) -> Result<Vec<Dict>> {
     }
 }
 
-/// `offer[key]`, or Python's `KeyError`.
 pub fn field<'a>(offer: &'a Dict, key: &str) -> Result<&'a Value> {
     offer.get(key).ok_or_else(|| Error::key(key))
 }
@@ -209,7 +204,6 @@ pub fn gpu_stats(offers: &[Dict]) -> Result<Stats> {
         let name = py_str(field(offer, "gpu_name")?);
         let price = offer_price(offer)?;
         let (cheapest, count) = stats.get(&name).copied().unwrap_or((f64::INFINITY, 0));
-        // Python's min(cheapest, price) keeps the first unless the second is smaller.
         let cheapest = if price < cheapest { price } else { cheapest };
         stats.insert(name, (cheapest, count + 1));
     }

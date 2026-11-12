@@ -189,7 +189,6 @@ fn test_ambiguous_arguments() {
 
 #[test]
 fn test_arm_deadline_rounds_up_to_whole_seconds() {
-    // Python sends math.ceil(deadline.timestamp()).
     for (deadline, seconds) in [
         ("2023-11-14T22:13:20.25Z", "1700000001"),
         ("2023-11-14T22:13:20.000000001Z", "1700000001"),

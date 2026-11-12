@@ -13,10 +13,6 @@ fn main() {
         default_hook(info);
     }));
     let ctx = gpu::ctx::Ctx::real();
-    // Ctrl-C outside the picker (line prompts, polling, subprocesses): like
-    // Python's KeyboardInterrupt path, plus anything the command still has to
-    // say, such as an instance that keeps running. The picker reads Ctrl-C as
-    // a key.
     if let Ok(mut signals) = Signals::new([SIGINT, SIGHUP, SIGTERM]) {
         let handler_ctx = ctx.clone();
         std::thread::spawn(move || {

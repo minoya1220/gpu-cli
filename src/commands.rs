@@ -1,4 +1,4 @@
-//! `ls`, `ssh`, `stop`, `down`, `edit`, `cursor` and `expire`, plus the
+//! `ls`, `ssh`, `stop`, `down`, `edit` and `expire`, plus the
 //! polling shared by them.
 
 use jiff::Timestamp;

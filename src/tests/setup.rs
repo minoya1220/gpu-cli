@@ -738,7 +738,6 @@ fn unset_up_cloud_is_blocked_at_the_single_process_boundary_for_all_commands() {
             vec!["ssh", ID],
             vec!["ssh", ID, "--exec"],
             vec!["edit", ID],
-            vec!["cursor", ID],
             vec!["stop", ID],
             vec!["down", ID, "--yes"],
             vec!["expire", ID, "show"],

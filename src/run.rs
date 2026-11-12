@@ -215,7 +215,8 @@ impl RunBackend for VastBackend {
             (deadline.as_second() - DOWNLOAD_RESERVE - ctx.clock.now().as_second()) as f64;
         let wait_timeout = timeout.min(remaining.max(0.0));
         let cap = if remaining < timeout {
-            let message = format!("SSH wait limited to {}s by --expire (requested --timeout {}s; 10m reserved for results). Use a longer --expire to allow more boot time.", crate::pyfmt::general(wait_timeout), crate::pyfmt::general(timeout));
+            let message = format!("SSH wait limited to {}s by --expire (requested --timeout {}s; 10m reserved for results). Use a longer \
+                --expire to allow more boot time.", crate::pyfmt::general(wait_timeout), crate::pyfmt::general(timeout));
             ctx.eprintln(&message)?;
             message + " "
         } else {
@@ -252,7 +253,8 @@ impl RunBackend for VastBackend {
     }
 
     fn hook(&self, id: &str) -> String {
-        format!("#!/bin/bash\nroot=\"${{HOME:-/root}}/.local/state/gpu-expire\"\nGPU_EXPIRE_SOURCE=$(cat \"$root/runner.sh\")\nexport GPU_EXPIRE_SOURCE\nexec bash \"$root/runner.sh\" arm {id} \"$1\"\n")
+        format!("#!/bin/bash\nroot=\"${{HOME:-/root}}/.local/state/gpu-expire\"\nGPU_EXPIRE_SOURCE=$(cat \
+            \"$root/runner.sh\")\nexport GPU_EXPIRE_SOURCE\nexec bash \"$root/runner.sh\" arm {id} \"$1\"\n")
     }
 
     fn wait_for_startup(&self) -> bool {

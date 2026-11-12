@@ -88,13 +88,10 @@ pub fn by_frequent_recency<T: Clone>(
             scored.push((score, option.clone()));
         }
     }
-    // Stable descending sort, as Python's sorted(..., reverse=True) keeps ties in order.
     stable_sort_by_key(&mut scored, |pair| -pair.0);
     scored.into_iter().map(|(_, value)| value).collect()
 }
 
-/// A stable sort that only uses `<`, like Python's `sorted`, so values that
-/// do not compare (NaN) never make it panic.
 pub fn stable_sort_by_key<T>(items: &mut [T], key: impl Fn(&T) -> f64) {
     for i in 1..items.len() {
         let mut j = i;

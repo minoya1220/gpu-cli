@@ -1,7 +1,3 @@
-//! Test doubles for the `Ctx` seams: a scripted runner that records every
-//! command, a fake clock that advances on sleep, and isolated temp HOME and
-//! XDG directories (Python's `isolate_user_directories` fixture).
-
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};

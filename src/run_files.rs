@@ -172,7 +172,8 @@ pub(crate) fn prepare(ctx: &Ctx, cwd: &Path, cap: u64) -> Result<Upload> {
     }
     if bytes > cap {
         sizes.sort_by_key(|a| std::cmp::Reverse(a.0));
-        return Err(Error::Usage(format!("Upload is {bytes} bytes, above --max-upload {cap}. Largest: {}. Ignore them in .gitignore or raise --max-upload.", sizes.iter().take(5).map(|(s,p)| format!("{} ({s})", p.display())).collect::<Vec<_>>().join(", "))));
+        return Err(Error::Usage(format!("Upload is {bytes} bytes, above --max-upload {cap}. Largest: {}. Ignore them in .gitignore or raise \
+            --max-upload.", sizes.iter().take(5).map(|(s,p)| format!("{} ({s})", p.display())).collect::<Vec<_>>().join(", "))));
     }
     let mut archive = tempfile::NamedTempFile::new()?;
     {

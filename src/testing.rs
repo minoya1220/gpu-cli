@@ -54,8 +54,8 @@ pub fn write_config(env: &TestEnv, config: &Dict) {
 pub fn tpu_facts(ctx: &Ctx) {
     let data = dict(include_str!("../tests/common/tpu_facts.json"));
     for name in ["tpu-catalog-test-project.json", "tpu-sku-facts.json"] {
-        if crate::gcp_http::read_cache(ctx, name, i64::MAX).is_none() {
-            crate::gcp_http::write_cache(ctx, name, data.clone());
+        if crate::cache::read_json(ctx, name, i64::MAX).is_none() {
+            crate::cache::write_json(ctx, name, data.clone());
         }
     }
 }

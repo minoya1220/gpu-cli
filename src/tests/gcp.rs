@@ -1530,7 +1530,7 @@ fn restrict_retry_zones(ctx: &Ctx) {
                 .collect(),
         ),
     );
-    crate::gcp_http::write_cache(ctx, "tpu-catalog-test-project.json", d);
+    crate::cache::write_json(ctx, "tpu-catalog-test-project.json", d);
 }
 #[test]
 fn spot_stockout_names_a_different_zone_and_preserves_request_scope() {
@@ -1822,8 +1822,7 @@ fn type_filter_counts_and_prices_exclude_unsupported_remembered_zone() {
     let (env, ctx, _runner, _state) = fixture();
     restrict_retry_zones(&ctx);
     super::gcp_prices::cache(&env);
-    let mut cache =
-        crate::gcp_http::read_cache(&ctx, "tpu-catalog-test-project.json", 900).unwrap();
+    let mut cache = crate::cache::read_json(&ctx, "tpu-catalog-test-project.json", 900).unwrap();
     let Value::List(mut zones) = cache.get("zones").unwrap().clone() else {
         panic!("zones")
     };
@@ -1834,7 +1833,7 @@ fn type_filter_counts_and_prices_exclude_unsupported_remembered_zone() {
         }
     }
     cache.insert("zones", Value::List(zones));
-    crate::gcp_http::write_cache(&ctx, "tpu-catalog-test-project.json", cache);
+    crate::cache::write_json(&ctx, "tpu-catalog-test-project.json", cache);
     crate::gcp_preferences::remember(&ctx, "test-project", "us-central1-a");
     let settings = crate::gcp::Settings::load(&configuration()).unwrap();
     let result = drive(

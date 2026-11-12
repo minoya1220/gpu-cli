@@ -65,7 +65,7 @@ pub fn no_other(cmd: &Cmd) -> Result<Output, RunError> {
 /// The SSH readiness probe succeeds and any GUI editor CLI accepts.
 pub fn ssh_ready(cmd: &Cmd) -> Result<Output, RunError> {
     match strs(&cmd.argv)[..] {
-        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", _, "true"] => {
+        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", _, "true"] => {
             Ok(Output::status(0))
         }
         ["ssh", ..]
@@ -255,7 +255,7 @@ fn test_managed_ssh_config_with_crlf_replaces_stale_alias() {
     )
     .unwrap();
     let entry = "Host vast-12\n  HostName ssh6.vast.ai\n  Port 12345\n  User root\n  IdentityFile ~/.ssh/id_ed25519\n  \
-        StrictHostKeyChecking accept-new\n  ServerAliveInterval 15\n  ServerAliveCountMax 4\n";
+        StrictHostKeyChecking accept-new\n  ServerAliveInterval 15\n  ServerAliveCountMax 4\n  ConnectTimeout 10\n";
     assert_eq!(update_host(&env, &instances()[0]).unwrap(), "vast-12");
     assert_eq!(
         read(&managed),

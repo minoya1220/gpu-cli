@@ -157,8 +157,8 @@ pub(crate) fn render_table(ctx: &Ctx, items: &[Dict], long: bool) -> Result<()> 
             }),
         );
     }
-    use crate::offers::Column::{Left, Plain};
-    for line in crate::offers::aligned_rows(&cells, [Left, Left, Left, Left, Left, Plain]) {
+    use crate::table::Column::{Left, Plain};
+    for line in crate::table::aligned_rows(&cells, [Left, Left, Left, Left, Left, Plain]) {
         ctx.println(line.trim_end())?;
     }
     Ok(())

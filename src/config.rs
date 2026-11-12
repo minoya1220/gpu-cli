@@ -64,7 +64,7 @@ pub(crate) fn infer_identity(ctx: &crate::ctx::Ctx, cfg: &mut Dict) {
             .get(key)
             .and_then(Value::as_str)
             .is_some_and(str::is_empty)
-            || crate::editors::which(&ctx.env, args[0]).is_none()
+            || crate::process::which(&ctx.env, args[0]).is_none()
         {
             continue;
         }
@@ -101,4 +101,38 @@ pub fn nvim_config_text(value: Option<&Value>) -> Result<Option<String>> {
             "Config 'editor.nvim_config' must be a git URL or directory path string.",
         )),
     }
+}
+
+/// Locked read/modify/replace, preserving keys outside the GCP setup journal.
+/// Call before cloud mutations so unwritable state fails before resource changes.
+pub(crate) fn save_gcp(env: &Env, gcp: Option<Dict>) -> Result<()> {
+    let path = config_path(env);
+    crate::atomic_file::update(&path, |bytes| {
+        let original = if bytes.is_empty() && !path.exists() {
+            Dict::new()
+        } else {
+            let text = std::str::from_utf8(bytes).map_err(|_| {
+                os_error(
+                    &std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "stream did not contain valid UTF-8",
+                    ),
+                    &path,
+                )
+            })?;
+            pyjson::loads(text)?
+                .as_dict()
+                .cloned()
+                .ok_or_else(|| Error::msg("Config must be an object"))?
+        };
+        let mut config: Dict = original
+            .iter()
+            .filter(|(key, _)| key.as_str() != "gcp")
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        if let Some(gcp) = gcp {
+            config.insert("gcp", Value::Dict(gcp));
+        }
+        Ok((pyjson::dumps(&Value::Dict(config), Some(2)) + "\n").into_bytes())
+    })
 }

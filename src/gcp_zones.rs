@@ -54,12 +54,12 @@ fn options(zones: Vec<Zone>, display: &Presentation) -> Vec<Opt<String>> {
             [z.name.clone(), price, cache]
         })
         .collect::<Vec<_>>();
-    let labels = crate::offers::aligned_rows(
+    let labels = crate::table::aligned_rows(
         &rows,
         [
-            crate::offers::Column::Left,
-            crate::offers::Column::Right,
-            crate::offers::Column::Plain,
+            crate::table::Column::Left,
+            crate::table::Column::Right,
+            crate::table::Column::Plain,
         ],
     );
     zones
@@ -143,16 +143,16 @@ fn build<R: 'static>(
                         [
                             name.clone(),
                             count.to_string(),
-                            if *count == 1 { "zone" } else { "zones" }.into(),
+                            crate::table::noun(*count, "zone"),
                         ]
                     })
                     .collect::<Vec<_>>();
-                let labels = crate::offers::aligned_rows(
+                let labels = crate::table::aligned_rows(
                     &rows,
                     [
-                        crate::offers::Column::Left,
-                        crate::offers::Column::Right,
-                        crate::offers::Column::Plain,
+                        crate::table::Column::Left,
+                        crate::table::Column::Right,
+                        crate::table::Column::Plain,
                     ],
                 );
                 areas

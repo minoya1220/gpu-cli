@@ -11,7 +11,7 @@ use crate::history::{recent_picks, record_picks_best_effort as record_picks};
 use crate::instances::{repo_name, select_instance};
 use crate::offers::offer_dicts;
 use crate::picker::pick;
-use crate::process::{run, Cmd, RunError};
+use crate::process::{run, RunError};
 use crate::prompt::confirm;
 use crate::pyfmt::{general, py_str, truthy};
 use crate::pyjson::{self, Dict, Value};
@@ -61,9 +61,9 @@ fn poll_instances(ctx: &Ctx, timeout: f64) -> Result<Vec<Dict>> {
 
 /// Verify provider state, not just acceptance of a lifecycle request.
 pub fn wait_for_lifecycle(ctx: &Ctx, instance_id: &str, action: &str, timeout: f64) -> Result<()> {
-    let deadline = ctx.clock.monotonic() + timeout;
+    let poll = ctx.polling(timeout, 2.0);
     loop {
-        let remaining = deadline - ctx.clock.monotonic();
+        let remaining = poll.remaining();
         if remaining <= 0.0 {
             let detail = if action == "destroy" {
                 "still listed"
@@ -78,8 +78,7 @@ pub fn wait_for_lifecycle(ctx: &Ctx, instance_id: &str, action: &str, timeout: f
         let live = match poll_instances(ctx, remaining) {
             Ok(live) => live,
             Err(err) if err.retryable() => {
-                ctx.clock
-                    .sleep((deadline - ctx.clock.monotonic()).clamp(0.0, 2.0));
+                poll.pause();
                 continue;
             }
             Err(err) => return Err(err),
@@ -93,9 +92,9 @@ pub fn wait_for_lifecycle(ctx: &Ctx, instance_id: &str, action: &str, timeout: f
         {
             return Ok(());
         }
-        let remaining = deadline - ctx.clock.monotonic();
+        let remaining = poll.remaining();
         if remaining > 0.0 {
-            ctx.clock.sleep(remaining.min(2.0));
+            poll.pause();
         }
     }
 }
@@ -118,7 +117,7 @@ pub(crate) fn wait_for_ssh_with_hint(
     timeout: f64,
     hint: &str,
 ) -> Result<(String, String)> {
-    let deadline = ctx.clock.monotonic() + timeout;
+    let poll = ctx.polling(timeout, 3.0);
     let mut reason = "instance not running".to_string();
     let timed_out = |reason: &str| {
         Error::status(crate::error::ExitCode::WaitTimeout, format!(
@@ -130,8 +129,8 @@ pub(crate) fn wait_for_ssh_with_hint(
         general(timeout)
     ))?;
     loop {
-        ctx.check_cancelled()?;
-        let remaining = deadline - ctx.clock.monotonic();
+        poll.check_cancelled()?;
+        let remaining = poll.remaining();
         if remaining <= 0.0 {
             return Err(timed_out(&reason));
         }
@@ -139,8 +138,7 @@ pub(crate) fn wait_for_ssh_with_hint(
             Ok(live) => live,
             Err(err) if err.retryable() => {
                 reason = err.text().into();
-                ctx.clock
-                    .sleep((deadline - ctx.clock.monotonic()).clamp(0.0, 3.0));
+                poll.pause();
                 continue;
             }
             Err(err) => return Err(err),
@@ -168,18 +166,10 @@ pub(crate) fn wait_for_ssh_with_hint(
                 }
                 Err(HostError::Failed(err)) => return Err(err),
                 Ok(alias) => {
-                    let remaining = deadline - ctx.clock.monotonic();
+                    let remaining = poll.remaining();
                     if remaining > 0.0 {
-                        let probe = Cmd::new(&[
-                            "ssh",
-                            "-o",
-                            "BatchMode=yes",
-                            "-o",
-                            "ConnectTimeout=5",
-                            &alias,
-                            "true",
-                        ])
-                        .timeout(Some(remaining.min(6.0)));
+                        let probe = crate::ssh::command(&["ssh"], false, &alias, "true")
+                            .timeout(Some(remaining.min(11.0)));
                         match ctx.run(&probe) {
                             Ok(output) if output.code == 0 => {
                                 let repo = repo_name(instance);
@@ -206,11 +196,11 @@ pub(crate) fn wait_for_ssh_with_hint(
                 }
             }
         }
-        let remaining = deadline - ctx.clock.monotonic();
+        let remaining = poll.remaining();
         if remaining <= 0.0 {
             return Err(timed_out(&reason));
         }
-        ctx.clock.sleep(remaining.min(3.0));
+        poll.pause();
     }
 }
 
@@ -289,6 +279,7 @@ pub fn ssh(ctx: &Ctx, instance_id: &str, exec: bool) -> Result<()> {
     if exec {
         let words = shlex::split(&url).ok_or_else(|| Error::msg("No closing quotation"))?;
         let mut argv = vec!["ssh".to_string()];
+        argv.extend(crate::ssh::connect_options());
         argv.extend(words);
         return Err(Error::msg(ctx.exec(&argv)));
     }

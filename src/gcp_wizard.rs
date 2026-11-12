@@ -240,12 +240,12 @@ pub(crate) fn capacity_screen(
                     "(may be interrupted)".into(),
                 ],
             ];
-            crate::offers::aligned_rows(
+            crate::table::aligned_rows(
                 &cells,
                 [
-                    crate::offers::Column::Left,
-                    crate::offers::Column::Left,
-                    crate::offers::Column::Plain,
+                    crate::table::Column::Left,
+                    crate::table::Column::Left,
+                    crate::table::Column::Plain,
                 ],
             )
             .into_iter()
@@ -384,12 +384,12 @@ fn type_screen(
                     ]
                 })
                 .collect::<Vec<_>>();
-            let labels = crate::offers::aligned_rows(
+            let labels = crate::table::aligned_rows(
                 &cells,
                 [
-                    crate::offers::Column::Left,
-                    crate::offers::Column::Left,
-                    crate::offers::Column::Plain,
+                    crate::table::Column::Left,
+                    crate::table::Column::Left,
+                    crate::table::Column::Plain,
                 ],
             );
             values

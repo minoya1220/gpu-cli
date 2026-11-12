@@ -64,27 +64,20 @@ pub(crate) fn after_up(ctx: &Ctx, should_wait: bool, timeout: f64, wait_setup: b
 
 /// Old instances have no marker: report unknown, and only --wait-setup blocks.
 fn workspace_setup(ctx: &Ctx, alias: &str, timeout: f64, required: bool) -> Result<()> {
-    let end = ctx.clock.monotonic() + timeout.max(0.0);
+    let poll = ctx.polling(timeout.max(0.0), 2.0);
     loop {
-        let remaining = end - ctx.clock.monotonic();
+        let remaining = poll.remaining();
         if remaining <= 0.0 {
             break;
         }
         let result = ctx.run(
-            &Cmd::new(&[
-                "ssh",
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "ConnectTimeout=5",
-                "-o",
-                "ServerAliveInterval=15",
-                "-o",
-                "ServerAliveCountMax=4",
+            &crate::ssh::command(
+                &["ssh"],
+                true,
                 alias,
                 "cat /workspace/.gpu-setup 2>/dev/null || true",
-            ])
-            .timeout(Some(remaining.min(6.0))),
+            )
+            .timeout(Some(remaining.min(11.0))),
         );
         if let Ok(out) = result {
             if out.code == 0 {
@@ -113,8 +106,7 @@ fn workspace_setup(ctx: &Ctx, alias: &str, timeout: f64, required: bool) -> Resu
         if !required {
             return Ok(());
         }
-        ctx.clock
-            .sleep((end - ctx.clock.monotonic()).clamp(0.0, 2.0));
+        poll.pause();
     }
     if required {
         Err(Error::status(crate::error::ExitCode::WaitTimeout, "Timed out waiting for workspace setup; instance is still running. Next: gpu wait ID --wait-setup \
@@ -156,30 +148,20 @@ pub fn exec(ctx: &Ctx, id: &str, command: &[String], timeout: f64) -> Result<()>
     // OpenSSH joins command arguments without escaping. Quote each argument so
     // spaces and shell metacharacters remain data; use `sh -c SCRIPT` for shell.
     let command = crate::pyfmt::shell_join(command);
-    completed(
-        ctx,
-        &[
-            "ssh".into(),
-            "-T".into(),
-            "-o".into(),
-            "BatchMode=yes".into(),
-            "-o".into(),
-            "ConnectTimeout=5".into(),
-            "-o".into(),
-            "ServerAliveInterval=15".into(),
-            "-o".into(),
-            "ServerAliveCountMax=4".into(),
-            "-o".into(),
-            "ControlMaster=no".into(),
-            // Vast's /etc/banner is an SSH authentication banner, not remote
-            // command stderr. OpenSSH suppresses it at LogLevel=ERROR; never
-            // strip banner-looking text from the actual command streams.
-            "-o".into(),
-            "LogLevel=ERROR".into(),
-            alias,
-            command,
-        ],
-    )
+    let mut argv = vec!["ssh".into(), "-T".into()];
+    argv.extend(crate::ssh::options(true));
+    argv.extend([
+        "-o".into(),
+        "ControlMaster=no".into(),
+        // Vast's /etc/banner is an SSH authentication banner, not remote
+        // command stderr. OpenSSH suppresses it at LogLevel=ERROR; never
+        // strip banner-looking text from the actual command streams.
+        "-o".into(),
+        "LogLevel=ERROR".into(),
+        alias,
+        command,
+    ]);
+    completed(ctx, &argv)
 }
 
 pub fn validate_copy(source: &str, destination: &str) -> Result<()> {
@@ -213,27 +195,16 @@ pub fn copy(
             format!("./{s}")
         }
     };
-    let mut argv = vec![
-        "scp".into(),
-        // Force SFTP even on versions whose default was the remote-shell SCP
-        // protocol: filenames must never be interpreted as shell programs.
-        "-s".into(),
-        "-B".into(),
-        "-o".into(),
-        "BatchMode=yes".into(),
-        "-o".into(),
-        "ConnectTimeout=5".into(),
-        "-o".into(),
-        "ServerAliveInterval=15".into(),
-        "-o".into(),
-        "ServerAliveCountMax=4".into(),
+    let mut argv = vec!["scp".into(), "-s".into(), "-B".into()];
+    argv.extend(crate::ssh::options(true));
+    argv.extend([
         "-o".into(),
         "ControlMaster=no".into(),
         "-o".into(),
         "LogLevel=ERROR".into(),
         "-o".into(),
         "RequestTTY=no".into(),
-    ];
+    ]);
     if recursive {
         argv.push("-r".into());
     }

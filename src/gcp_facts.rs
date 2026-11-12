@@ -1,5 +1,6 @@
 //! Non-price TPU facts fetched during setup and refreshed during launch.
 //! Cached facts remain usable offline; paid preflight is always live.
+use crate::cache;
 use crate::{
     ctx::Ctx,
     error::{Error, Result},
@@ -18,8 +19,7 @@ fn rows(d: &Dict, key: &str) -> Vec<Dict> {
 }
 pub fn known_zones(ctx: &Ctx, project: &str) -> Vec<Zone> {
     if gcp::component(project) {
-        if let Some(cache) = gcp_http::read_cache(ctx, &crate::gcp_catalog::file(project), i64::MAX)
-        {
+        if let Some(cache) = cache::read_json(ctx, &crate::gcp_catalog::file(project), i64::MAX) {
             return rows(&cache, "zones")
                 .iter()
                 .filter_map(crate::gcp_catalog::parse_zone)
@@ -39,7 +39,7 @@ pub fn known_types(ctx: &Ctx, project: &str, zone: Option<&str>) -> Vec<String> 
     types
 }
 pub fn skus(ctx: &Ctx) -> Vec<Dict> {
-    gcp_http::read_cache(ctx, SKU_CACHE, i64::MAX)
+    cache::read_json(ctx, SKU_CACHE, i64::MAX)
         .map(|data| rows(&data, "skus"))
         .unwrap_or_default()
 }
@@ -109,7 +109,8 @@ fn sku_fact(service: &str, sku: &Dict) -> Option<Dict> {
 }
 pub fn refresh_skus(ctx: &Ctx, project: &str) -> Result<()> {
     let mut refreshed = ctx
-        .gcp_sku_refreshed
+        .gcp
+        .sku_refreshed
         .lock()
         .map_err(|_| Error::msg("Catalog refresh unavailable."))?;
     *refreshed = true;
@@ -117,7 +118,7 @@ pub fn refresh_skus(ctx: &Ctx, project: &str) -> Result<()> {
 }
 /// Refresh at most once per process; concurrent callers wait for that one.
 pub fn refresh_skus_once(ctx: &Ctx, project: &str) {
-    let Ok(mut refreshed) = ctx.gcp_sku_refreshed.lock() else {
+    let Ok(mut refreshed) = ctx.gcp.sku_refreshed.lock() else {
         return;
     };
     if !*refreshed {
@@ -176,7 +177,7 @@ fn fetch_skus(ctx: &Ctx, project: &str) -> Result<()> {
     let mut cache = Dict::new();
     cache.insert("services", Value::List(services));
     cache.insert("skus", Value::List(skus));
-    gcp_http::write_cache(ctx, SKU_CACHE, cache);
+    cache::write_json(ctx, SKU_CACHE, cache);
     Ok(())
 }
 #[cfg(test)]

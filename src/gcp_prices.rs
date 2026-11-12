@@ -239,12 +239,12 @@ impl Prices {
     #[cfg(test)]
     pub fn category_label(&self, types: &[&str]) -> String {
         let [demand, spot] = self.rate_columns(types, true);
-        crate::offers::aligned_rows(
+        crate::table::aligned_rows(
             &[["TPU (Google Cloud)".into(), demand, spot]],
             [
-                crate::offers::Column::Left,
-                crate::offers::Column::Left,
-                crate::offers::Column::Plain,
+                crate::table::Column::Left,
+                crate::table::Column::Left,
+                crate::table::Column::Plain,
             ],
         )
         .remove(0)
@@ -252,12 +252,12 @@ impl Prices {
     #[cfg(test)]
     pub fn label(&self, tpu: &str) -> String {
         let [demand, spot] = self.rate_columns(&[tpu], false);
-        crate::offers::aligned_rows(
+        crate::table::aligned_rows(
             &[[format!("TPU {tpu}"), demand, spot]],
             [
-                crate::offers::Column::Left,
-                crate::offers::Column::Left,
-                crate::offers::Column::Plain,
+                crate::table::Column::Left,
+                crate::table::Column::Left,
+                crate::table::Column::Plain,
             ],
         )
         .remove(0)
@@ -276,7 +276,7 @@ struct Entry {
     sku: Dict,
 }
 fn entries(ctx: &Ctx, project: &str) -> std::collections::BTreeMap<String, Entry> {
-    crate::gcp_http::read_cache(ctx, &cache_file(project), i64::MAX)
+    crate::cache::read_json(ctx, &cache_file(project), i64::MAX)
         .and_then(|d| d.get("entries").cloned())
         .and_then(|v| gcp::objects(v).ok())
         .unwrap_or_default()
@@ -487,7 +487,8 @@ pub fn load_for(ctx: &Ctx, cfg: &Dict, zone: &str, wanted: Option<(&str, bool)>)
         return Err(unavailable("No public hourly SKU for this region/type."));
     }
     let _flight = ctx
-        .gcp_price_lock
+        .gcp
+        .price_lock
         .lock()
         .map_err(|_| unavailable("Price cache unavailable."))?;
     let mut stored = entries(ctx, &project);
@@ -547,7 +548,7 @@ pub fn load_for(ctx: &Ctx, cfg: &Dict, zone: &str, wanted: Option<(&str, bool)>)
                 .collect(),
         ),
     );
-    crate::gcp_http::write_cache(ctx, &cache_file(&project), cache);
+    crate::cache::write_json(ctx, &cache_file(&project), cache);
     let ids = metas
         .iter()
         .filter_map(|m| gcp::text(m, "id"))

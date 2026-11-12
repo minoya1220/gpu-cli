@@ -1,3 +1,4 @@
+use crate::cache;
 use crate::{
     ctx::Ctx,
     error::{Error, Result},
@@ -61,7 +62,7 @@ pub(crate) fn parse_zone(d: &Dict) -> Option<Zone> {
     Some(Zone { name, types })
 }
 fn cached(ctx: &Ctx, project: &str) -> Option<Vec<Zone>> {
-    let data = gcp_http::read_cache(ctx, &file(project), i64::MAX)?;
+    let data = cache::read_json(ctx, &file(project), i64::MAX)?;
     let rows = data.get("zones")?.as_list()?;
     rows.iter()
         .map(|v| v.as_dict().and_then(parse_zone))
@@ -80,7 +81,7 @@ pub fn cached_types(ctx: &Ctx, project: &str, zone: &str) -> Result<Vec<String>>
 }
 pub fn refresh(ctx: &Ctx, project: &str) -> Result<Vec<Zone>> {
     ctx.require_gcloud()?;
-    let _flight = ctx.gcp_catalog_lock.lock().map_err(|_| invalid())?;
+    let _flight = ctx.gcp.catalog_lock.lock().map_err(|_| invalid())?;
     if !gcp::component(project) {
         return Err(invalid());
     }
@@ -140,7 +141,7 @@ pub fn refresh(ctx: &Ctx, project: &str) -> Result<Vec<Zone>> {
                 .collect(),
         ),
     );
-    gcp_http::write_cache(ctx, &file(project), data);
+    cache::write_json(ctx, &file(project), data);
     Ok(zones)
 }
 pub fn known(ctx: &Ctx, project: &str, tpu: Option<&str>) -> Vec<Zone> {
@@ -191,12 +192,12 @@ pub fn verify(ctx: &Ctx, project: &str, zone: &str, tpu: &str) -> Result<()> {
         return Ok(());
     }
     // A stale discovery entry must not recommend the just-rejected zone.
-    if let Some(mut data) = gcp_http::read_cache(ctx, &file(project), i64::MAX) {
+    if let Some(mut data) = cache::read_json(ctx, &file(project), i64::MAX) {
         if let Some(Value::List(mut zones)) = data.get("zones").cloned() {
             zones.retain(|v| v.as_dict().and_then(|d| gcp::text(d, "name")) != Some(zone));
             data.insert("zones", Value::List(zones));
         }
-        gcp_http::write_cache(ctx, &file(project), data);
+        cache::write_json(ctx, &file(project), data);
     }
     let alternatives = known(ctx, project, Some(tpu))
         .into_iter()

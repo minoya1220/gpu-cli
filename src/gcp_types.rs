@@ -56,12 +56,12 @@ pub(crate) fn label(tpu: &str) -> String {
         return tpu.into();
     };
     match generation(tpu) {
-        Some("v5e" | "v6e") => format!("{n} {}", if n == 1 { "chip" } else { "chips" }),
+        Some("v5e" | "v6e") => crate::table::plural(n as usize, "chip"),
         Some("v2" | "v3" | "v4" | "v5p") if n % 2 == 0 => {
             let chips = n / 2;
             format!(
-                "{n} TensorCores ({chips} {})",
-                if chips == 1 { "chip" } else { "chips" }
+                "{n} TensorCores ({})",
+                crate::table::plural(chips as usize, "chip")
             )
         }
         Some("v2" | "v3" | "v4" | "v5p") => format!("{n} TensorCores"),

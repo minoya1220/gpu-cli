@@ -75,22 +75,9 @@ fn checked_transfer(
 }
 
 fn ssh(alias: &str, command: &str, timeout: f64) -> Cmd {
-    Cmd::new(&[
-        "ssh",
-        "-T",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "ConnectTimeout=10",
-        "-o",
-        "ServerAliveInterval=15",
-        "-o",
-        "ServerAliveCountMax=4",
-        alias,
-        command,
-    ])
-    .timeout(Some(timeout.max(0.1)))
-    .raw_output()
+    crate::ssh::command(&["ssh", "-T"], true, alias, command)
+        .timeout(Some(timeout.max(0.1)))
+        .raw_output()
 }
 
 /// The shared runner owns uploads, supervision, logs and downloads. A backend
@@ -801,8 +788,8 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
             );
             // The supervisor runs the linger hook before publishing the final
             // status; wait through transient SSH failures until it is seen.
-            let until = ctx.clock.monotonic() + 35.0;
-            while ctx.interrupts() < 2 && ctx.clock.monotonic() < until {
+            let poll = ctx.polling(35.0, 1.0);
+            while ctx.interrupts() < 2 && !poll.expired() {
                 let out = response();
                 if out.as_ref().is_some_and(|o| o.stdout.trim() == "lost") {
                     break;
@@ -814,7 +801,7 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
                     last = Some(s);
                     break;
                 }
-                ctx.clock.sleep(1.0);
+                poll.pause();
             }
         }
         if ctx.interrupts() < 2 {
@@ -1109,7 +1096,7 @@ fn download(
         shell_quote(outputs),
         shell_quote(&format!("{root}/attached"))
     );
-    let end = ctx.clock.monotonic() + seconds;
+    let poll = ctx.polling(seconds, 0.0);
     let message = "Results download failed; instance will still be destroyed.";
     for delay in DOWNLOAD_RETRY_DELAYS
         .iter()
@@ -1117,7 +1104,7 @@ fn download(
         .map(Some)
         .chain([None])
     {
-        let remaining = (end - ctx.clock.monotonic()).max(0.1);
+        let remaining = poll.remaining().max(0.1);
         let result = ctx.transfer(
             &backend
                 .remote(&command, remaining)
@@ -1129,13 +1116,13 @@ fn download(
             Ok(_) => break,
             Err(error) => error,
         };
-        let Some(delay) = delay.filter(|delay| {
-            transport && ctx.interrupts() < 2 && ctx.clock.monotonic() + delay < end
-        }) else {
+        let Some(delay) =
+            delay.filter(|delay| transport && ctx.interrupts() < 2 && *delay < poll.remaining())
+        else {
             return Err(error);
         };
         ctx.eprintln(&format!("{} Retrying download.", error.text()))?;
-        ctx.clock.sleep(delay);
+        poll.pause_for(delay);
     }
     let bytes = run_files::unpack(ctx, archive.path(), local, Path::new(outputs))?;
     ctx.result("downloaded_bytes", Value::Int(bytes as i64));

@@ -54,7 +54,7 @@ pub(crate) fn cache(env: &TestEnv) {
         .collect();
     let mut data = Dict::new();
     data.insert("entries", Value::List(entries));
-    crate::gcp_http::write_cache(&ctx, "tpu-prices-test-project.json", data);
+    crate::cache::write_json(&ctx, "tpu-prices-test-project.json", data);
 }
 #[test]
 fn normalizes_units_slice_sizes_and_capacity_without_guessing_missing_rates() {

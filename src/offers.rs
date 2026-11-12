@@ -1,9 +1,9 @@
 //! Vast offer search, the known GPU model catalog, and their display labels.
 
+use crate::table::{aligned_rows, plural, Column, HardwareColumns};
 use std::collections::{BTreeSet, HashMap};
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, Mutex};
+use std::sync::LazyLock;
 
 use regex::Regex;
 
@@ -33,7 +33,6 @@ const BUNDLED_MODELS: &str = include_str!("../assets/gpu_models.txt");
 pub type Stats = HashMap<String, (f64, usize)>;
 
 // Offer searches can run on several picker threads at once.
-static CACHE_LOCK: Mutex<()> = Mutex::new(());
 
 /// Vast offer queries for one `gpu up` run; the mode is chosen later.
 #[derive(Clone)]
@@ -210,10 +209,6 @@ pub fn gpu_stats(offers: &[Dict]) -> Result<Stats> {
     Ok(stats)
 }
 
-pub fn plural(count: usize, noun: &str) -> String {
-    format!("{count} {noun}{}", if count == 1 { "" } else { "s" })
-}
-
 fn reliability(offer: &Dict) -> Result<f64> {
     offer_number(
         "reliability",
@@ -265,50 +260,6 @@ pub fn offer_rows(offers: &[Dict]) -> Result<Vec<String>> {
             Column::Plain,
         ],
     ))
-}
-
-#[derive(Clone, Copy)]
-pub(crate) enum Column {
-    Left,
-    Right,
-    Plain,
-}
-
-/// The Vast picker's measured widths and double-space gutters, shared by TPU
-/// rows. Plain cells retain their own formatting (e.g. reliability and location).
-pub(crate) fn aligned_rows<const N: usize>(
-    rows: &[[String; N]],
-    columns: [Column; N],
-) -> Vec<String> {
-    let widths: [usize; N] =
-        std::array::from_fn(|i| rows.iter().map(|r| r[i].chars().count()).max().unwrap_or(0));
-    rows.iter()
-        .map(|row| {
-            row.iter()
-                .enumerate()
-                .map(|(i, cell)| match columns[i] {
-                    Column::Left => format!("{cell:<w$}", w = widths[i]),
-                    Column::Right => format!("{cell:>w$}", w = widths[i]),
-                    Column::Plain => cell.clone(),
-                })
-                .collect::<Vec<_>>()
-                .join("  ")
-        })
-        .collect()
-}
-
-/// Hardware discovery uses one four-column grid across providers. Vast Spot
-/// remains unquoted until the separate interruptible UI work is approved.
-pub(crate) type HardwareColumns = [String; 4];
-
-pub(crate) fn hardware_labels(rows: &[HardwareColumns]) -> Vec<String> {
-    aligned_rows(
-        rows,
-        [Column::Left, Column::Right, Column::Left, Column::Plain],
-    )
-    .into_iter()
-    .map(|label| label.trim_end().to_string())
-    .collect()
 }
 
 pub(crate) fn model_columns(model: &str, stats: &Stats, pending: &str) -> HardwareColumns {
@@ -452,9 +403,7 @@ pub fn known_gpu_models(env: &Env) -> Vec<String> {
 }
 
 pub fn gpu_cache_path(env: &Env) -> PathBuf {
-    env.xdg("XDG_CACHE_HOME", ".cache")
-        .join("gpu")
-        .join("gpu_models.txt")
+    crate::cache::dir(env).join("gpu_models.txt")
 }
 
 pub fn valid_gpu_name(value: &str) -> bool {
@@ -496,18 +445,14 @@ pub fn update_gpu_cache(env: &Env, items: &[Dict], path: Option<&Path>) {
     let cache = path
         .map(Path::to_path_buf)
         .unwrap_or_else(|| gpu_cache_path(env));
-    let _guard = CACHE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    names.extend(read_gpu_cache(env, Some(&cache)));
-    let Some(parent) = cache.parent() else { return };
-    if std::fs::create_dir_all(parent).is_err() {
-        return;
-    }
-    // Replace atomically so a concurrent reader never sees a partial file.
-    let Ok(mut temp) = tempfile::Builder::new().suffix(".tmp").tempfile_in(parent) else {
-        return;
-    };
-    let text = names.into_iter().collect::<Vec<_>>().join("\n") + "\n";
-    if temp.write_all(text.as_bytes()).is_ok() {
-        let _ = temp.persist(&cache);
-    }
+    let _ = crate::atomic_file::update(&cache, |original| {
+        if let Ok(text) = std::str::from_utf8(original) {
+            names.extend(
+                text.lines()
+                    .filter(|name| valid_gpu_name(name))
+                    .map(String::from),
+            );
+        }
+        Ok((names.into_iter().collect::<Vec<_>>().join("\n") + "\n").into_bytes())
+    });
 }

@@ -7,6 +7,7 @@
 //! SIGWINCH through `poll(2)` on stdin plus a wake pipe, so no reader thread
 //! outlives the picker and a following prompt gets every keystroke.
 
+use crate::sync::MutexExt;
 use std::io::Write;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -72,7 +73,7 @@ fn aborted(abort: &Option<Arc<Abort>>, now: Instant) -> bool {
     if abort.script_failed.load(Ordering::SeqCst) {
         return true;
     }
-    let done = *abort.script_done.lock().unwrap_or_else(|p| p.into_inner());
+    let done = *abort.script_done.lock_recover();
     done.is_some_and(|at| now >= at + Duration::from_secs(2))
 }
 
@@ -102,7 +103,7 @@ pub fn run_loop<V: PickValue, R: 'static>(
             let core = core.borrow();
             renderer.draw(io, &core.frame());
             if let Some(snapshot) = &options.snapshot {
-                *snapshot.lock().unwrap_or_else(|p| p.into_inner()) = core.snapshot();
+                *snapshot.lock_recover() = core.snapshot();
             }
         }
         if let Some(outcome) = core.borrow_mut().take_outcome() {

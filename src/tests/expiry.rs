@@ -391,7 +391,10 @@ fn test_cli_dispatch() {
         let remote = calls
             .iter()
             .find(|a| {
-                a.len() == 7 && a[4] == "ConnectTimeout=10" && a[5] == format!("vast-{instance}")
+                a.len() == 7
+                    && a[5] == format!("vast-{instance}")
+                    && a.last()
+                        .is_some_and(|remote| remote.starts_with("bash -s -- "))
             })
             .expect("expiry call");
         let words = shlex::split(remote.last().unwrap()).unwrap();

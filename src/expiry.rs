@@ -494,18 +494,7 @@ pub fn remote_command(
         let deadline = deadline.ok_or_else(|| Error::msg("Arming requires a deadline."))?;
         args.push(deadline_seconds(deadline).to_string());
     }
-    Ok([
-        "ssh",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "ConnectTimeout=10",
-        alias,
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .chain([shell_join(&args)])
-    .collect())
+    Ok(crate::ssh::command(&["ssh"], false, alias, &shell_join(&args)).argv)
 }
 
 /// A deadline as whole epoch seconds, rounded up so it is never early.

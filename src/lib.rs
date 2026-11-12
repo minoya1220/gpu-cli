@@ -2,6 +2,7 @@
 //! External work always crosses the Runner seam.
 
 mod atomic_file;
+mod cache;
 pub(crate) mod cli;
 pub(crate) mod commands;
 pub mod config;
@@ -29,7 +30,9 @@ pub mod launch;
 pub(crate) mod modal;
 pub mod offers;
 mod output;
+mod packing;
 pub mod picker;
+mod poll;
 pub mod process;
 mod progress;
 pub mod prompt;
@@ -43,8 +46,12 @@ pub mod repos;
 pub(crate) mod run;
 mod run_files;
 pub(crate) mod setup;
+mod ssh;
 pub(crate) mod ssh_config;
 pub mod startup;
+mod sync;
+mod table;
+mod url;
 pub mod vast;
 pub(crate) mod wizard;
 
@@ -143,6 +150,7 @@ fn up_args(flags: cli::UpFlags) -> UpArgs {
 
 fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
     let mut cfg = config::load_config(&ctx.env)?;
+    ctx.set_gcp_ready(setup::gcp_ready(&cfg));
     if let Command::Up(flags) = &mut command {
         guardrails::defaults(flags, &cfg)?;
         launch::validate_launch_args(&up_args(flags.clone()))?;

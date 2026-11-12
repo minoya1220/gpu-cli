@@ -85,7 +85,14 @@ fn test_up_arms_after_creation() {
             "vast-123",
         ],
     );
-    let words = shlex::split(expiry[0].last().unwrap()).unwrap();
+    let expiry = expiry
+        .iter()
+        .find(|args| {
+            args.last()
+                .is_some_and(|remote| remote.starts_with("bash -s -- "))
+        })
+        .unwrap();
+    let words = shlex::split(expiry.last().unwrap()).unwrap();
     assert_eq!(words[3..5], ["arm", "123"]);
     let deadline: i64 = words[5].parse().unwrap();
     assert!(

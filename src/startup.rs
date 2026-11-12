@@ -1,7 +1,5 @@
 //! The generated onstart script for container and VM instances.
 
-use std::io::Write;
-
 use jiff::Timestamp;
 
 use crate::config;
@@ -44,9 +42,7 @@ fn bounded_script(lines: Vec<String>) -> Result<String> {
     if script.len() <= ONSTART_LIMIT {
         return Ok(script);
     }
-    let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
-    gzip.write_all(script.as_bytes())?;
-    let packed = base64(&gzip.finish()?);
+    let packed = crate::packing::gzip_base64(&script)?;
     let wrapper = format!("#!/bin/bash\nbash -c \"$(echo {packed} | base64 -d | gunzip)\"\n");
     if wrapper.len() > ONSTART_LIMIT {
         return Err(Error::msg(format!("Startup script exceeds Vast's {ONSTART_LIMIT} character onstart limit; use a shorter repository URL or identity.")));
@@ -65,10 +61,7 @@ pub fn expiry_guard(deadline: Timestamp) -> Vec<String> {
         .filter(|line| !line.trim_start().starts_with('#'))
         .map(|line| format!("{line}\n"))
         .collect();
-    let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
-    gzip.write_all(code.as_bytes())
-        .expect("writing to memory cannot fail");
-    let packed = base64(&gzip.finish().expect("writing to memory cannot fail"));
+    let packed = crate::packing::gzip_base64(&code).expect("writing to memory cannot fail");
     vec![
         "GPU_EXPIRE=${HOME:-/root}/.local/state/gpu-expire".into(),
         format!(
@@ -79,30 +72,30 @@ pub fn expiry_guard(deadline: Timestamp) -> Vec<String> {
     ]
 }
 
-/// Standard base64 with padding, on one line.
-fn base64(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut text = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let n = chunk
-            .iter()
-            .enumerate()
-            .fold(0u32, |n, (i, b)| n | (u32::from(*b) << (16 - 8 * i)));
-        for i in 0..4 {
-            text.push(if i <= chunk.len() {
-                char::from(ALPHABET[((n >> (18 - 6 * i)) & 63) as usize])
-            } else {
-                '='
-            });
+#[derive(Clone, Copy, PartialEq)]
+enum Mode {
+    Container,
+    Vm,
+}
+impl TryFrom<&str> for Mode {
+    type Error = Error;
+    fn try_from(mode: &str) -> Result<Self> {
+        match mode {
+            "container" => Ok(Self::Container),
+            "vm" => Ok(Self::Vm),
+            _ => Err(Error::msg(format!("Unsupported mode: {mode}"))),
         }
     }
-    text
+}
+fn preamble(deadline: Option<Timestamp>) -> Vec<String> {
+    let mut lines = vec!["#!/bin/bash".into()];
+    lines.extend(deadline.map(expiry_guard).unwrap_or_default());
+    lines
 }
 
 /// Minimal job image startup: no GitHub auth, cloning, or apt work.
 pub fn run_script(deadline: Timestamp) -> Result<String> {
-    let mut lines = vec!["#!/bin/bash".to_string()];
-    lines.extend(expiry_guard(deadline));
+    let mut lines = preamble(Some(deadline));
     // Keep the image's entrypoint/SSH services available even if setup fails.
     lines.push("(".into());
     lines.push(SETUP_START.into());
@@ -142,14 +135,11 @@ pub fn startup_script(
     cfg: &Dict,
     deadline: Option<Timestamp>,
 ) -> Result<String> {
-    if mode != "container" && mode != "vm" {
-        return Err(Error::msg(format!("Unsupported mode: {mode}")));
-    }
+    let mode = Mode::try_from(mode)?;
     let (clone_url, name) = resolve_repo(repo.as_arg(), &py_str(config::get(cfg, "owner")?))?;
     let target = format!("/workspace/{name}");
-    let mut lines: Vec<String> = vec!["#!/bin/bash".into()];
-    lines.extend(deadline.map(expiry_guard).unwrap_or_default());
-    if mode == "container" {
+    let mut lines = preamble(deadline);
+    if mode == Mode::Container {
         lines.push("(".into());
     }
     lines.push(SETUP_START.into());
@@ -157,7 +147,7 @@ pub fn startup_script(
         "source /etc/environment 2>/dev/null || true".into(),
         "export GH_TOKEN".into(),
     ]);
-    if mode == "container" {
+    if mode == Mode::Container {
         lines.extend(
             [
                 "apt update || true; apt install -y gh || echo 'WARNING: gh install failed; continuing without it.' >&2",
@@ -206,7 +196,7 @@ pub fn startup_script(
         ));
     }
     lines.push(SETUP_DONE.into());
-    if mode == "container" {
+    if mode == Mode::Container {
         lines.push(r#"sed -i 's|^cd \${WORKSPACE}$|[ "$PWD" = "$HOME" ] \&\& cd "${WORKSPACE:-/workspace}"|' /root/.bashrc"#.into());
         lines.push("touch /root/.works".into());
         lines.push(")".into());

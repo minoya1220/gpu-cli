@@ -1,7 +1,9 @@
 //! Locked read/modify/rename for local state shared by concurrent commands.
-use std::fs::{self, OpenOptions};
+#[cfg(test)]
+mod tests;
+use std::fs;
 use std::io::Write;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::Path;
 
 use crate::error::{os_error, Result};
@@ -19,20 +21,11 @@ pub(crate) fn update(path: &Path, change: impl FnOnce(&[u8]) -> Result<Vec<u8>>)
         .mode(0o700)
         .create(parent)
         .map_err(|e| os_error(&e, parent))?;
-    let lock_path = parent.join(format!(
-        ".{}.lock",
-        target.file_name().unwrap().to_string_lossy()
-    ));
-    let lock = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .mode(0o600)
-        .open(&lock_path)
-        .map_err(|e| os_error(&e, &lock_path))?;
+    // Lock the stable directory inode rather than the replaced file inode.
+    // This also avoids persistent lock-file debris in user cache directories.
+    let lock = fs::File::open(parent).map_err(|e| os_error(&e, parent))?;
     rustix::fs::flock(&lock, rustix::fs::FlockOperation::LockExclusive)
-        .map_err(|e| os_error(&e.into(), &lock_path))?;
+        .map_err(|e| os_error(&e.into(), parent))?;
     let original = match fs::read(&target) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),

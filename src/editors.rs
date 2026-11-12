@@ -1,6 +1,6 @@
 //! Editor selection and SSH launch. Blocking work runs only after the picker exits.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::ctx::{Ctx, Env};
 use crate::error::{Error, Result};
@@ -64,29 +64,11 @@ pub fn after_up_screen(last: Option<String>) -> Screen<String, String> {
     Screen::new("Open workspace", options, select)
 }
 
-/// `shutil.which`: the first executable `name` on `PATH`.
-pub fn which(env: &Env, name: &str) -> Option<PathBuf> {
-    use std::os::unix::fs::PermissionsExt;
-
-    let executable = |path: &Path| {
-        std::fs::metadata(path).is_ok_and(|m| !m.is_dir() && m.permissions().mode() & 0o111 != 0)
-    };
-    if name.contains('/') {
-        let path = PathBuf::from(name);
-        return executable(&path).then_some(path);
-    }
-    let search = env.get("PATH").unwrap_or("/bin:/usr/bin");
-    search
-        .split(':')
-        .map(|dir| Path::new(dir).join(name))
-        .find(|path| executable(path))
-}
-
 pub fn check_editor(env: &Env, editor: &str) -> Result<()> {
     if editor_label(editor).is_none() {
         return Err(Error::msg(format!("Unknown editor: {editor}")));
     }
-    if editor != "nvim" && which(env, editor).is_none() {
+    if editor != "nvim" && crate::process::which(env, editor).is_none() {
         let hint = match editor {
             "cursor" => {
                 "In Cursor's command palette, run 'Shell Command: Install cursor command in PATH'."
@@ -185,17 +167,9 @@ fn expand_user(env: &Env, path: &str) -> PathBuf {
     }
 }
 
-/// `urllib.parse.quote(text, safe='/')`.
+/// Percent-encode an editor URI path while preserving slashes.
 fn url_quote(text: &str) -> String {
-    let mut out = String::new();
-    for byte in text.bytes() {
-        if byte.is_ascii_alphanumeric() || b"_.-~/".contains(&byte) {
-            out.push(byte as char);
-        } else {
-            out.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    out
+    crate::url::encode(text, b"-._~/")
 }
 
 pub fn launch_editor(
@@ -257,7 +231,7 @@ pub fn launch_editor(
                     "Neovim config must be a git URL or an existing local directory",
                 ));
             };
-            if which(&ctx.env, "rsync").is_none() {
+            if crate::process::which(&ctx.env, "rsync").is_none() {
                 return Err(Error::msg("Install rsync to upload a local Neovim config"));
             }
             local = Some(resolved);
@@ -265,7 +239,7 @@ pub fn launch_editor(
     }
     checked(
         ctx,
-        Cmd::new(&["ssh", "-o", "BatchMode=yes", alias, "bash -s"])
+        crate::ssh::command(&["ssh"], false, alias, "bash -s")
             .stdin(Input::Text(nvim_bootstrap(url))),
     )?;
     if let Some(local) = local {

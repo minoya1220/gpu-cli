@@ -1,3 +1,4 @@
+use crate::sync::MutexExt;
 use std::io::{Read, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -211,10 +212,7 @@ struct TimeoutGroup(Option<i32>);
 impl TimeoutGroup {
     fn register(pid: Option<i32>) -> TimeoutGroup {
         if let Some(pid) = pid {
-            TIMEOUT_GROUPS
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .push(pid);
+            TIMEOUT_GROUPS.lock_recover().push(pid);
         }
         TimeoutGroup(pid)
     }
@@ -223,10 +221,7 @@ impl TimeoutGroup {
 impl Drop for TimeoutGroup {
     fn drop(&mut self) {
         if let Some(pid) = self.0 {
-            TIMEOUT_GROUPS
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .retain(|p| *p != pid);
+            TIMEOUT_GROUPS.lock_recover().retain(|p| *p != pid);
         }
     }
 }
@@ -239,11 +234,7 @@ pub fn forward_signal(signal: i32) {
         signal_hook::consts::SIGHUP => Signal::HUP,
         _ => Signal::TERM,
     };
-    for pid in TIMEOUT_GROUPS
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .iter()
-    {
+    for pid in TIMEOUT_GROUPS.lock_recover().iter() {
         if let Some(pid) = rustix::process::Pid::from_raw(*pid) {
             let _ = rustix::process::kill_process_group(pid, signal);
         }
@@ -426,4 +417,22 @@ pub fn run_output<S: AsRef<str>>(ctx: &Ctx, argv: &[S], timeout: Option<f64>) ->
         }
         Ok(output) => Ok(output),
     }
+}
+
+/// Find the first executable `name` on `PATH`.
+pub(crate) fn which(env: &crate::ctx::Env, name: &str) -> Option<std::path::PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let executable = |path: &std::path::Path| {
+        std::fs::metadata(path).is_ok_and(|m| !m.is_dir() && m.permissions().mode() & 0o111 != 0)
+    };
+    if name.contains('/') {
+        let path = std::path::PathBuf::from(name);
+        return executable(&path).then_some(path);
+    }
+    let search = env.get("PATH").unwrap_or("/bin:/usr/bin");
+    search
+        .split(':')
+        .map(|dir| std::path::Path::new(dir).join(name))
+        .find(|path| executable(path))
 }

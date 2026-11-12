@@ -1,3 +1,6 @@
+use crate::sync::MutexExt;
+#[cfg(test)]
+mod tests;
 use std::collections::{BTreeMap, VecDeque};
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
@@ -263,7 +266,7 @@ impl Ui {
         match self {
             Ui::Terminal => None,
             Ui::Scripted(queue) => {
-                let next = queue.lock().unwrap_or_else(|p| p.into_inner()).pop_front();
+                let next = queue.lock_recover().pop_front();
                 Some(next.unwrap_or_else(|| panic!("unexpected picker")))
             }
         }
@@ -272,20 +275,26 @@ impl Ui {
     pub fn remaining(&self) -> usize {
         match self {
             Ui::Terminal => 0,
-            Ui::Scripted(queue) => queue.lock().unwrap_or_else(|p| p.into_inner()).len(),
+            Ui::Scripted(queue) => queue.lock_recover().len(),
         }
     }
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct GcpState {
+    setup_session: bool,
+    pub(crate) tokens: Arc<Mutex<BTreeMap<String, String>>>,
+    pub(crate) price_lock: Arc<Mutex<()>>,
+    pub(crate) catalog_lock: Arc<Mutex<()>>,
+    pub(crate) sku_refreshed: Arc<Mutex<bool>>,
+    ready: Arc<std::sync::OnceLock<bool>>,
 }
 
 #[derive(Clone)]
 pub struct Ctx {
     pub env: Arc<Env>,
     runner: Arc<dyn Runner>,
-    gcp_setup_session: bool,
-    pub(crate) gcp_tokens: Arc<Mutex<BTreeMap<String, String>>>,
-    pub(crate) gcp_price_lock: Arc<Mutex<()>>,
-    pub(crate) gcp_catalog_lock: Arc<Mutex<()>>,
-    pub(crate) gcp_sku_refreshed: Arc<Mutex<bool>>,
+    pub(crate) gcp: GcpState,
     pub clock: Arc<dyn Clock>,
     pub console: Arc<Console>,
     pub ui: Arc<Ui>,
@@ -299,26 +308,15 @@ pub struct Ctx {
 
 impl Ctx {
     pub fn real() -> Ctx {
-        Ctx {
-            env: Arc::new(Env::from_process()),
-            runner: Arc::new(RealRunner),
-            gcp_setup_session: false,
-            gcp_tokens: Arc::default(),
-            gcp_price_lock: Arc::default(),
-            gcp_catalog_lock: Arc::default(),
-            gcp_sku_refreshed: Arc::default(),
-            clock: Arc::new(RealClock {
+        Self::new(
+            Arc::new(Env::from_process()),
+            Arc::new(RealRunner),
+            Arc::new(RealClock {
                 start: Instant::now(),
             }),
-            console: Arc::new(Console::real()),
-            ui: Arc::new(Ui::Terminal),
-            output: Arc::default(),
-            emission: Arc::default(),
-            interrupt_notice: Arc::default(),
-            cooperative: Arc::default(),
-            interrupts: Arc::default(),
-            secrets: Arc::default(),
-        }
+            Arc::new(Console::real()),
+            Arc::new(Ui::Terminal),
+        )
     }
 
     pub fn new(
@@ -334,11 +332,7 @@ impl Ctx {
             clock,
             console,
             ui,
-            gcp_setup_session: false,
-            gcp_tokens: Arc::default(),
-            gcp_price_lock: Arc::default(),
-            gcp_catalog_lock: Arc::default(),
-            gcp_sku_refreshed: Arc::default(),
+            gcp: GcpState::default(),
             output: Arc::default(),
             emission: Arc::default(),
             interrupt_notice: Arc::default(),
@@ -351,42 +345,34 @@ impl Ctx {
     /// Fresh output state for one invocation, shared by its worker Jobs.
     pub(crate) fn for_command(&self, json: bool) -> Self {
         // The signal handler holds the original Ctx: keep this state shared.
-        *self.output.lock().unwrap_or_else(|p| p.into_inner()) = crate::output::CommandOutput {
+        *self.output.lock_recover() = crate::output::CommandOutput {
             json,
             ..Default::default()
         };
-        self.clone()
+        Self {
+            gcp: GcpState {
+                ready: Arc::default(),
+                ..self.gcp.clone()
+            },
+            ..self.clone()
+        }
     }
 
     pub(crate) fn output_written(&self) -> bool {
-        self.output
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .written
+        self.output.lock_recover().written
     }
 
     pub(crate) fn mark_output_written(&self) {
-        self.output
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .written = true;
+        self.output.lock_recover().written = true;
     }
 
     pub(crate) fn set_command(&self, command: &str) {
-        self.output
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .command = command.into();
+        self.output.lock_recover().command = command.into();
     }
 
     pub fn report_interrupt(&self, code: i32) {
         if self.json() {
-            let command = self
-                .output
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .command
-                .clone();
+            let command = self.output.lock_recover().command.clone();
             let _ = crate::output::finish(self, &command, &Err(Error::Interrupted(code)));
         } else if self.cooperative() {
             let _ = self.eprintln("Cancelled.");
@@ -400,20 +386,13 @@ impl Ctx {
 
     pub(crate) fn protect_secret(&self, value: &str) {
         if !value.is_empty() {
-            self.secrets
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .push(value.into());
+            self.secrets.lock_recover().push(value.into());
         }
     }
 
     pub(crate) fn safe_diagnostic(&self, text: &str) -> String {
         let mut text = text.to_string();
-        let mut secrets = self
-            .secrets
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clone();
+        let mut secrets = self.secrets.lock_recover().clone();
         secrets.sort_by_key(|s| std::cmp::Reverse(s.len()));
         for secret in secrets {
             text = text.replace(&secret, "REDACTED");
@@ -422,25 +401,18 @@ impl Ctx {
     }
 
     pub fn json(&self) -> bool {
-        self.output.lock().unwrap_or_else(|p| p.into_inner()).json
+        self.output.lock_recover().json
     }
 
     pub(crate) fn result(&self, key: &str, value: crate::pyjson::Value) {
-        self.output
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .result
-            .insert(key, value);
+        self.output.lock_recover().result.insert(key, value);
     }
 
     /// What an interrupted command must still tell the user, such as a
     /// created instance that keeps running. Shared by every copy of this
     /// `Ctx`, including the one the SIGINT handler holds.
     pub(crate) fn set_interrupt_notice(&self, notice: Option<String>) {
-        *self
-            .interrupt_notice
-            .lock()
-            .unwrap_or_else(|p| p.into_inner()) = notice;
+        *self.interrupt_notice.lock_recover() = notice;
     }
 
     pub fn cooperative(&self) -> bool {
@@ -473,60 +445,52 @@ impl Ctx {
     }
 
     pub fn interrupt_notice(&self) -> Option<String> {
-        self.interrupt_notice
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clone()
+        self.interrupt_notice.lock_recover().clone()
     }
 
     pub(crate) fn set_command_timeout(&self, seconds: Option<f64>) {
-        self.output
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .command_timeout = seconds;
+        self.output.lock_recover().command_timeout = seconds;
     }
 
     pub(crate) fn command_timeout(&self) -> Option<f64> {
-        self.output
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .command_timeout
+        self.output.lock_recover().command_timeout
     }
 
     pub(crate) fn set_ssh_timeout(&self, seconds: f64) {
-        self.output
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .ssh_timeout = Some(seconds);
+        self.output.lock_recover().ssh_timeout = Some(seconds);
     }
 
     pub(crate) fn ssh_timeout(&self) -> f64 {
-        self.output
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .ssh_timeout
-            .unwrap_or(120.0)
+        self.output.lock_recover().ssh_timeout.unwrap_or(120.0)
     }
 
     pub(crate) fn result_snapshot(&self) -> crate::pyjson::Dict {
-        self.output
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .result
-            .clone()
+        self.output.lock_recover().result.clone()
     }
 
     /// Only setup, after explicit provider selection, may use this scoped copy.
     pub(crate) fn for_gcp_setup(&self) -> Self {
         Self {
-            gcp_setup_session: true,
+            gcp: GcpState {
+                setup_session: true,
+                ..self.gcp.clone()
+            },
             ..self.clone()
         }
     }
 
+    pub(crate) fn set_gcp_ready(&self, ready: bool) {
+        let _ = self.gcp.ready.set(ready);
+    }
+    pub(crate) fn polling(&self, timeout: f64, interval: f64) -> crate::poll::Poll<'_> {
+        crate::poll::Poll::new(self, timeout, interval)
+    }
+
     pub fn require_gcloud(&self) -> Result<()> {
-        if self.gcp_setup_session
-            || crate::config::load_config(&self.env).is_ok_and(|cfg| crate::setup::gcp_ready(&cfg))
+        if self.gcp.setup_session
+            || *self.gcp.ready.get_or_init(|| {
+                crate::config::load_config(&self.env).is_ok_and(|cfg| crate::setup::gcp_ready(&cfg))
+            })
         {
             Ok(())
         } else {

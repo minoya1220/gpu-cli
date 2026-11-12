@@ -12,7 +12,8 @@ fn ssh_args(id: &TpuId) -> Vec<String> {
 }
 pub fn ssh(ctx: &Ctx, id: &TpuId, exec: bool) -> Result<()> {
     ctx.require_gcloud()?;
-    let args = ssh_args(id);
+    let mut args = ssh_args(id);
+    args.extend(crate::ssh::gcloud_options(false));
     if exec {
         return Err(Error::msg(ctx.exec(&args)));
     }
@@ -69,7 +70,10 @@ pub fn stanza(id: &TpuId, command: &str) -> Result<String> {
                     {
                         return Err(Error::msg(format!("Unsupported SSH option; use a direct connection. Next: gpu ssh {} --exec", id.cli())));
                     }
-                    lines.push(format!("  {key} {}\n", quote(val)?));
+                    let value = quote(val)?;
+                    if !key.eq_ignore_ascii_case("ConnectTimeout") {
+                        lines.push(format!("  {key} {value}\n"));
+                    }
                 } else {
                     let key = match word.as_str() {
                         "-i" => "IdentityFile",
@@ -105,6 +109,7 @@ pub fn stanza(id: &TpuId, command: &str) -> Result<String> {
         result.push_str(&line);
     }
     result.push_str("  ServerAliveInterval 15\n  ServerAliveCountMax 4\n");
+    result.push_str(&crate::ssh::config_timeout());
     Ok(result)
 }
 
@@ -204,7 +209,7 @@ fn probe(ctx: &Ctx, args: &[String], next: &str, timeout: f64) -> Result<bool> {
 
 /// Resolve gcloud's SSH alias after a bounded readiness probe.
 pub fn ready_alias(ctx: &Ctx, id: &TpuId, timeout: f64) -> Result<String> {
-    let start = ctx.clock.monotonic();
+    let poll = ctx.polling(timeout, 2.0);
     let next = format!(
         "gpu wait {} --timeout {}",
         id.cli(),
@@ -214,7 +219,7 @@ pub fn ready_alias(ctx: &Ctx, id: &TpuId, timeout: f64) -> Result<String> {
     let mut dry = ssh_args(id);
     dry.push("--dry-run".into());
     loop {
-        let remaining = timeout - (ctx.clock.monotonic() - start);
+        let remaining = poll.remaining();
         if remaining <= 0.0 {
             return Err(Error::status(
                 crate::error::ExitCode::WaitTimeout,
@@ -229,8 +234,7 @@ pub fn ready_alias(ctx: &Ctx, id: &TpuId, timeout: f64) -> Result<String> {
                 return Ok(alias(id));
             }
             Err(error) if error.retryable() => {
-                ctx.clock
-                    .sleep((timeout - (ctx.clock.monotonic() - start)).clamp(0.0, 2.0));
+                poll.pause();
             }
             Err(error) => return Err(error),
         }
@@ -240,7 +244,7 @@ pub fn ready_alias(ctx: &Ctx, id: &TpuId, timeout: f64) -> Result<String> {
 /// Use the same bounded readiness/SSH wait as Vast, without changing node
 /// lifecycle or its already armed expiry. All work runs after the picker exits.
 fn wait_for_ssh(ctx: &Ctx, id: &TpuId, next: &str, timeout: f64) -> Result<Dict> {
-    let end = ctx.clock.monotonic() + timeout;
+    let poll = ctx.polling(timeout, 2.0);
     let timed_out = |reason: &str| {
         Error::status(
             crate::error::ExitCode::WaitTimeout,
@@ -259,7 +263,7 @@ fn wait_for_ssh(ctx: &Ctx, id: &TpuId, next: &str, timeout: f64) -> Result<Dict>
     let mut previous = String::new();
     let mut reason = "provider readiness not observed".to_string();
     loop {
-        let remaining = end - ctx.clock.monotonic();
+        let remaining = poll.remaining();
         if remaining <= 0.0 {
             return Err(timed_out(&reason));
         }
@@ -269,14 +273,12 @@ fn wait_for_ssh(ctx: &Ctx, id: &TpuId, next: &str, timeout: f64) -> Result<Dict>
             Ok(node) if gcp::text(&node, "state").is_some() => node,
             Ok(_) => {
                 reason = gcp::bad_reply().text().into();
-                ctx.clock
-                    .sleep((end - ctx.clock.monotonic()).clamp(0.0, 2.0));
+                poll.pause();
                 continue;
             }
             Err(error) if error.retryable() => {
                 reason = error.text().into();
-                ctx.clock
-                    .sleep((end - ctx.clock.monotonic()).clamp(0.0, 2.0));
+                poll.pause();
                 continue;
             }
             Err(error) => return Err(error),
@@ -298,8 +300,7 @@ fn wait_for_ssh(ctx: &Ctx, id: &TpuId, next: &str, timeout: f64) -> Result<Dict>
         .contains(&state)
         {
             reason = gcp::bad_reply().text().into();
-            ctx.clock
-                .sleep((end - ctx.clock.monotonic()).clamp(0.0, 2.0));
+            poll.pause();
             continue;
         }
         if state != previous {
@@ -310,13 +311,10 @@ fn wait_for_ssh(ctx: &Ctx, id: &TpuId, next: &str, timeout: f64) -> Result<Dict>
         match state {
             "READY" => {
                 let mut ssh = ssh_args(id);
-                ssh.extend([
-                    "--command=true".into(),
-                    "--ssh-flag=-oBatchMode=yes".into(),
-                    "--ssh-flag=-oConnectTimeout=5".into(),
-                    "--ssh-flag=-T".into(),
-                ]);
-                let remaining = end - ctx.clock.monotonic();
+                ssh.push("--command=true".into());
+                ssh.extend(crate::ssh::gcloud_options(true));
+                ssh.push("--ssh-flag=-T".into());
+                let remaining = poll.remaining();
                 if remaining <= 0.0 {
                     return Err(timed_out(&reason));
                 }
@@ -329,7 +327,7 @@ fn wait_for_ssh(ctx: &Ctx, id: &TpuId, next: &str, timeout: f64) -> Result<Dict>
                     return Ok(node);
                 }
                 reason = "TPU is READY but SSH is not answering".into();
-                if ctx.clock.monotonic() >= end {
+                if poll.expired() {
                     return Err(timed_out(&reason));
                 }
                 ctx.progress("TPU is READY; waiting for SSH...")?;
@@ -342,9 +340,9 @@ fn wait_for_ssh(ctx: &Ctx, id: &TpuId, next: &str, timeout: f64) -> Result<Dict>
                 )))
             }
         }
-        let remaining = end - ctx.clock.monotonic();
+        let remaining = poll.remaining();
         if remaining > 0.0 {
-            ctx.clock.sleep(remaining.min(2.0));
+            poll.pause();
         }
     }
 }

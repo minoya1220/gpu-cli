@@ -1,6 +1,7 @@
 //! Drives a real picker loop with key presses written to a pipe, one key per
 //! write, while a script on another thread watches what it shows.
 
+use crate::sync::MutexExt;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -28,10 +29,7 @@ pub struct Keyboard {
 
 impl Keyboard {
     pub fn snapshot(&self) -> Snapshot {
-        self.snapshot
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clone()
+        self.snapshot.lock_recover().clone()
     }
 
     pub fn title(&self) -> String {
@@ -150,10 +148,7 @@ pub fn drive<V: PickValue, R: 'static>(
         if result.is_err() {
             script_abort.script_failed.store(true, Ordering::SeqCst);
         }
-        *script_abort
-            .script_done
-            .lock()
-            .unwrap_or_else(|p| p.into_inner()) = Some(Instant::now());
+        *script_abort.script_done.lock_recover() = Some(Instant::now());
         // Keep the pipe open until the picker finishes on its own.
         (result, keyboard)
     });

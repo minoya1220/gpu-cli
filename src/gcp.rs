@@ -1057,23 +1057,17 @@ pub fn lifecycle(ctx: &Ctx, id: &TpuId, cfg: &Dict, destroy: bool, yes: bool) ->
     }
     let action = if destroy { "delete" } else { "stop" };
     run(ctx, &id.args(action), "gpu ls --provider gcp")?;
-    let until = ctx.clock.monotonic() + 60.0;
+    let poll = ctx.polling(60.0, 2.0);
     loop {
-        if ctx.clock.monotonic() >= until {
+        if poll.expired() {
             return Err(Error::msg(
                 "TPU lifecycle completion is unverified. Next: gpu ls --provider gcp",
             ));
         }
-        let listed = match nodes_timeout(
-            ctx,
-            &id.project,
-            &id.zone,
-            (until - ctx.clock.monotonic()).min(15.0),
-        ) {
+        let listed = match nodes_timeout(ctx, &id.project, &id.zone, (poll.remaining()).min(15.0)) {
             Ok(listed) => listed,
             Err(error) if error.retryable() => {
-                ctx.clock
-                    .sleep((until - ctx.clock.monotonic()).clamp(0.0, 2.0));
+                poll.pause();
                 continue;
             }
             Err(error) => return Err(error),
@@ -1084,12 +1078,12 @@ pub fn lifecycle(ctx: &Ctx, id: &TpuId, cfg: &Dict, destroy: bool, yes: bool) ->
         {
             break;
         }
-        if ctx.clock.monotonic() >= until {
+        if poll.expired() {
             return Err(Error::msg(
                 "TPU lifecycle completion is unverified. Next: gpu ls --provider gcp",
             ));
         }
-        ctx.clock.sleep(2.0);
+        poll.pause();
     }
     if destroy {
         // Do not cancel the safety task until deletion was verified.

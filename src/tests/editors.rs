@@ -105,7 +105,15 @@ fn test_nvim_commands() {
         let calls = runner.calls();
         assert_eq!(
             calls[0].argv,
-            ["ssh", "-o", "BatchMode=yes", "vast-12", "bash -s"]
+            [
+                "ssh",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=10",
+                "vast-12",
+                "bash -s"
+            ]
         );
         let script = stdin_text(&calls[0].stdin);
         assert!(script.contains("sha256sum -c checksum"));
@@ -276,9 +284,8 @@ fn test_edit_flag_config_override_and_alias() {
     .unwrap();
     let runner = fake_vast(vec![instances()[0].clone()], |cmd| {
         match strs(&cmd.argv)[..] {
-            ["ssh", "-o", "BatchMode=yes", "vast-12", "bash -s"] | ["ssh", "-t", ..] => {
-                Ok(Output::status(0))
-            }
+            ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "vast-12", "bash -s"]
+            | ["ssh", "-t", ..] => Ok(Output::status(0)),
             _ => ssh_ready(cmd),
         }
     });

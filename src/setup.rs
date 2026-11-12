@@ -1,13 +1,12 @@
 //! Explicit, project-scoped onboarding. Only a selected setup session can bypass
 //! the cloud opt-in gate. The local journal survives partial setup and removal.
-use std::io::Write;
 
 use crate::cli::SetupFlags;
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use crate::gcp::{self, component, text};
 use crate::picker::{pick, Job, Next, Opt, Screen};
-use crate::pyjson::{self, Dict, Value};
+use crate::pyjson::{Dict, Value};
 
 pub const GCP_NOT_SETUP: &str =
     "Google Cloud is not set up. No gcloud command ran.\nNext: gpu setup";
@@ -55,9 +54,9 @@ pub(crate) fn provider_screen(ctx: &Ctx, cfg: &Dict) -> Screen<String, String> {
             ];
             ["vast", "gcp", "modal"]
                 .into_iter()
-                .zip(crate::offers::aligned_rows(
+                .zip(crate::table::aligned_rows(
                     &rows,
-                    [crate::offers::Column::Left, crate::offers::Column::Plain],
+                    [crate::table::Column::Left, crate::table::Column::Plain],
                 ))
                 .map(|(value, label)| Opt::new(value.into(), label))
                 .collect()
@@ -130,9 +129,9 @@ pub fn run(ctx: &Ctx, cfg: &Dict, flags: &SetupFlags) -> Result<()> {
                     .into(),
                 ],
             ];
-            for row in crate::offers::aligned_rows(
+            for row in crate::table::aligned_rows(
                 &rows,
-                [crate::offers::Column::Left, crate::offers::Column::Plain],
+                [crate::table::Column::Left, crate::table::Column::Plain],
             ) {
                 ctx.println(&row)?;
             }
@@ -245,9 +244,9 @@ fn choose_project(ctx: &Ctx, explicit: Option<&str>) -> Result<Dict> {
                         Some([id.to_string(), text(p, "name").unwrap_or(id).to_string()])
                     })
                     .collect::<Vec<_>>();
-                let labels = crate::offers::aligned_rows(
+                let labels = crate::table::aligned_rows(
                     &rows,
-                    [crate::offers::Column::Left, crate::offers::Column::Plain],
+                    [crate::table::Column::Left, crate::table::Column::Plain],
                 );
                 rows.into_iter()
                     .zip(labels)
@@ -612,7 +611,7 @@ fn setup_gcp(ctx: &Ctx, cfg: &Dict, flags: &SetupFlags) -> Result<()> {
     }
     if !now_exists {
         plan.created_queue = true;
-        save_config(ctx, Some(plan.config()))?;
+        crate::config::save_gcp(&ctx.env, Some(plan.config()))?;
         plan.run(
             ctx,
             &[
@@ -637,13 +636,13 @@ fn setup_gcp(ctx: &Ctx, cfg: &Dict, flags: &SetupFlags) -> Result<()> {
     crate::gcp_catalog::refresh(ctx, &plan.project)?;
     crate::gcp_facts::refresh_skus(ctx, &plan.project)?;
     plan.version = 1;
-    save_config(ctx, Some(plan.config()))?;
+    crate::config::save_gcp(&ctx.env, Some(plan.config()))?;
     ctx.result("ready", Value::Bool(true));
     ctx.println("Google Cloud  ✓ set up\nNext: gpu up --provider gcp")
 }
 
 fn save_setup_progress(ctx: &Ctx, plan: &Plan) -> Result<()> {
-    save_config(ctx, Some(plan.config()))
+    crate::config::save_gcp(&ctx.env, Some(plan.config()))
 }
 
 /// Rechecked after confirmation as well: a user may spend minutes reviewing
@@ -746,7 +745,7 @@ fn remove_gcp(ctx: &Ctx, cfg: &Dict, flags: &SetupFlags) -> Result<()> {
     let exists = ensure_unused(ctx, &plan, &enabled)?;
     // Block ordinary cloud commands while removal is incomplete, but retain undo.
     plan.removing = true;
-    save_config(ctx, Some(plan.config()))?;
+    crate::config::save_gcp(&ctx.env, Some(plan.config()))?;
     if exists && plan.created_queue {
         plan.run(
             ctx,
@@ -775,41 +774,7 @@ fn remove_gcp(ctx: &Ctx, cfg: &Dict, flags: &SetupFlags) -> Result<()> {
     if plan.enabled.iter().any(|s| remaining.contains(s)) {
         return Err(Error::msg("API removal unverified. Undo record kept."));
     }
-    save_config(ctx, None)?;
+    crate::config::save_gcp(&ctx.env, None)?;
     ctx.result("ready", Value::Bool(false));
     ctx.println("Removed gpu setup. Google Cloud  not set up\nNext: gpu setup")
-}
-
-/// Atomic replacement preserving every unrelated key. Save before cloud mutations
-/// so an unwritable config fails without leaving untracked infrastructure.
-fn save_config(ctx: &Ctx, gcp: Option<Dict>) -> Result<()> {
-    let path = crate::config::config_path(&ctx.env);
-    let original = if path.exists() {
-        let raw = std::fs::read_to_string(&path).map_err(|e| crate::error::os_error(&e, &path))?;
-        pyjson::loads(&raw)?
-            .as_dict()
-            .cloned()
-            .ok_or_else(|| Error::msg("Config must be an object"))?
-    } else {
-        Dict::new()
-    };
-    let mut cfg = Dict::new();
-    for (key, value) in original.iter() {
-        if key != "gcp" {
-            cfg.insert(key.clone(), value.clone());
-        }
-    }
-    if let Some(gcp) = gcp {
-        cfg.insert("gcp", Value::Dict(gcp));
-    }
-    let parent = path
-        .parent()
-        .ok_or_else(|| Error::msg("Config path has no parent"))?;
-    std::fs::create_dir_all(parent).map_err(|e| crate::error::os_error(&e, parent))?;
-    let mut file = tempfile::NamedTempFile::new_in(parent)?;
-    writeln!(file, "{}", pyjson::dumps(&Value::Dict(cfg), Some(2)))?;
-    file.as_file().sync_all()?;
-    file.persist(&path)
-        .map_err(|e| crate::error::os_error(&e.error, &path))?;
-    Ok(())
 }

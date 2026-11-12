@@ -136,9 +136,9 @@ pub(crate) fn screen(
             if let Some(Some(offer)) = result.result() {
                 rows.push(Opt::new(
                     format!("@retry:{}", offer.zone),
-                    crate::offers::aligned_rows(
+                    crate::table::aligned_rows(
                         &[[format!("Retry {tpu} {mode} in {}", offer.zone), offer.price]],
-                        [crate::offers::Column::Left, crate::offers::Column::Plain],
+                        [crate::table::Column::Left, crate::table::Column::Plain],
                     )
                     .remove(0),
                 ));

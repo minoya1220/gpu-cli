@@ -1,13 +1,12 @@
 //! Repository choices shared by flags, picker, and startup generation.
 
-use std::io::Write;
 use std::path::PathBuf;
 use std::sync::LazyLock;
 
 use regex::Regex;
 
 use crate::ctx::Env;
-use crate::error::{os_error, Error, Result};
+use crate::error::{Error, Result};
 use crate::pyfmt::is_printable;
 use crate::pyjson::{self, Value};
 
@@ -153,9 +152,7 @@ pub fn resolve_repo(repo: &str, owner: &str) -> Result<(String, String)> {
 /// Account-scoped repository names, never credentials.
 pub fn cache_path(env: &Env, owner: &str) -> PathBuf {
     let safe_owner = UNSAFE_OWNER.replace_all(owner, "_");
-    env.xdg("XDG_CACHE_HOME", ".cache")
-        .join("gpu")
-        .join(format!("repos-{safe_owner}.json"))
+    crate::cache::dir(env).join(format!("repos-{safe_owner}.json"))
 }
 
 fn names(value: &Value) -> Vec<String> {
@@ -177,18 +174,10 @@ pub fn load_cached_repos(env: &Env, owner: &str) -> Option<Vec<String>> {
 
 pub fn save_cached_repos(env: &Env, owner: &str, repos: &[String]) -> Result<()> {
     let path = cache_path(env, owner);
-    let parent = path.parent().unwrap_or(&path).to_path_buf();
-    std::fs::create_dir_all(&parent).map_err(|e| os_error(&e, &parent))?;
     let list = Value::List(repos.iter().map(|r| Value::str(r.as_str())).collect());
     let text = pyjson::dumps(
         &Value::List(names(&list).into_iter().map(Value::Str).collect()),
         None,
     );
-    let mut temp = tempfile::Builder::new()
-        .prefix("tmp")
-        .tempfile_in(&parent)
-        .map_err(|e| os_error(&e, &parent))?;
-    temp.write_all(text.as_bytes())?;
-    temp.persist(&path).map_err(|e| os_error(&e.error, &path))?;
-    Ok(())
+    crate::atomic_file::update(&path, |_| Ok(text.into_bytes()))
 }

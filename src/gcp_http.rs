@@ -7,18 +7,9 @@ use crate::{
     process::{Cmd, Input},
     pyjson::{self, Dict, Value},
 };
-use std::io::Write;
 
-pub fn encode(s: &str) -> String {
-    s.bytes()
-        .map(|b| {
-            if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
-                (b as char).to_string()
-            } else {
-                format!("%{b:02X}")
-            }
-        })
-        .collect()
+pub fn encode(text: &str) -> String {
+    crate::url::encode(text, b"-._~")
 }
 fn error(reason: &str) -> Error {
     Error::msg(format!(
@@ -28,7 +19,8 @@ fn error(reason: &str) -> Error {
 pub fn token(ctx: &Ctx, project: &str) -> Result<String> {
     ctx.require_gcloud()?;
     let mut tokens = ctx
-        .gcp_tokens
+        .gcp
+        .tokens
         .lock()
         .map_err(|_| error("credential cache unavailable"))?;
     if let Some(token) = tokens.get(project) {
@@ -72,7 +64,7 @@ fn headers(ctx: &Ctx, project: &str) -> Result<String> {
 }
 fn body(ctx: &Ctx, project: &str, raw: &str, status: u16) -> Result<Dict> {
     if status == 401 {
-        if let Ok(mut tokens) = ctx.gcp_tokens.lock() {
+        if let Ok(mut tokens) = ctx.gcp.tokens.lock() {
             tokens.remove(project);
         }
         return Err(Error::status(
@@ -174,7 +166,7 @@ pub fn many_results(ctx: &Ctx, project: &str, urls: &[String]) -> Result<Vec<Res
     if urls.is_empty() {
         return Ok(Vec::new());
     }
-    let root = ctx.env.xdg("XDG_CACHE_HOME", ".cache").join("gpu");
+    let root = crate::cache::dir(&ctx.env);
     std::fs::create_dir_all(&root).map_err(|_| error("could not prepare request buffers"))?;
     let dir = tempfile::Builder::new()
         .prefix("tpu-catalog-")
@@ -288,30 +280,4 @@ fn collect_pages(
         }
     }
     Err(invalid.map_or_else(|| error("pagination limit reached"), |f| f()))
-}
-pub fn read_cache(ctx: &Ctx, name: &str, ttl: i64) -> Option<Dict> {
-    let path = ctx
-        .env
-        .xdg("XDG_CACHE_HOME", ".cache")
-        .join("gpu")
-        .join(name);
-    let raw = std::fs::read_to_string(path).ok()?;
-    let value = pyjson::loads(&raw).ok()?;
-    let d = value.as_dict()?;
-    let Value::Int(at) = d.get("at")? else {
-        return None;
-    };
-    let age = ctx.clock.now().as_second().checked_sub(*at)?;
-    (0..ttl).contains(&age).then(|| d.clone())
-}
-pub fn write_cache(ctx: &Ctx, name: &str, mut data: Dict) {
-    data.insert("at", Value::Int(ctx.clock.now().as_second()));
-    let root = ctx.env.xdg("XDG_CACHE_HOME", ".cache").join("gpu");
-    if std::fs::create_dir_all(&root).is_ok() {
-        if let Ok(mut file) = tempfile::NamedTempFile::new_in(&root) {
-            if write!(file, "{}", pyjson::dumps(&Value::Dict(data), None)).is_ok() {
-                let _ = file.persist(root.join(name));
-            }
-        }
-    }
 }

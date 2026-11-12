@@ -1,4 +1,5 @@
 use super::*;
+use crate::cache;
 use crate::testing::*;
 #[test]
 fn every_refresh_fetches_metadata_and_failure_keeps_offline_facts() {
@@ -48,7 +49,7 @@ fn cached_sku_metadata_is_preserved() {
     let id = gcp::text(&cached, "id").unwrap().to_string();
     let mut data = Dict::new();
     data.insert("skus", Value::List(vec![Value::Dict(cached.clone())]));
-    gcp_http::write_cache(&ctx, SKU_CACHE, data);
+    cache::write_json(&ctx, SKU_CACHE, data);
     assert_eq!(
         skus(&ctx)
             .into_iter()
@@ -64,13 +65,13 @@ fn only_cached_zones_are_offered() {
     let mut cache = dict(
         r#"{"zones":[{"name":"us-east5-b","types":[]},{"name":"future-region1-a","types":["v99-1"]}]}"#,
     );
-    gcp_http::write_cache(&ctx, "tpu-catalog-test-project.json", cache.clone());
+    cache::write_json(&ctx, "tpu-catalog-test-project.json", cache.clone());
     assert!(known_types(&ctx, "test-project", Some("us-east5-b")).is_empty());
     assert_eq!(
         known_types(&ctx, "test-project", Some("future-region1-a")),
         ["v99-1"]
     );
     cache.insert("zones", Value::Null);
-    gcp_http::write_cache(&ctx, "tpu-catalog-test-project.json", cache);
+    cache::write_json(&ctx, "tpu-catalog-test-project.json", cache);
     assert!(known_types(&ctx, "test-project", None).is_empty());
 }

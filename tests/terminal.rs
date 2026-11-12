@@ -1140,13 +1140,10 @@ fn test_tpu_size_and_capacity_prices_numbers_and_enter_in_real_terminal() {
             ],
         );
         term.wait(on("v6e size"));
-        term.wait(shows("Spot $3.000/hr"));
-        assert!(
-            term.last_line().contains("1-9 select"),
-            "{}",
-            term.last_line()
-        );
-        assert!(!term.last_line().contains("Enter") && !term.last_line().contains('`'));
+        term.wait(with_footer(
+            shows("Spot $3.000/hr"),
+            "↑/↓ move  → select  ← quit (twice)  1-9 select",
+        ));
         if size_key == ENTER {
             term.press(DOWN);
         }

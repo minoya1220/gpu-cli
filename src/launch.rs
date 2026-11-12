@@ -428,79 +428,13 @@ pub(crate) fn launch(
     }
     let vast = Vast::new(ctx);
     let search = OfferSearch::new(vast.clone(), args, cfg)?;
-    let picks = Picks::new(args.repo.clone(), args.mode.as_deref(), args.gpu.as_deref());
-    let mut tty_confirmed = false;
-    let (picks, offer) = if ctx.interactive() {
-        let repo_ctx = ctx.clone();
-        let repo_owner = owner.clone();
-        let mut recent = recent_picks(&ctx.env, "gpu");
-        let mut seen = std::collections::HashSet::new();
-        recent.retain(|g| seen.insert(g.clone()));
-        let wizard = LaunchWizard::new(
-            &ctx.env,
-            WizardOptions {
-                repos: Job::new(move || {
-                    sync_repos(&repo_ctx, &repo_owner).map_err(|e| e.text().to_string())
-                }),
-                search: Some(Arc::new(search.clone())),
-                models: known_gpu_models(&ctx.env),
-                recent_gpus: recent,
-                choose_offer: !args.yes && args.offer.is_none(),
-                owner: owner.clone(),
-                tpu: TpuOptions {
-                    prices: Some(crate::gcp::prices::job(ctx, cfg)),
-                    cached_prices: crate::gcp::prices::cached_default(ctx, cfg),
-                    types: crate::gcp::facts::known_types(
-                        ctx,
-                        cfg.get("gcp")
-                            .and_then(crate::pyjson::Value::as_dict)
-                            .and_then(|d| crate::gcp::text(d, "project"))
-                            .unwrap_or(""),
-                        None,
-                    ),
-                    catalog: Some(crate::gcp::catalog::types_job(ctx, cfg)),
-                    transition: Some(crate::gcp::wizard::transition(ctx, args, cfg, deadline)),
-                    setup_error: crate::gcp::launch_setup(ctx, cfg)
-                        .err()
-                        .map(|e| e.text().to_string()),
-                },
-            },
-        );
-        if !args.yes && !args.dry_run {
-            let worker = ctx.clone();
-            let config = cfg.clone();
-            let flags = args.clone();
-            let step = crate::picker::then(wizard.next(picks), move |picks| {
-                confirmation(&worker, &flags, &config, picks, deadline)
-            });
-            match crate::picker::resolve(ctx, step)? {
-                ApprovedLaunch::Vast(plan) => {
-                    tty_confirmed = true;
-                    *plan
-                }
-                ApprovedLaunch::Gcp(plan) => {
-                    let (flags, prepared) = *plan;
-                    return crate::gcp::launch_prepared(ctx, &flags, cfg, prepared);
-                }
-            }
-        } else {
-            let picks = wizard.run(ctx, picks)?;
-            if picks.tpu.is_some() {
-                return crate::gcp::launch_from_picker(ctx, args, &picks, cfg, deadline);
-            }
-            let offer = match &picks.offer {
-                Some(offer) => offer.clone(),
-                None => {
-                    let mode = picks.mode.clone().unwrap_or_default();
-                    select_offer(ctx, search.offers(&mode, picks.gpu.as_deref())?, args)?
-                }
-            };
-            (picks, offer)
-        }
-    } else {
-        let (picks, offers) = prompt_for_picks(ctx, picks, &search, &owner)?;
-        let offer = select_offer(ctx, offers, args)?;
-        (picks, offer)
+    let (picks, offer, tty_confirmed) = match pick(ctx, args, cfg, deadline, &owner, &search)? {
+        Picked::Vast {
+            picks,
+            offer,
+            confirmed,
+        } => (*picks, offer, confirmed),
+        Picked::Gcp(launched) => return Ok(launched),
     };
     let repo = picks.repo.clone().unwrap_or(Repo::NoRepo);
     let mode = picks.mode.clone().unwrap_or_default();
@@ -552,10 +486,158 @@ pub(crate) fn launch(
             Error::msg("Expiry deadline passed; no instance created").next("gpu up --expire 2h")
         );
     }
+    let (summary, instance_id) = create(ctx, &vast, &request, deadline)?;
+    // Preserve the created ID and attempt expiry before propagating a failed announcement.
+    let announced = ctx.println(&summary);
+    if ctx.json() && instance_id.is_none() {
+        return Err(Error::msg(
+            "Create accepted but no instance ID returned; completion unverified",
+        )
+        .next("gpu ls"));
+    }
+    let ready_alias = arm_expiry(ctx, args, instance_id.as_deref(), deadline)?;
+    announced?;
+    record_picks(ctx, &[("mode", &mode), ("gpu", &gpu)]);
+    if let Some(id) = &instance_id {
+        crate::editors::offer_after_launch(ctx, cfg, &crate::provider::VastId(id.clone()))?;
+    }
+    Ok(Launched {
+        id: instance_id,
+        ready_alias,
+    })
+}
+
+/// What `gpu up` launches: a Vast offer (`confirmed` when the TTY
+/// confirmation screen already approved it), or a TPU launch that the
+/// picker handed off and that has already run.
+enum Picked {
+    Vast {
+        picks: Box<Picks>,
+        offer: Dict,
+        confirmed: bool,
+    },
+    Gcp(Launched),
+}
+
+/// Choose the hardware: the TTY wizard, or line prompts without a terminal.
+fn pick(
+    ctx: &Ctx,
+    args: &UpArgs,
+    cfg: &Dict,
+    deadline: Option<Timestamp>,
+    owner: &str,
+    search: &OfferSearch,
+) -> Result<Picked> {
+    let picks = Picks::new(args.repo.clone(), args.mode.as_deref(), args.gpu.as_deref());
+    if !ctx.interactive() {
+        let (picks, offers) = prompt_for_picks(ctx, picks, search, owner)?;
+        let offer = select_offer(ctx, offers, args)?;
+        return Ok(Picked::Vast {
+            picks: Box::new(picks),
+            offer,
+            confirmed: false,
+        });
+    }
+    let wizard = launch_wizard(ctx, args, cfg, deadline, owner, search);
+    if !args.yes && !args.dry_run {
+        let worker = ctx.clone();
+        let config = cfg.clone();
+        let flags = args.clone();
+        let step = crate::picker::then(wizard.next(picks), move |picks| {
+            confirmation(&worker, &flags, &config, picks, deadline)
+        });
+        return Ok(match crate::picker::resolve(ctx, step)? {
+            ApprovedLaunch::Vast(plan) => {
+                let (picks, offer) = *plan;
+                Picked::Vast {
+                    picks: Box::new(picks),
+                    offer,
+                    confirmed: true,
+                }
+            }
+            ApprovedLaunch::Gcp(plan) => {
+                let (flags, prepared) = *plan;
+                Picked::Gcp(crate::gcp::launch_prepared(ctx, &flags, cfg, prepared)?)
+            }
+        });
+    }
+    let picks = wizard.run(ctx, picks)?;
+    if picks.tpu.is_some() {
+        return Ok(Picked::Gcp(crate::gcp::launch_from_picker(
+            ctx, args, &picks, cfg, deadline,
+        )?));
+    }
+    let offer = match &picks.offer {
+        Some(offer) => offer.clone(),
+        None => {
+            let mode = picks.mode.clone().unwrap_or_default();
+            select_offer(ctx, search.offers(&mode, picks.gpu.as_deref())?, args)?
+        }
+    };
+    Ok(Picked::Vast {
+        picks: Box::new(picks),
+        offer,
+        confirmed: false,
+    })
+}
+
+/// The TTY launch wizard over Vast offers, Google Cloud TPUs and Modal GPUs.
+fn launch_wizard(
+    ctx: &Ctx,
+    args: &UpArgs,
+    cfg: &Dict,
+    deadline: Option<Timestamp>,
+    owner: &str,
+    search: &OfferSearch,
+) -> LaunchWizard {
+    let repo_ctx = ctx.clone();
+    let repo_owner = owner.to_string();
+    let mut recent = recent_picks(&ctx.env, "gpu");
+    let mut seen = std::collections::HashSet::new();
+    recent.retain(|g| seen.insert(g.clone()));
+    LaunchWizard::new(
+        &ctx.env,
+        WizardOptions {
+            repos: Job::new(move || {
+                sync_repos(&repo_ctx, &repo_owner).map_err(|e| e.text().to_string())
+            }),
+            search: Some(Arc::new(search.clone())),
+            models: known_gpu_models(&ctx.env),
+            recent_gpus: recent,
+            choose_offer: !args.yes && args.offer.is_none(),
+            owner: owner.to_string(),
+            tpu: TpuOptions {
+                prices: Some(crate::gcp::prices::job(ctx, cfg)),
+                cached_prices: crate::gcp::prices::cached_default(ctx, cfg),
+                types: crate::gcp::facts::known_types(
+                    ctx,
+                    cfg.get("gcp")
+                        .and_then(crate::pyjson::Value::as_dict)
+                        .and_then(|d| crate::gcp::text(d, "project"))
+                        .unwrap_or(""),
+                    None,
+                ),
+                catalog: Some(crate::gcp::catalog::types_job(ctx, cfg)),
+                transition: Some(crate::gcp::wizard::transition(ctx, args, cfg, deadline)),
+                setup_error: crate::gcp::launch_setup(ctx, cfg)
+                    .err()
+                    .map(|e| e.text().to_string()),
+            },
+        },
+    )
+}
+
+/// Send the create request. From here on an instance may exist, so Ctrl-C
+/// says what remains. The reply summary, and the instance ID when known.
+fn create(
+    ctx: &Ctx,
+    vast: &Vast,
+    request: &[Value],
+    deadline: Option<Timestamp>,
+) -> Result<(String, Option<String>)> {
     ctx.result("created", Value::Null);
-    // From here on an instance may exist, so Ctrl-C must say what remains.
     ctx.set_interrupt_notice(Some(interrupt_notice(ctx, None, deadline)));
-    let reply = vast.create(&request)?;
+    let reply = vast.create(request)?;
     ctx.result(
         "created",
         reply
@@ -572,60 +654,54 @@ pub(crate) fn launch(
         ctx.result("id", Value::str(id));
         ctx.set_interrupt_notice(Some(interrupt_notice(ctx, Some(id), deadline)));
     }
+    Ok((summary, instance_id))
+}
+
+/// Arm the instance's own expiry when `--expire` asked for one; the managed
+/// SSH alias once it answered.
+fn arm_expiry(
+    ctx: &Ctx,
+    args: &UpArgs,
+    instance_id: Option<&str>,
+    deadline: Option<Timestamp>,
+) -> Result<Option<String>> {
+    if args.expire().is_none() {
+        return Ok(None);
+    }
     let guard = deadline.map(|at| {
         format!(
             " Its boot guard should still destroy it at {}.",
             crate::expiry::local_time(ctx, at)
         )
     });
-    // Preserve the created ID and attempt expiry before propagating a failed announcement.
-    let announced = ctx.println(&summary);
-    if ctx.json() && instance_id.is_none() {
-        return Err(Error::msg(
-            "Create accepted but no instance ID returned; completion unverified",
-        )
-        .next("gpu ls"));
-    }
-    let mut ready_alias = None;
-    if args.expire().is_some() {
-        let Some(instance_id) = &instance_id else {
-            return Err(Error::msg(format!(
-                "Instance created but no ID returned; expiry NOT verified.{}\nRun gpu ls, then gpu expire ID show.",
+    let Some(instance_id) = instance_id else {
+        return Err(Error::msg(format!(
+            "Instance created but no ID returned; expiry NOT verified.{}\nRun gpu ls, then gpu expire ID show.",
+            guard.unwrap_or_default()
+        )));
+    };
+    match expire_instance(ctx, instance_id, "arm", deadline) {
+        Err(error) => {
+            let text = error.text();
+            let names_expire = error
+                .next_step()
+                .is_some_and(|step| step.starts_with(&format!("gpu expire {instance_id} ")));
+            let next = if names_expire {
+                format!("Or stop billing: gpu down {instance_id}.")
+            } else {
+                format!("Run gpu expire {instance_id} show or gpu down {instance_id}.")
+            };
+            let message = format!(
+                "Instance {instance_id} created but expiry NOT verified; billing continues.{}\n{text}\n{next}",
                 guard.unwrap_or_default()
-            )));
-        };
-        match expire_instance(ctx, instance_id, "arm", deadline) {
-            Err(error) => {
-                let text = error.text();
-                let names_expire = error
-                    .next_step()
-                    .is_some_and(|step| step.starts_with(&format!("gpu expire {instance_id} ")));
-                let next = if names_expire {
-                    format!("Or stop billing: gpu down {instance_id}.")
-                } else {
-                    format!("Run gpu expire {instance_id} show or gpu down {instance_id}.")
-                };
-                let message = format!(
-                    "Instance {instance_id} created but expiry NOT verified; billing continues.{}\n{text}\n{next}",
-                    guard.unwrap_or_default()
-                );
-                return Err(error.with_text(message));
-            }
-            Ok(alias) => {
-                ctx.result("ssh_alias", Value::str(&alias));
-                ctx.result("expiry_armed", Value::Bool(true));
-                ctx.result("ready", Value::Bool(true));
-                ready_alias = Some(alias);
-            }
+            );
+            Err(error.with_text(message))
+        }
+        Ok(alias) => {
+            ctx.result("ssh_alias", Value::str(&alias));
+            ctx.result("expiry_armed", Value::Bool(true));
+            ctx.result("ready", Value::Bool(true));
+            Ok(Some(alias))
         }
     }
-    announced?;
-    record_picks(ctx, &[("mode", &mode), ("gpu", &gpu)]);
-    if let Some(id) = &instance_id {
-        crate::editors::offer_after_launch(ctx, cfg, &crate::provider::VastId(id.clone()))?;
-    }
-    Ok(Launched {
-        id: instance_id,
-        ready_alias,
-    })
 }

@@ -12,9 +12,8 @@ use crate::history::{recent_picks, record_picks_best_effort as record_picks};
 use crate::picker::Job;
 use crate::process::run;
 use crate::prompt::{choose, choose_gpu, confirm, Choices, Pick};
-use crate::pyfmt::{fixed, py_str, truthy};
+use crate::pyfmt::{fixed, py_str};
 use crate::pyjson::{self, Dict, Value};
-use crate::redact::redact_text;
 use crate::repos::{resolve_repo, save_cached_repos, Repo};
 use crate::vast::instance::expire_instance;
 use crate::vast::offers::{
@@ -302,43 +301,6 @@ pub fn select_offer(ctx: &Ctx, offers: Vec<Dict>, args: &UpArgs) -> Result<Dict>
     choose(ctx, &choices, "Offer", &Pick::OFFER, None)
 }
 
-pub(crate) fn created_id(response: &Dict) -> Option<String> {
-    response
-        .get("new_contract")
-        .map(py_str)
-        .filter(|id| crate::pyfmt::is_digits(id) && id.bytes().any(|b| b != b'0'))
-}
-
-/// Summarize a `vastai create instance --raw` reply (`None`: unreadable)
-/// without echoing its secrets (`instance_api_key`).
-pub fn created_summary(reply: Option<&Dict>) -> Result<String> {
-    let Some(response) = reply else {
-        return Ok("Vast accepted the create request but its response was unreadable; run `gpu ls` to find the instance."
-            .into());
-    };
-    if !response.get("success").is_some_and(truthy) {
-        let reason = ["msg", "error"]
-            .iter()
-            .filter_map(|k| response.get(k))
-            .find(|v| truthy(v))
-            .map(py_str)
-            .unwrap_or_else(|| "unknown error".into());
-        if let Some(error) = crate::provider_errors::vast(&reason) {
-            return Err(error);
-        }
-        return Err(Error::msg(format!(
-            "Vast did not create the instance: {}",
-            redact_text(&reason)
-        )));
-    }
-    match created_id(response) {
-        None => Ok("Created instance. Next: `gpu ls` to find it.".into()),
-        Some(instance) => Ok(format!(
-            "Created instance {instance}.\nConnect: gpu ssh {instance} --exec"
-        )),
-    }
-}
-
 /// What Ctrl-C must say once a create request may have gone out: the
 /// instance, when known, and when its boot-time guard destroys it.
 fn interrupt_notice(ctx: &Ctx, id: Option<&str>, deadline: Option<Timestamp>) -> String {
@@ -603,9 +565,9 @@ pub(crate) fn launch(
             .cloned()
             .unwrap_or(Value::Null),
     );
-    let summary =
-        created_summary(reply.as_ref()).inspect_err(|_| ctx.set_interrupt_notice(None))?;
-    let instance_id = reply.as_ref().and_then(created_id);
+    let summary = crate::vast::created_summary(reply.as_ref())
+        .inspect_err(|_| ctx.set_interrupt_notice(None))?;
+    let instance_id = reply.as_ref().and_then(crate::vast::created_id);
     if let Some(id) = &instance_id {
         ctx.result("id", Value::str(id));
         ctx.set_interrupt_notice(Some(interrupt_notice(ctx, Some(id), deadline)));

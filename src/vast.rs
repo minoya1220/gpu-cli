@@ -3,6 +3,7 @@
 pub mod expiry;
 pub(crate) mod instance;
 pub mod offers;
+pub(crate) mod run;
 pub(crate) mod ssh_config;
 pub mod startup;
 
@@ -12,7 +13,7 @@ use crate::config::{self, CONTAINER_ENV};
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use crate::process::{Cmd, Output, RunError};
-use crate::pyfmt::{float_repr, py_str};
+use crate::pyfmt::{float_repr, py_str, truthy};
 use crate::pyjson::{self, Dict, Value};
 use crate::redact::redact_text;
 use crate::repos::{resolve_repo, Repo};
@@ -243,6 +244,43 @@ pub fn argv(request: &[Value]) -> Result<Vec<String>> {
             ))),
         })
         .collect()
+}
+
+pub(crate) fn created_id(response: &Dict) -> Option<String> {
+    response
+        .get("new_contract")
+        .map(py_str)
+        .filter(|id| crate::pyfmt::is_digits(id) && id.bytes().any(|b| b != b'0'))
+}
+
+/// Summarize a `vastai create instance --raw` reply (`None`: unreadable)
+/// without echoing its secrets (`instance_api_key`).
+pub fn created_summary(reply: Option<&Dict>) -> Result<String> {
+    let Some(response) = reply else {
+        return Ok("Vast accepted the create request but its response was unreadable; run `gpu ls` to find the instance."
+            .into());
+    };
+    if !response.get("success").is_some_and(truthy) {
+        let reason = ["msg", "error"]
+            .iter()
+            .filter_map(|k| response.get(k))
+            .find(|v| truthy(v))
+            .map(py_str)
+            .unwrap_or_else(|| "unknown error".into());
+        if let Some(error) = crate::provider_errors::vast(&reason) {
+            return Err(error);
+        }
+        return Err(Error::msg(format!(
+            "Vast did not create the instance: {}",
+            redact_text(&reason)
+        )));
+    }
+    match created_id(response) {
+        None => Ok("Created instance. Next: `gpu ls` to find it.".into()),
+        Some(instance) => Ok(format!(
+            "Created instance {instance}.\nConnect: gpu ssh {instance} --exec"
+        )),
+    }
 }
 
 /// `vastai show instances --raw` as instance dicts.

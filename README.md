@@ -439,7 +439,7 @@ Jobs while cached choices are shown instantly. Failed refreshes retain the last
 cache for offline browsing; facts have no age-based refresh interval.
 `gpu ls`, `gpu edit` and `gpu down` do not refresh facts. Nothing runs when the
 CLI is not running. No TPU catalog is bundled with the binary; the reviewed
-region coordinates in `src/data/gcp_region_locations.csv` remain for nearest-zone
+region coordinates in `src/gcp/data/gcp_region_locations.csv` remain for nearest-zone
 ordering. Cached facts can never bypass live paid-launch preflight.
 
 Dollar values come from Google's authenticated [public SKU price API](https://cloud.google.com/billing/docs/reference/pricing-api/rest/v1beta/skus.price/get),

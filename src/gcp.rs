@@ -293,7 +293,11 @@ pub fn all_nodes(ctx: &Ctx, project: &str) -> Result<Vec<Dict>> {
     let mut next = String::new();
     let mut seen = std::collections::HashSet::new();
     for _ in 0..30 {
-        let data=crate::gcp_http::get(ctx,project,&format!("https://tpu.googleapis.com/v2/projects/{project}/locations/-/nodes?pageSize=1000&pageToken={}",crate::gcp_http::encode(&next)))?;
+        let url = format!(
+            "https://tpu.googleapis.com/v2/projects/{project}/locations/-/nodes?pageSize=1000&pageToken={}",
+            crate::gcp_http::encode(&next)
+        );
+        let data = crate::gcp_http::get(ctx, project, &url)?;
         if let Some(unreachable) = data.get("unreachable") {
             if !unreachable.as_list().is_some_and(|xs| xs.is_empty()) {
                 return Err(

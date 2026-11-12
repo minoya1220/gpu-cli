@@ -38,7 +38,8 @@ fn version_usage_and_help() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("Usage: gpu"));
     let output = run(&sandbox, &["--help"]);
     assert_eq!(output.status.code(), Some(0));
-    assert!(String::from_utf8_lossy(&output.stdout).contains("Launch GPU workspaces on Vast.ai"));
+    assert!(String::from_utf8_lossy(&output.stdout)
+        .contains("GPU jobs and workspaces on Vast.ai, Google Cloud and Modal"));
     for bad in [
         &["up", "--num-gpus", "1.5"][..],
         &["up", "--mode", "metal"],

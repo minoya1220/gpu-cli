@@ -113,7 +113,13 @@ impl Queue {
             || !short_backoff
             || d.get("httpTarget").is_some()
         {
-            return Err(Error::msg("Expiry queue must be RUNNING with unlimited retries, max backoff <=60s and no HTTP target override").next(format!("gcloud tasks queues describe {} --project={} --location={}", self.name, self.project, self.location)));
+            return Err(Error::msg(
+                "Expiry queue must be RUNNING with unlimited retries, max backoff <=60s and no HTTP target override",
+            )
+            .next(format!(
+                "gcloud tasks queues describe {} --project={} --location={}",
+                self.name, self.project, self.location
+            )));
         }
         Ok(())
     }
@@ -395,7 +401,11 @@ pub fn manage(
                 .collect(),
         );
         for task in old {
-            ctx.println(&format!("TPU {}: deletion dispatch/retry scheduled for {}; queue is RUNNING (API/IAM health is not guaranteed).", id.cli(), text(&task, "scheduleTime").unwrap_or("unknown")))?;
+            ctx.println(&format!(
+                "TPU {}: deletion dispatch/retry scheduled for {}; queue is RUNNING (API/IAM health is not guaranteed).",
+                id.cli(),
+                text(&task, "scheduleTime").unwrap_or("unknown")
+            ))?;
         }
         return Ok(());
     }
@@ -408,7 +418,12 @@ pub fn manage(
         Value::str("armed"),
         vec![Value::str(deadline.to_string())],
     );
-    queue.delete_tasks(ctx, id, &old).map_err(|_| Error::msg("New expiry is armed but old tasks remain; an earlier deadline may still destroy this TPU").next(format!("gpu expire {} show", id.cli())))?;
+    queue.delete_tasks(ctx, id, &old).map_err(|_| {
+        Error::msg(
+            "New expiry is armed but old tasks remain; an earlier deadline may still destroy this TPU",
+        )
+        .next(format!("gpu expire {} show", id.cli()))
+    })?;
     ctx.println(&format!(
         "Delete {} at {deadline}; works offline.\nNext: gpu expire {} show",
         id.cli(),

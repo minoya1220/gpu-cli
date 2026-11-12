@@ -218,7 +218,15 @@ impl RunBackend for VastBackend {
             ctx.result("created", Value::Bool(false));
             ctx.set_interrupt_notice(None);
         })?;
-        let id = reply.as_ref().and_then(crate::launch::created_id).ok_or_else(|| Error::status(ExitCode::CleanupUnverified, "Create response has no instance ID; cleanup cannot be verified. Check: gpu ls, then gpu down ID --yes"))?;
+        let id = reply
+            .as_ref()
+            .and_then(crate::launch::created_id)
+            .ok_or_else(|| {
+                Error::status(
+                    ExitCode::CleanupUnverified,
+                    "Create response has no instance ID; cleanup cannot be verified. Check: gpu ls, then gpu down ID --yes",
+                )
+            })?;
         ctx.result("id", Value::str(&id));
         ctx.result("created", Value::Bool(true));
         ctx.set_interrupt_notice(Some(format!("Instance {id} may still be running; it self-destroys at {deadline}. Check: gpu ls, gpu down {id} --yes")));
@@ -630,7 +638,13 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
     let request = plan.request?;
     if flags.dry_run {
         ctx.result("request", request);
-        ctx.println(&format!("DRY RUN: {} files, {} bytes; setup: {}; maximum compute estimate ${}. No instance created.", upload.files.len(), upload.bytes, setup, crate::pyfmt::fixed(estimate, 3)))?;
+        ctx.println(&format!(
+            "DRY RUN: {} files, {} bytes; setup: {}; maximum compute estimate ${}. No instance created.",
+            upload.files.len(),
+            upload.bytes,
+            setup,
+            crate::pyfmt::fixed(estimate, 3)
+        ))?;
         return Ok(());
     }
     if !flags.yes

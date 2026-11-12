@@ -6,7 +6,13 @@ use crate::ctx::Env;
 use crate::error::{os_error, Error, Result};
 use crate::pyjson::{self, Dict, Value};
 
-pub const CONTAINER_ENV: &str = r#"-p 1111:1111 -p 6006:6006 -p 8080:8080 -p 8384:8384 -e OPEN_BUTTON_PORT=1111 -e OPEN_BUTTON_TOKEN=1 -e JUPYTER_DIR=/ -e DATA_DIRECTORY=/workspace/ -e PORTAL_CONFIG="localhost:1111:11111:/:Instance Portal|localhost:8080:18080:/:Jupyter|localhost:8080:8080:/terminals/1:Jupyter Terminal|localhost:8384:18384:/:Syncthing|localhost:6006:16006:/:Tensorboard""#;
+pub const CONTAINER_ENV: &str = concat!(
+    "-p 1111:1111 -p 6006:6006 -p 8080:8080 -p 8384:8384 ",
+    "-e OPEN_BUTTON_PORT=1111 -e OPEN_BUTTON_TOKEN=1 -e JUPYTER_DIR=/ -e DATA_DIRECTORY=/workspace/ ",
+    r#"-e PORTAL_CONFIG="localhost:1111:11111:/:Instance Portal|localhost:8080:18080:/:Jupyter|"#,
+    r#"localhost:8080:8080:/terminals/1:Jupyter Terminal|localhost:8384:18384:/:Syncthing|"#,
+    r#"localhost:6006:16006:/:Tensorboard""#,
+);
 
 pub fn defaults() -> Dict {
     let mut cfg = Dict::new();

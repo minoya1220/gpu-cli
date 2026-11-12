@@ -24,7 +24,7 @@ fn run_help() -> String {
 #[derive(Parser, Debug)]
 #[command(
     name = "gpu",
-    about = "Launch GPU workspaces on Vast.ai or TPU VMs on Google Cloud",
+    about = "GPU jobs and workspaces on Vast.ai, Google Cloud and Modal",
     disable_version_flag = true,
     infer_long_args = true,
     args_override_self = true

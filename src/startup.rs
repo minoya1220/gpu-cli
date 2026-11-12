@@ -181,7 +181,15 @@ pub fn startup_script(
             lines.push(format!("git config --global user.{field} {identity}"));
         }
     }
-    lines.push(r#"if [ -n "${GH_TOKEN:-}" ]; then gh auth setup-git || echo "WARNING: gh auth setup-git failed; private GitHub repos may not clone." >&2; else echo "WARNING: GH_TOKEN is not set in Vast account environment; private GitHub repos may not clone." >&2; fi"#.into());
+    lines.push(
+        concat!(
+            r#"if [ -n "${GH_TOKEN:-}" ]; then gh auth setup-git || "#,
+            r#"echo "WARNING: gh auth setup-git failed; private GitHub repos may not clone." >&2; "#,
+            r#"else echo "WARNING: GH_TOKEN is not set in Vast account environment; "#,
+            r#"private GitHub repos may not clone." >&2; fi"#,
+        )
+        .into(),
+    );
     if *repo != Repo::NoRepo {
         lines.push(format!(
             "[ -d {} ] || git clone {} {}",

@@ -791,7 +791,11 @@ fn remove_gcp(ctx: &Ctx, cfg: &Dict, flags: &SetupFlags) -> Result<()> {
     // Reverse enable order; never --force (do not disable dependents).
     for api in plan.enabled.iter().rev() {
         if enabled.contains(api) {
-            plan.run(ctx, &["services", "disable", api]).map_err(|_| Error::msg(format!("Removal stopped disabling {api}. Retry Remove. Dependent services are never force-disabled.")))?;
+            plan.run(ctx, &["services", "disable", api]).map_err(|_| {
+                Error::msg(format!(
+                    "Removal stopped disabling {api}. Retry Remove. Dependent services are never force-disabled."
+                ))
+            })?;
             ctx.println(&format!("Disabled API: {api}."))?;
         }
     }

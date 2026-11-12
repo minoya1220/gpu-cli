@@ -8,7 +8,7 @@ use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use crate::picker::{pick, Next, Opt, Screen};
 use crate::provider::Provider;
-use crate::pyfmt::{fixed, py_float, py_str, truthy};
+use crate::pyfmt::{py_float, py_str, truthy};
 use crate::pyjson::{Dict, Value};
 
 const NO_INSTANCES: &str = "No instances. Launch one: gpu up";
@@ -161,15 +161,6 @@ pub(crate) fn render_table(ctx: &Ctx, items: &[Dict], long: bool) -> Result<()> 
 }
 
 pub fn instance_label(item: &Dict) -> Result<String> {
-    let dash = Value::str("-");
-    let price = item
-        .get("dph_total")
-        .or_else(|| item.get("dph"))
-        .unwrap_or(&dash);
-    let price = match py_float(price) {
-        Ok(price) => format!("${}/hr", fixed(price, 3)),
-        Err(_) => "-".into(),
-    };
     let or_dash = |key: &str| match item.get(key) {
         Some(value) if truthy(value) => py_str(value),
         _ => "-".into(),
@@ -179,7 +170,7 @@ pub fn instance_label(item: &Dict) -> Result<String> {
         py_str(item.get("id").ok_or_else(|| Error::key("id"))?),
         or_dash("gpu_name"),
         or_dash("actual_status"),
-        price,
+        table_price(item),
         format_uptime(item.get("duration")),
         repo_name(item).unwrap_or_else(|| "-".into()),
     ))

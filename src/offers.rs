@@ -269,14 +269,26 @@ pub fn offer_rows(offers: &[Dict]) -> Result<Vec<String>> {
     ))
 }
 
-pub(crate) fn model_columns(model: &str, stats: &Stats, pending: &str) -> HardwareColumns {
-    let price = stats
+/// A model's cheapest hourly price, when its offers carry a usable one.
+fn listed_price(model: &str, stats: &Stats) -> Option<f64> {
+    stats
         .get(model)
         .map(|(price, _)| *price)
-        .filter(|price| price.is_finite() && *price >= 0.0);
+        .filter(|price| price.is_finite() && *price >= 0.0)
+}
+
+/// The cheapest usable price across `models`.
+fn cheapest<'a>(models: impl IntoIterator<Item = &'a String>, stats: &Stats) -> Option<f64> {
+    models
+        .into_iter()
+        .filter_map(|model| listed_price(model, stats))
+        .min_by(f64::total_cmp)
+}
+
+pub(crate) fn model_columns(model: &str, stats: &Stats, pending: &str) -> HardwareColumns {
     [
         model.into(),
-        price
+        listed_price(model, stats)
             .map(crate::table::hourly)
             .unwrap_or_else(|| pending.into()),
         "Spot -".into(),
@@ -297,14 +309,9 @@ pub(crate) fn category_columns(
         .iter()
         .filter_map(|model| stats.get(model))
         .collect::<Vec<_>>();
-    let cheapest = values
-        .iter()
-        .map(|(price, _)| *price)
-        .filter(|price| price.is_finite() && *price >= 0.0)
-        .min_by(f64::total_cmp);
     [
         category.into(),
-        cheapest
+        cheapest(models, stats)
             .map(|price| format!("from {}", crate::table::hourly(price)))
             .unwrap_or_else(|| pending.into()),
         "Spot -".into(),
@@ -316,12 +323,16 @@ pub(crate) fn category_columns(
     ]
 }
 
+fn price_text(price: Option<f64>) -> String {
+    price.map_or_else(|| "-".into(), crate::table::hourly)
+}
+
 pub fn model_label(model: &str, stats: &Stats) -> String {
     match stats.get(model) {
         None => model.to_string(),
-        Some((price, count)) => format!(
+        Some((_, count)) => format!(
             "{model}  {} ({})",
-            crate::table::hourly(*price),
+            price_text(listed_price(model, stats)),
             plural(*count, "offer")
         ),
     }
@@ -332,17 +343,10 @@ pub fn category_label(category: &str, models: &[String], stats: &Stats) -> Strin
     if priced.is_empty() {
         return format!("{category} ({})", plural(models.len(), "model"));
     }
-    let mut cheapest = stats[priced[0]].0;
-    for model in &priced[1..] {
-        let price = stats[*model].0;
-        if price < cheapest {
-            cheapest = price;
-        }
-    }
     format!(
         "{category} ({}, from {})",
         plural(priced.len(), "model"),
-        crate::table::hourly(cheapest)
+        price_text(cheapest(priced, stats))
     )
 }
 

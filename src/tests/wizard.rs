@@ -144,6 +144,28 @@ fn assert_hardware_grid(labels: &[String]) {
 }
 
 #[test]
+fn line_labels_and_picker_cells_agree_on_unpriced_offers() {
+    let stats = [
+        ("RTX 5090".into(), (0.441, 64)),
+        ("Unpriced".into(), (f64::INFINITY, 2)),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        crate::offers::model_label("Unpriced", &stats),
+        "Unpriced  - (2 offers)"
+    );
+    assert_eq!(
+        crate::offers::model_columns("Unpriced", &stats, "-")[1],
+        "-"
+    );
+    assert_eq!(
+        crate::offers::category_label("All", &["Unpriced".into(), "RTX 5090".into()], &stats),
+        "All (2 models, from $0.441/hr)"
+    );
+}
+
+#[test]
 fn hardware_cells_keep_offer_totals_and_do_not_invent_vast_spot_quotes() {
     let stats = [
         ("RTX 5090".into(), (0.441, 64)),

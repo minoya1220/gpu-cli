@@ -2,8 +2,8 @@
 {"item": {"id": 12, "gpu_name": "RTX 4090", "actual_status": "running", "dph_total": 0.5, "duration": 7342.81, "label": "ThunderKittens"}, "label": "12  RTX 4090  running  $0.500/hr  2h 02m  ThunderKittens"},
 {"item": {"id": 34, "gpu_name": "", "actual_status": null, "dph": "1.25", "duration": "60.5", "label": "no-repo"}, "label": "34  -  -  $1.250/hr  1m  -"},
 {"item": {"id": "x", "dph_total": "garbage", "label": "../bad", "onstart": "git clone https://github.com/o/good /workspace/good\n"}, "label": "x  -  -  -  -  good"},
-{"item": {"id": 5, "dph_total": true, "onstart_cmd": "git clone x /workspace/name.with-dots_1 && cd"}, "label": "5  -  -  $1.000/hr  -  name.with-dots_1"},
+{"item": {"id": 5, "dph_total": true, "onstart_cmd": "git clone x /workspace/name.with-dots_1 && cd"}, "label": "5  -  -  -  -  name.with-dots_1"},
 {"item": {"id": 6, "onstart": "", "onstart_cmd": "echo; git clone a b /workspace/last"}, "label": "6  -  -  -  -  last"},
 {"item": {"id": 7, "label": 12, "onstart": "git clone u /workspace/.."}, "label": "7  -  -  -  -  -"},
-{"item": {"id": 8, "dph_total": Infinity}, "label": "8  -  -  $inf/hr  -  -"}
+{"item": {"id": 8, "dph_total": Infinity}, "label": "8  -  -  -  -  -"}
 ]

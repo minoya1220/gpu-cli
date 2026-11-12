@@ -1738,9 +1738,12 @@ fn test_run_without_expire_asks_for_it_in_a_terminal_then_opens_the_gpu_picker()
 }
 
 #[test]
-fn test_live_run_picker_lists_no_modal_rows_and_never_starts_the_modal_helper() {
+fn test_explicit_vast_live_run_picker_never_starts_the_modal_helper() {
     let sandbox = Sandbox::new();
-    let mut term = Terminal::start(&sandbox, &["run", "--expire", "30m", "--", "true"]);
+    let mut term = Terminal::start(
+        &sandbox,
+        &["run", "--provider", "vast", "--expire", "30m", "--", "true"],
+    );
     term.wait(on("GPU"));
     term.wait(shows("Consumer RTX 40 series        from $0.300/hr"));
     assert!(!shows("Modal")(&term));
@@ -1761,7 +1764,6 @@ fn test_run_with_modal_provider_and_no_gpu_opens_a_modal_only_picker() {
             "modal",
             "--expire",
             "30m",
-            "--dry-run",
             "--",
             "true",
         ],

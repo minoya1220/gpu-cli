@@ -81,13 +81,12 @@ fn modal_dry_run_and_setup_use_only_stubbed_uv() {
 }
 
 #[test]
-fn modal_live_is_disabled_and_incompatible_flags_fail_before_uv() {
+fn modal_incompatible_flags_fail_before_uv() {
     for options in [
         vec!["--disk", "100", "--dry-run"],
         vec!["--offer", "2", "--dry-run"],
         vec!["--reliability", "0.9", "--dry-run"],
         vec!["--unverified", "--dry-run"],
-        vec!["--yes"],
     ] {
         let s = Sandbox::new();
         s.stub("uv", common::FORBIDDEN);

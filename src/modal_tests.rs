@@ -95,12 +95,6 @@ fn modal_usage_errors_make_no_dependency_calls() {
             "{options:?}"
         );
     }
-    let mut f = flags(&[]);
-    f.dry_run = false;
-    assert!(crate::run::run(&ctx, &f, &crate::config::defaults(), &cwd)
-        .unwrap_err()
-        .text()
-        .contains("not yet supported"));
 }
 
 #[test]
@@ -118,9 +112,7 @@ fn plan_caps_resources_and_exposes_only_env_names() {
         "TOKEN",
     ]);
     let deadline = ctx.clock.now() + jiff::Span::new().minutes(30);
-    let backend = ModalBackend {
-        rates: Some(fake_rates()),
-    };
+    let backend = ModalBackend::new(Some(fake_rates()));
     let RunPlan { request, rate, .. } = backend
         .plan(
             &ctx,
@@ -272,17 +264,15 @@ fn helper_stderr_is_carried_not_printed_until_the_plan_runs() {
     let fetched = rates(&ctx).unwrap();
     assert_eq!(err(&ctx), "");
     let deadline = ctx.clock.now() + jiff::Span::new().minutes(30);
-    ModalBackend {
-        rates: Some(fetched),
-    }
-    .plan(
-        &ctx,
-        &flags(&[]),
-        &crate::config::defaults(),
-        deadline,
-        "repo".into(),
-    )
-    .unwrap();
+    ModalBackend::new(Some(fetched))
+        .plan(
+            &ctx,
+            &flags(&[]),
+            &crate::config::defaults(),
+            deadline,
+            "repo".into(),
+        )
+        .unwrap();
     assert!(err(&ctx).contains("helper warning"));
     assert!(!err(&ctx).contains("canary-value"));
 

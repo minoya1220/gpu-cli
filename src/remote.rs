@@ -17,6 +17,7 @@ pub fn wait_with_setup(ctx: &Ctx, id: &str, timeout: f64, wait_setup: bool) -> R
     let alias = match InstanceId::parse(id)? {
         InstanceId::Vast(id) => crate::commands::wait_for_ssh(ctx, &id, timeout)?.0,
         InstanceId::Gcp(id) => crate::gcp_ssh::ready_alias(ctx, &id, timeout)?,
+        InstanceId::Modal(_) => return Err(crate::modal::unsupported()),
     };
     ctx.result("ssh_alias", Value::str(&alias));
     ctx.result("ready", Value::Bool(true));

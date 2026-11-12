@@ -31,10 +31,7 @@ class Image:
         assert args == ("uv==0.10.4",)
         return self
 class App:
-    @staticmethod
-    def lookup(name, **kw):
-        assert name == "gpu-cli"
-        return object()
+    pass
 class AsyncCall:
     def __init__(self, value): self.value = value
     async def aio(self, *args, **kw): return self.value
@@ -59,12 +56,21 @@ class Sandbox:
     object_id = "sb-test"
     def __init__(self): self.exec = AsyncCall(Process())
     @staticmethod
-    def create(*args, **kw):
+    async def allocate(*args, **kw):
         assert kw["cpu"] == (4, 4)
         assert kw["memory"] == (16384, 16384)
         assert kw["timeout"] == 1800
         assert "secrets" not in kw and "env" not in kw
         assert kw["tags"]["gpu-cli"] == "true"
+        if os.getenv("SLOW_CREATE"):
+            import asyncio
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                print("pending-terminated", file=__import__("sys").stderr)
+                raise
+        if os.getenv("FAIL_KIND"):
+            raise globals()[os.environ["FAIL_KIND"]]("private-canary")
         return Sandbox()
     @staticmethod
     def from_id(id):
@@ -79,6 +85,8 @@ class Sandbox:
         assert kw["wait"] is True
         os.environ["FINISHED"] = "1"
     def get_tags(self): return {"gpu-cli": "true", "run_id": "test"}
+Sandbox.create = SimpleNamespace(aio=Sandbox.allocate)
+App.lookup = AsyncCall(object())
 '''
 
 
@@ -119,6 +127,10 @@ class HelperTest(unittest.TestCase):
         out = self.call("create", data=json.dumps(spec).encode())
         self.assertEqual(out.returncode, 0, out.stdout)
         self.assertEqual(json.loads(out.stdout)["id"], "sb-test")
+        out = self.call("create", "0.01", data=json.dumps(spec).encode(), SLOW_CREATE="1")
+        self.assertEqual(json.loads(out.stdout)["error"]["kind"], "SchedulingTimeout")
+        self.assertIn(b"pending-terminated", out.stderr)
+        self.assertNotIn(b"private-canary", out.stdout + out.stderr)
         spec["env"] = {"TOKEN": "private-canary"}
         out = self.call("create", data=json.dumps(spec).encode())
         self.assertEqual(out.returncode, 1)

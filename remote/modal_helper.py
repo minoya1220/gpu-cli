@@ -20,6 +20,31 @@ class VersionError(Exception):
     pass
 
 
+class SchedulingTimeout(Exception):
+    pass
+
+
+async def create(modal, spec, timeout):
+    async def allocate():
+        image = (modal.Image.from_registry(spec["image"]) if spec.get("image")
+                 else modal.Image.debian_slim(python_version="3.13"))
+        image = image.pip_install("uv==0.10.4")
+        app = await modal.App.lookup.aio("gpu-cli", create_if_missing=True)
+        return await modal.Sandbox.create.aio(
+            *spec["command"], image=image, gpu=spec["gpu"],
+            cpu=(spec["cpu"], spec["cpu"]), memory=(spec["memory"], spec["memory"]),
+            timeout=spec["timeout"], tags={**spec.get("tags", {}), "gpu-cli": "true"},
+            app=app,
+        )
+
+    try:
+        # Cancellation reaches the SDK's pending-sandbox terminate handler.
+        # Rust also reconciles by run_id if this process/reply is lost.
+        return await asyncio.wait_for(allocate(), timeout=timeout)
+    except TimeoutError:
+        raise SchedulingTimeout() from None
+
+
 def emit(value):
     print(json.dumps(value), flush=True)
 
@@ -71,7 +96,7 @@ def dispatch(modal, args):
             emit({"client_version": modal.__version__, "workspace": workspace.name,
                   "environment": config.get("environment") or "main"})
     elif op == "create":
-        if len(args) != 1:
+        if len(args) not in (1, 2):
             raise ValueError()
         spec = json.load(sys.stdin)
         # Forwarded secrets are deliberately NOT accepted here. They travel in
@@ -82,15 +107,10 @@ def dispatch(modal, args):
         cpu, memory, timeout = spec["cpu"], spec["memory"], spec["timeout"]
         if not (cpu > 0 and memory > 0 and 0 < timeout <= 86400):
             raise ValueError()
-        image = (modal.Image.from_registry(spec["image"]) if spec.get("image")
-                 else modal.Image.debian_slim(python_version="3.13"))
-        image = image.pip_install("uv==0.10.4")
-        sandbox = modal.Sandbox.create(
-            *spec["command"], image=image, gpu=spec["gpu"],
-            cpu=(cpu, cpu), memory=(memory, memory), timeout=timeout,
-            tags={**spec.get("tags", {}), "gpu-cli": "true"},
-            app=modal.App.lookup("gpu-cli", create_if_missing=True),
-        )
+        scheduling_timeout = float(args[1]) if len(args) == 2 else 120.0
+        if not (0 < scheduling_timeout <= 86400):
+            raise ValueError()
+        sandbox = asyncio.run(create(modal, spec, scheduling_timeout))
         emit({"id": sandbox.object_id})
     elif op == "exec":
         if len(args) < 4 or args[2] != "--":
@@ -134,6 +154,7 @@ def failure(exc):
         "MissingToken": "Modal has no token. Next: uvx modal@1.6.3 token new",
         "AuthError": "Modal authentication failed or expired. Next: uvx modal@1.6.3 token new",
         "ResourceExhaustedError": "Modal has insufficient capacity. Try another GPU or retry later.",
+        "SchedulingTimeout": "Modal scheduling exceeded --timeout. Try another GPU or a longer --timeout.",
         "NotFoundError": "Modal sandbox was not found.",
         "ImageBuildError": "Modal image build failed. Check the image and dependency setup.",
         "VersionError": "Modal client version is incompatible. Update gpu.",

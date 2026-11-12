@@ -279,6 +279,7 @@ fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
                 provider::InstanceId::Gcp(id) => {
                     gcp_expiry::manage(ctx, &cfg, &id, &action, deadline)
                 }
+                provider::InstanceId::Modal(_) => Err(modal::unsupported()),
             }
         }
         Command::Edit {
@@ -304,6 +305,7 @@ fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
                 provider::InstanceId::Gcp(id) => {
                     gcp_ssh::edit(ctx, &cfg, &id, editor.as_deref(), nvim_config.as_ref())
                 }
+                provider::InstanceId::Modal(_) => Err(modal::unsupported()),
             }
         }
         Command::Cursor { id } => {
@@ -318,6 +320,7 @@ fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
                 provider::InstanceId::Gcp(id) => {
                     gcp_ssh::edit(ctx, &cfg, &id, Some("cursor"), None)
                 }
+                provider::InstanceId::Modal(_) => Err(modal::unsupported()),
             }
         }
         Command::Ssh { id, exec } => {
@@ -327,6 +330,7 @@ fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
             match provider::InstanceId::parse(&id)? {
                 provider::InstanceId::Vast(id) => commands::ssh(ctx, &id, exec),
                 provider::InstanceId::Gcp(id) => gcp_ssh::ssh(ctx, &id, exec),
+                provider::InstanceId::Modal(_) => Err(modal::unsupported()),
             }
         }
         Command::Stop { id } => {
@@ -336,6 +340,7 @@ fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
             match provider::InstanceId::parse(&id)? {
                 provider::InstanceId::Vast(id) => commands::lifecycle(ctx, &id, false, false),
                 provider::InstanceId::Gcp(id) => gcp::lifecycle(ctx, &id, &cfg, false, false),
+                provider::InstanceId::Modal(_) => Err(modal::unsupported()),
             }
         }
         Command::Down { id, yes } => {
@@ -345,6 +350,7 @@ fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
             match provider::InstanceId::parse(&id)? {
                 provider::InstanceId::Vast(id) => commands::lifecycle(ctx, &id, true, yes),
                 provider::InstanceId::Gcp(id) => gcp::lifecycle(ctx, &id, &cfg, true, yes),
+                provider::InstanceId::Modal(id) => modal::down(ctx, &id, yes),
             }
         }
     }

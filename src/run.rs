@@ -30,7 +30,7 @@ fn phase(ctx: &Ctx, phase: &str) {
     ctx.result("phase", Value::str(phase));
 }
 
-fn step_result(
+pub(crate) fn step_result(
     ctx: &Ctx,
     result: std::result::Result<Output, crate::process::RunError>,
     message: &str,
@@ -61,12 +61,18 @@ fn step_result(
     }
 }
 
-fn checked(ctx: &Ctx, cmd: &Cmd, message: &str) -> Result<Output> {
-    step_result(ctx, ctx.run(cmd), message)
+fn checked(ctx: &Ctx, backend: &dyn RunBackend, cmd: &Cmd, message: &str) -> Result<Output> {
+    backend.remote_result(ctx, ctx.run(cmd), message)
 }
 
-fn checked_transfer(ctx: &Ctx, cmd: &Cmd, threshold: usize, message: &str) -> Result<Output> {
-    step_result(ctx, ctx.transfer(cmd, threshold), message)
+fn checked_transfer(
+    ctx: &Ctx,
+    backend: &dyn RunBackend,
+    cmd: &Cmd,
+    threshold: usize,
+    message: &str,
+) -> Result<Output> {
+    backend.remote_result(ctx, ctx.transfer(cmd, threshold), message)
 }
 
 fn ssh(alias: &str, command: &str, timeout: f64) -> Cmd {
@@ -119,9 +125,20 @@ pub(crate) trait RunBackend {
         created: &mut dyn FnMut(&str) -> Result<()>,
     ) -> Result<String>;
     fn remote(&self, command: &str, timeout: f64) -> Cmd;
+    fn remote_result(
+        &self,
+        ctx: &Ctx,
+        result: std::result::Result<Output, crate::process::RunError>,
+        message: &str,
+    ) -> Result<Output> {
+        step_result(ctx, result, message)
+    }
     fn lost(&self, ctx: &Ctx, id: &str) -> bool;
     fn restore_expiry(&self, ctx: &Ctx, id: &str, deadline: Timestamp) -> Result<()>;
     fn hook(&self, id: &str) -> String;
+    fn start_prelude(&self) -> String {
+        String::new()
+    }
     fn wait_for_startup(&self) -> bool;
     fn destroy(&self, ctx: &Ctx, id: &str) -> Result<()>;
 }
@@ -338,7 +355,7 @@ fn choose(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, args: &UpArgs) -> Result<Sele
         } else {
             Some(OfferSearch::new(Vast::new(ctx), args, cfg)?)
         };
-        let modal = if flags.dry_run && flags.provider.as_deref() != Some("vast") {
+        let modal = if flags.provider.as_deref() != Some("vast") {
             let worker = ctx.clone();
             let (cpu, memory) = crate::modal::resources(flags)?;
             let rates =
@@ -435,9 +452,6 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
     let seconds = run_duration(expire, now)?;
     if flags.provider.as_deref() == Some("modal") {
         crate::modal::validate(flags, seconds)?;
-        if !flags.dry_run {
-            return Err(Error::Usage(crate::modal::NOT_LIVE.into()));
-        }
     } else if flags.cpu.is_some() || flags.memory.is_some() {
         return Err(Error::Usage(
             "--cpu and --memory require --provider modal.".into(),
@@ -582,7 +596,7 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
     let mut backend: Box<dyn RunBackend> = if flags.provider.as_deref() == Some("modal")
         && (flags.gpu.is_some() || !ctx.interactive())
     {
-        Box::new(crate::modal::ModalBackend { rates: None })
+        Box::new(crate::modal::ModalBackend::new(None))
     } else {
         match choose(ctx, flags, &cfg, &args)? {
             Selection::Vast(offer) => Box::new(VastBackend {
@@ -594,7 +608,7 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
                 selected_flags.gpu = Some(name);
                 ctx.result("provider", Value::str("modal"));
                 crate::modal::validate(&selected_flags, seconds)?;
-                Box::new(crate::modal::ModalBackend { rates })
+                Box::new(crate::modal::ModalBackend::new(rates))
             }
         }
     };
@@ -657,7 +671,15 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
             // Record ownership before any local I/O can fail. Launch readiness
             // failures must still reach provider-state-verified destruction.
             created_id = Some(id.to_string());
-            run_id = format!("{}-{id}", now.strftime("%Y%m%dT%H%M%SZ"));
+            run_id = if id.starts_with("modal:") {
+                ctx.result_snapshot()
+                    .get("run_id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| Error::msg("Modal launch has no run ID."))?
+                    .into()
+            } else {
+                format!("{}-{id}", now.strftime("%Y%m%dT%H%M%SZ"))
+            };
             local = cwd.join("gpu-runs").join(&run_id);
             fs::rename(staging.path(), &local).map_err(|e| crate::error::os_error(&e, &local))?;
             ctx.result("run_id", Value::str(&run_id));
@@ -686,6 +708,7 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
             (deadline.as_second() - DOWNLOAD_RESERVE - ctx.clock.now().as_second()).max(1) as f64;
         checked_transfer(
             ctx,
+            backend.as_ref(),
             &backend
                 .remote(&command, remaining)
                 .stdin(Input::File(upload.archive.path().into())),
@@ -714,7 +737,8 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
         }
         let hook = backend.hook(&id);
         let payload = format!(
-            "GPU_RUN_SOURCE={}\nGPU_RUN_CONFIG={}\nGPU_RUN_HOOK={}\n{REMOTE_SOURCE}",
+            "{}GPU_RUN_SOURCE={}\nGPU_RUN_CONFIG={}\nGPU_RUN_HOOK={}\n{REMOTE_SOURCE}",
+            backend.start_prelude(),
             shell_quote(REMOTE_SOURCE),
             shell_quote(&config),
             shell_quote(&hook)
@@ -727,6 +751,7 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
         launched = true;
         checked(
             ctx,
+            backend.as_ref(),
             &backend.remote(&start, 30.0).stdin(Input::Text(payload)),
             "Job startup unverified; instance will be destroyed.",
         )?;
@@ -746,10 +771,19 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
     if ctx.interrupts() > 0 {
         outcome = Err(Error::Cancelled(130));
     }
-    if let Some((root, jobdir)) = paths {
+    // Ephemeral Modal files cannot be recovered once the sandbox is lost.
+    // Do not replace exit 18 with the inevitable download transport failure.
+    let modal_lost = backend.provider() == "modal"
+        && (matches!(outcome, Err(Error::Status(ExitCode::InstanceLost, _)))
+            || (outcome.is_err() && backend.lost(ctx, &id)));
+    if modal_lost && ctx.interrupts() == 0 {
+        outcome = Err(Error::status(ExitCode::InstanceLost, "Modal sandbox ended while the job was running (possibly preempted); ephemeral outputs are lost."));
+    }
+    if let Some((root, jobdir)) = paths.filter(|_| !modal_lost) {
         let response = || {
             checked(
                 ctx,
+                backend.as_ref(),
                 &backend.remote(&control(&root, &run_id, "status"), 5.0),
                 "Status unavailable.",
             )
@@ -760,6 +794,7 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
         if outcome.is_err() && launched {
             let _ = checked(
                 ctx,
+                backend.as_ref(),
                 &backend.remote(&control(&root, &run_id, "stop"), 10.0),
                 "Stop unverified.",
             );
@@ -812,7 +847,14 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
                             | Error::Status(ExitCode::JobTimeout | ExitCode::InstanceLost, _))
                     )
                 {
-                    outcome = Err(error);
+                    outcome = if backend.provider() == "modal" && backend.lost(ctx, &id) {
+                        Err(Error::status(
+                            ExitCode::InstanceLost,
+                            "Modal sandbox ended during download; ephemeral outputs are lost.",
+                        ))
+                    } else {
+                        Err(error)
+                    };
                     failure_phase = Value::str("download");
                 }
             }
@@ -908,10 +950,19 @@ fn follow(
         }
         let response = checked(
             ctx,
+            backend,
             &backend.remote(&control(root, token, "status"), 15.0),
             "Job status unavailable.",
-        )
-        .ok();
+        );
+        let response = match response {
+            Err(
+                error @ Error::Status(
+                    ExitCode::NotSetup | ExitCode::AuthExpired | ExitCode::CommandTimeout,
+                    _,
+                ),
+            ) if backend.provider() == "modal" => return Err(error),
+            response => response.ok(),
+        };
         if response.as_ref().is_some_and(|o| o.stdout.trim() == "lost") {
             return Err(Error::status(
                 ExitCode::InstanceLost,
@@ -940,13 +991,23 @@ fn follow(
                 "dd if={} bs=64K iflag=skip_bytes,count_bytes skip={offset} count={amount} status=none",
                 shell_quote(&format!("{root}/log"))
             );
-            if checked(
+            if let Err(error) = checked(
                 ctx,
+                backend,
                 &backend.remote(&command, 15.0).stdout_file(chunk.path()),
                 "Log connection interrupted.",
-            )
-            .is_err()
-            {
+            ) {
+                if backend.provider() == "modal"
+                    && matches!(
+                        error,
+                        Error::Status(
+                            ExitCode::NotSetup | ExitCode::AuthExpired | ExitCode::CommandTimeout,
+                            _
+                        )
+                    )
+                {
+                    return Err(error);
+                }
                 ctx.clock.sleep(1.0);
                 continue;
             }
@@ -1004,6 +1065,7 @@ fn finish_log(
         );
         checked_transfer(
             ctx,
+            backend,
             &backend.remote(&command, 15.0).stdout_file(chunk.path()),
             2,
             "Final log fetch interrupted.",
@@ -1062,7 +1124,7 @@ fn download(
             2,
         );
         let transport = matches!(result, Ok(Output { code: 255, .. }));
-        let error = match step_result(ctx, result, message) {
+        let error = match backend.remote_result(ctx, result, message) {
             Ok(_) => break,
             Err(error) => error,
         };

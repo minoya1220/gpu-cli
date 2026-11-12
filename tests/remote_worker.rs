@@ -1,6 +1,27 @@
 //! Runs the remote expiry worker's own test suite, so `cargo test` stays the
 //! single gate. The worker needs Linux (`/proc`, `flock`, `setsid`).
 
+#[test]
+fn modal_keeper_suite() {
+    let output = std::process::Command::new("bash")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/remote/test_modal_keeper.sh"
+        ))
+        .output()
+        .expect("run keeper tests");
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "6 passed, 0 failed"
+    );
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn remote_run_suite() {

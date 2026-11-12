@@ -84,9 +84,9 @@ Job exit codes pass through (`remote_exit` in JSON). **17** `job_timeout`, **18*
 
 Build checks: [Vast's base Dockerfile](https://github.com/vast-ai/base-image/blob/main/Dockerfile) installs uv into `/usr/local/bin`; a fallback installer handles other images. The fallback installs uv **0.10.4** from architecture-specific release archives, checked against pinned SHA-256 digests; VM CUDA keyring **1.1-1** is also checksum-verified before installation. The base image's [entrypoint](https://github.com/vast-ai/base-image/blob/main/ROOT/opt/instance-tools/bin/entrypoint.sh) delegates to the default/custom boot script rather than waiting on portal ports itself; custom images must provide compatible SSH/onstart behavior. Local uv 0.10.4 experiments confirmed that system-site imports alone do **not** guarantee dependency reuse during resolution (an offline reinstall of an already-present requirement was refused). No GPU rental is used in these checks.
 
-### Modal setup and dry runs (preview)
+### Modal Sandbox jobs
 
-Vast remains the default. Modal planning uses a bundled Python helper with the exact
+Vast remains the default. Modal runs use a bundled Python helper with the exact
 `modal==1.6.3` client pin, launched by `uv run --quiet --script`; the `modal`
 executable is not required. Install [uv](https://docs.astral.sh/uv/getting-started/installation/),
 then authenticate and check readiness:
@@ -95,6 +95,9 @@ then authenticate and check readiness:
 uvx modal@1.6.3 token new
 gpu setup --provider modal
 gpu run --provider modal --gpu T4 --expire 30m --dry-run --json -- python train.py
+gpu run --provider modal --gpu T4 --expire 30m --yes -- python train.py
+gpu ls --provider modal
+gpu down modal:sb-EXAMPLE --yes
 ```
 
 Setup makes read-only calls to validate the token and report its workspace and
@@ -104,10 +107,10 @@ honored. First use of the pinned helper needs network access to populate uv's ca
 Dry runs fetch live, workspace-specific rates; offline testing can stub `uv` on PATH.
 They never create apps, Sandboxes, volumes or secrets.
 
-In a terminal, the **run --dry-run** GPU screen also includes **Modal T4**,
+In a terminal, the **run** GPU screen also includes **Modal T4**,
 **Modal H100**, etc. with live total hourly prices; type `modal` to filter them.
-Selecting one chooses Modal rather than a Vast offer. `--provider vast` and runs
-without `--dry-run` keep only the existing choices and never start the helper;
+Selecting one chooses Modal rather than a Vast offer. `--provider vast` keeps
+only Vast choices and never starts the helper;
 `--provider modal` without `--gpu` lists only Modal rows. Prices load in a
 background job and do not block keyboard input; if they fail (no `uv`, no token),
 Vast rows still work and a highlighted Modal row shows a short reason, not a price.
@@ -121,14 +124,45 @@ memory at Sandbox rates, with CPU and memory request equal to limit. `--max-pric
 and configured `max_session_spend` apply to that total. Image-build compute and
 egress are not included; this is not an invoice ceiling. No region is requested.
 `--offer`, `--disk`, `--reliability` and `--unverified` are refused. Expiry must be
-longer than 10 minutes and at most 24 hours. The planned default image is Modal's
+longer than 10 minutes and at most **24 hours**. Sandbox disk is not configurable
+(no `--disk`; Modal's per-container quota is 512 GiB). The default image is Modal's
 Debian slim with Python 3.13 (or pass `--image`). Forwarded `--env` values are
 excluded from the request and process arguments: dry-run JSON contains names only.
 
-**Live Modal runs are not yet supported** in this preview and fail with a usage
-error. Execution, downloads, verified termination and Modal `ls`/`down` recovery
-will follow separately. GPU Sandboxes can be preempted, have ephemeral storage,
-and have a maximum 24-hour lifetime; they are not persistent workspaces.
+The shared run flow uploads the approved snapshot over exec stdin, runs setup
+and the command using the same detached supervisor as Vast, streams logs, and
+fetches `outputs/` into `gpu-runs/<run-id>/`. Forwarded environment values travel
+only in the supervisor's stdin payload, not Modal secrets or image metadata.
+A workload can still print its own secrets: do not log sensitive values.
+A successful run or failed job terminates the Sandbox after downloading; only a
+confirmed finished `poll()` reports `destroyed: true`. Unverified termination is
+exit 19 with a recovery command. `gpu ls` includes running gpu-tagged Sandboxes
+when local Modal auth is present; missing Modal setup never breaks Vast/GCP
+listing. `gpu down modal:sb-... --yes` terminates only that Sandbox and verifies it.
+Modal does not support `up`, `ssh`, `exec`, `cp`, editors, stop or expiry changes.
+
+**GPU Sandboxes are preemptible.** If one ends while a job is running, `gpu run`
+returns **exit 18 (`instance_lost`)**; ephemeral outputs are lost. Jobs are never
+automatically replayed. There are no persistent volumes or reconnect/attach in
+this version. Use Vast for workloads needing its non-interruptible host policy.
+
+The hard timeout is sent with create (`--expire`, max 24h). An entrypoint keeper
+also exits if no job starts within a five-minute grace after container startup,
+at the absolute deadline, or after the supervisor's end-of-job hook plus
+`--linger`. An attached caller keeps the original download ceiling; if the caller
+disappears, the supervisor notices within 30s of job completion and runs the hook.
+`--linger` preserves unattended results only until that bound, not past expiry;
+an ordinary attached run always cleans up. `--timeout` bounds image building and
+scheduling; a pending create is cancelled and reconciled by its unique run tag.
+Ctrl-C once stops and downloads, twice skips downloads but still terminates, and
+three times exits immediately with the ID, deadline and `gpu down` command.
+
+Modal bills GPU time plus Sandbox CPU and memory (CPU/memory rates are 3× Function
+rates), including setup, idle time and downloads. Limits equal requests so the
+compute estimate uses the full capped allocation. The `gpu-cli` App record and
+cached bootstrap image can remain, but no warm functions, volumes or named secrets
+are created. Image-build compute, egress and teardown timing are outside the
+compute estimate; the timeout is not a hard account-level dollar ceiling.
 
 ## Connect and edit
 
@@ -504,7 +538,7 @@ Failures set `ok:false` and add `error:{code,message,exit_code}`; `result` retai
 - `setup`: `provider`, `project`, `action`, `dry_run`, plus `ready` for a selected provider or `vast_ready`/`gcp_ready` for status. GCP plans also report `queue` and `enable_apis` when applicable. Modal also reports `workspace`, `environment` and `client_version`.
 - `ssh`: `id`, `ssh_command`; `edit`/`cursor`: `id`, `ssh_alias`, `directory`, `editor`.
 
-Exit codes: **0** success, **1** other failure, **2** usage/missing flags, **10** no capacity, including a Vast offer that cannot start now (change model/zone), **11** over max price (raise limit/change hardware), **12** not set up (`gpu setup`), **13** authentication expired (sign in again), **14** readiness timeout (inspect state/retry with a longer timeout), **15** spending guardrail (shorten expiry/choose cheaper hardware/change cap), **16** `not_found` (refresh IDs with `gpu ls`). `exec`/`cp`/`run` preserve the job/subprocess status, which may overlap these codes; JSON distinguishes `remote_exit`. `run` also uses **17** `job_timeout`, **18** `instance_lost`, **19** `cleanup_unverified`. `exec`/`cp` use **20** `command_timeout` for their optional execution deadline. Transient/unreadable provider reads use `provider_unavailable` (exit 1); wait loops retry until their deadline, while authentication and definite not-found errors stop early. Unlike `up`, `run` attempts verified destruction after any failure once its created ID is known.
+Exit codes: **0** success, **1** other failure, **2** usage/missing flags, **10** no capacity, including a Vast offer that cannot start now (change model/zone), **11** over max price (raise limit/change hardware), **12** not set up (`gpu setup`), **13** authentication expired (sign in again), **14** readiness timeout (inspect state/retry with a longer timeout), **15** spending guardrail (shorten expiry/choose cheaper hardware/change cap), **16** `not_found` (refresh IDs with `gpu ls`). `exec`/`cp`/`run` preserve the job/subprocess status, which may overlap these codes; JSON distinguishes `remote_exit`. `run` also uses **17** `job_timeout`, **18** `instance_lost`, **19** `cleanup_unverified`. `exec`/`cp` use **20** `command_timeout` for their optional execution deadline; Modal also uses it for a timed-out helper. Transient/unreadable provider reads use `provider_unavailable` (exit 1); wait loops retry until their deadline, while authentication and definite not-found errors stop early. Unlike `up`, `run` attempts verified destruction after any failure once its created ID is known.
 
 Provider CLI calls are bounded: Vast/gh reads default to 60 seconds, Vast creates to 120 seconds, and Google Cloud operations to at most 600 seconds (polling reads use shorter remaining-deadline budgets). A create timeout means **completion unverified**, not “nothing was created”; check `gpu ls` before retrying. Transient reads never erase a known created ID.
 

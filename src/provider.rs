@@ -7,11 +7,16 @@ use crate::pyjson::{Dict, Value};
 #[derive(Clone, Debug, PartialEq)]
 pub enum InstanceId {
     Vast(String),
+    Modal(String),
     Gcp(crate::gcp::TpuId),
 }
 
 impl InstanceId {
     pub fn parse(id: &str) -> Result<Self> {
+        if id.starts_with("modal:") {
+            crate::modal::sandbox_id(id)?;
+            return Ok(Self::Modal(id.into()));
+        }
         if id.starts_with("gcp:") {
             return crate::gcp::TpuId::parse(id).map(Self::Gcp);
         }
@@ -29,7 +34,7 @@ type Inventory = (Vec<Dict>, Vec<(String, Error)>);
 fn inventory(ctx: &Ctx, cfg: &Dict, only: Option<&str>) -> Result<Inventory> {
     let mut items = Vec::new();
     let mut failed = Vec::new();
-    if only != Some("gcp") {
+    if only.is_none() || only == Some("vast") {
         match crate::vast::list_instances(ctx, None) {
             Ok(mut vast) => {
                 for item in &mut vast {
@@ -48,6 +53,15 @@ fn inventory(ctx: &Ctx, cfg: &Dict, only: Option<&str>) -> Result<Inventory> {
             Ok(gcp) => items.extend(gcp),
             Err(err) if only.is_some() => return Err(err),
             Err(error) => failed.push(("Google Cloud".to_string(), error)),
+        }
+    }
+    if only == Some("modal") || (only.is_none() && crate::modal::configured(ctx)) {
+        match crate::modal::list(ctx) {
+            Ok(modal) => items.extend(modal),
+            // An absent runtime/token must not break legacy inventories.
+            Err(Error::Status(crate::error::ExitCode::NotSetup, _)) if only.is_none() => {}
+            Err(err) if only.is_some() => return Err(err),
+            Err(error) => failed.push(("Modal".into(), error)),
         }
     }
     Ok((items, failed))
@@ -103,7 +117,7 @@ pub fn selected_id(
             "Missing instance ID. Next: gpu {action} ID"
         )));
     }
-    if !crate::setup::gcp_ready(cfg) {
+    if !crate::setup::gcp_ready(cfg) && !crate::modal::configured(ctx) {
         return crate::commands::selected_id(ctx, None, action);
     }
     let (items, failed) = inventory(ctx, cfg, None)?;
@@ -135,7 +149,10 @@ pub fn ls(
     only: Option<&str>,
     envelope: bool,
 ) -> Result<()> {
-    if !envelope && only != Some("gcp") && (only == Some("vast") || !crate::setup::gcp_ready(cfg)) {
+    if !envelope
+        && (only == Some("vast")
+            || (only.is_none() && !crate::setup::gcp_ready(cfg) && !crate::modal::configured(ctx)))
+    {
         return crate::commands::ls(ctx, json);
     }
     let (items, failed) = inventory(ctx, cfg, only)?;
@@ -160,6 +177,8 @@ pub fn ls(
     if !failed.is_empty() {
         let provider = if failed[0].0 == "Vast.ai" {
             "vast"
+        } else if failed[0].0 == "Modal" {
+            "modal"
         } else {
             "gcp"
         };

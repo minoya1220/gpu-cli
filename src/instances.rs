@@ -132,6 +132,7 @@ pub(crate) fn render_table(ctx: &Ctx, items: &[Dict], long: bool) -> Result<()> 
         };
         let provider = match item.get("provider").and_then(Value::as_str) {
             Some("gcp") => "gcp",
+            Some("modal") => "modal",
             _ => "vast",
         };
         let kind = field("gpu_name");

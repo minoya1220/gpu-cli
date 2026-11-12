@@ -35,9 +35,9 @@ pub enum Command {
         after_help = "Non-terminal example: gpu up --gpu 'RTX 4090' --mode container --no-repo --expire 2h --yes --json\nIDs: numeric Vast ID; gcp:PROJECT:ZONE:NAME or an unambiguous TPU name.\nExit codes: 0 success; 1 error; 2 usage; 10 capacity; 11 price; 12 setup; 13 auth; 14 readiness timeout; 15 spend cap; 16 not found; 20 command timeout; 128+signal interrupted."
     )]
     Up(UpFlags),
-    /// Run a one-shot job on a fresh Vast container, fetch results, then destroy it
+    /// Run a one-shot job on Vast or Modal, fetch results, then destroy it
     #[command(
-        after_help = "Example: gpu run --gpu 'RTX 4090' --expire 2h --yes --json -- python train.py\nNon-terminal launches require --gpu, --expire and --yes (or --dry-run).\nExit codes: remote job status, or 1 error; 2 usage; 10 capacity; 11 price; 12 setup; 13 auth; 14 readiness timeout; 15 spend cap; 16 not found; 17 job timeout; 18 instance lost; 19 cleanup unverified; 130 cancelled. Numeric Vast IDs only."
+        after_help = "Example: gpu run --gpu 'RTX 4090' --expire 2h --yes --json -- python train.py\nNon-terminal launches require --gpu, --expire and --yes (or --dry-run).\nExit codes: remote job status, or 1 error; 2 usage; 10 capacity; 11 price; 12 setup; 13 auth; 14 readiness timeout; 15 spend cap; 16 not found; 17 job timeout; 18 instance lost; 19 cleanup unverified; 20 helper timeout; 130 cancelled. IDs: numeric Vast or modal:sb-<id>."
     )]
     Run(RunFlags),
     /// List rented instances
@@ -52,7 +52,7 @@ pub enum Command {
         #[arg(long)]
         long: bool,
         /// Limit listing to one provider
-        #[arg(long, value_parser = ["vast", "gcp"])]
+        #[arg(long, value_parser = ["vast", "gcp", "modal"])]
         provider: Option<String>,
     },
     /// Wait until the instance answers a non-interactive SSH probe
@@ -129,7 +129,7 @@ pub enum Command {
     },
     /// Destroy an instance
     Down {
-        /// Numeric Vast ID, full GCP ID, or short TPU name (picker if omitted)
+        /// Vast ID, GCP ID/short TPU name, or modal:sb-ID (picker if omitted)
         id: Option<String>,
         /// Approve permanent destruction without a prompt (required without a terminal)
         #[arg(long)]

@@ -28,30 +28,23 @@ pub fn wait_with_setup(ctx: &Ctx, id: &str, timeout: f64, wait_setup: bool) -> R
     Ok(alias)
 }
 
-pub(crate) fn after_up(ctx: &Ctx, should_wait: bool, timeout: f64, wait_setup: bool) -> Result<()> {
-    if ctx.result_snapshot().get("ready") == Some(&Value::Bool(true)) {
+pub(crate) fn after_up(
+    ctx: &Ctx,
+    launched: crate::launch::Launched,
+    should_wait: bool,
+    timeout: f64,
+    wait_setup: bool,
+) -> Result<()> {
+    if let Some(alias) = &launched.ready_alias {
         if ctx.json() || should_wait {
-            if let Some(alias) = ctx
-                .result_snapshot()
-                .get("ssh_alias")
-                .and_then(Value::as_str)
-            {
-                workspace_setup(ctx, alias, timeout, wait_setup)?;
-            }
+            workspace_setup(ctx, alias, timeout, wait_setup)?;
         }
         return Ok(());
     }
     if should_wait {
-        let id = ctx
-            .result_snapshot()
-            .get("id")
-            .and_then(|v| match v {
-                Value::Str(s) => Some(s.clone()),
-                _ => None,
-            })
-            .ok_or_else(|| {
-                Error::msg("No created instance ID returned; cannot wait").next("gpu ls")
-            })?;
+        let id = launched.id.ok_or_else(|| {
+            Error::msg("No created instance ID returned; cannot wait").next("gpu ls")
+        })?;
         wait_with_setup(ctx, &id, timeout, wait_setup)?;
     }
     Ok(())

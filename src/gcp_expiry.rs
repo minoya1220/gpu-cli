@@ -375,13 +375,7 @@ pub fn manage(
     reconcile(ctx, cfg)?;
     if action == "cancel" {
         queue.cancel(ctx, id)?;
-        ctx.result(
-            "expiry",
-            Value::Dict(crate::pyjson::Dict::from_iter([
-                ("status".into(), Value::str("cancelled")),
-                ("deadlines".into(), Value::List(Vec::new())),
-            ])),
-        );
+        crate::expiry::report(ctx, Value::str("cancelled"), Vec::new());
         return ctx.println(&format!("Expiry cancelled; billing continues. In-flight deletion cannot be stopped.\nNext: gpu down {}", id.cli()));
     }
     queue.check(ctx)?;
@@ -393,19 +387,12 @@ pub fn manage(
                     .next("gpu ls --provider gcp"),
             );
         }
-        ctx.result(
-            "expiry",
-            Value::Dict(crate::pyjson::Dict::from_iter([
-                ("status".into(), Value::str("armed")),
-                (
-                    "deadlines".into(),
-                    Value::List(
-                        old.iter()
-                            .map(|task| text(task, "scheduleTime").map_or(Value::Null, Value::str))
-                            .collect(),
-                    ),
-                ),
-            ])),
+        crate::expiry::report(
+            ctx,
+            Value::str("armed"),
+            old.iter()
+                .map(|task| text(task, "scheduleTime").map_or(Value::Null, Value::str))
+                .collect(),
         );
         for task in old {
             ctx.println(&format!("TPU {}: deletion dispatch/retry scheduled for {}; queue is RUNNING (API/IAM health is not guaranteed).", id.cli(), text(&task, "scheduleTime").unwrap_or("unknown")))?;
@@ -416,15 +403,10 @@ pub fn manage(
     // Create and verify replacement first. If interrupted, the earlier of both
     // deadlines wins; never silently lose the only safety task.
     queue.arm(ctx, id, deadline)?;
-    ctx.result(
-        "expiry",
-        Value::Dict(crate::pyjson::Dict::from_iter([
-            ("status".into(), Value::str("armed")),
-            (
-                "deadlines".into(),
-                Value::List(vec![Value::str(deadline.to_string())]),
-            ),
-        ])),
+    crate::expiry::report(
+        ctx,
+        Value::str("armed"),
+        vec![Value::str(deadline.to_string())],
     );
     queue.delete_tasks(ctx, id, &old).map_err(|_| Error::msg("New expiry is armed but old tasks remain; an earlier deadline may still destroy this TPU").next(format!("gpu expire {} show", id.cli())))?;
     ctx.println(&format!(

@@ -182,15 +182,10 @@ pub fn expire_instance(
             .unwrap_or_default(),
         _ => Vec::new(),
     };
-    ctx.result(
-        "expiry",
-        Value::Dict(Dict::from_iter([
-            (
-                "status".into(),
-                result.get("status").cloned().unwrap_or(Value::Null),
-            ),
-            ("deadlines".into(), Value::List(deadlines)),
-        ])),
+    crate::expiry::report(
+        ctx,
+        result.get("status").cloned().unwrap_or(Value::Null),
+        deadlines,
     );
     ctx.println(&expiry_summary(ctx, instance_id, &result)?)?;
     if result.get("status") == Some(&Value::str("inactive")) {

@@ -377,7 +377,7 @@ impl RunBackend for ModalBackend {
         request: &Value,
         deadline: Timestamp,
         timeout: f64,
-        created: &mut dyn FnMut(&str) -> Result<()>,
+        created: &mut dyn FnMut(&str, Option<&str>) -> Result<()>,
     ) -> Result<String> {
         self.helper = Some(Helper::new()?);
         let helper = self.helper.as_ref().unwrap();
@@ -454,7 +454,7 @@ impl RunBackend for ModalBackend {
         ctx.result("created", Value::Bool(true));
         ctx.result("expiry_armed", Value::Bool(true));
         ctx.set_interrupt_notice(Some(format!("Sandbox {id} may still be running; hard deadline {deadline}. Next: gpu down {id} --yes")));
-        created(&id)?;
+        created(&id, Some(&run_id))?;
         ctx.check_cancelled()?;
         Ok(id)
     }

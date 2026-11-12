@@ -603,6 +603,18 @@ pub fn local_time(ctx: &Ctx, at: Timestamp) -> String {
     )
 }
 
+/// The `expiry` result every provider reports: its status and the pending
+/// deadlines.
+pub(crate) fn report(ctx: &Ctx, status: Value, deadlines: Vec<Value>) {
+    ctx.result(
+        "expiry",
+        Value::Dict(Dict::from_iter([
+            ("status".into(), status),
+            ("deadlines".into(), Value::List(deadlines)),
+        ])),
+    );
+}
+
 pub fn expiry_summary(ctx: &Ctx, instance_id: &str, reply: &Dict) -> Result<String> {
     let status = crate::pyfmt::py_str(reply.get("status").ok_or_else(|| Error::key("status"))?);
     if status == "none" || status == "cancelled" {

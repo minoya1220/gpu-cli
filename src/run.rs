@@ -26,8 +26,28 @@ pub const REMOTE_SOURCE: &str = include_str!("../remote/run_remote.sh");
 const DOWNLOAD_RESERVE: i64 = 600;
 const CHUNK: u64 = 131072;
 
-fn phase(ctx: &Ctx, phase: &str) {
-    ctx.result("phase", Value::str(phase));
+/// The run's current phase, reported as the `phase` result field.
+struct Phase<'a> {
+    ctx: &'a Ctx,
+    current: std::cell::RefCell<String>,
+}
+
+impl<'a> Phase<'a> {
+    fn start(ctx: &'a Ctx, phase: &str) -> Phase<'a> {
+        let started = Phase {
+            ctx,
+            current: std::cell::RefCell::new(String::new()),
+        };
+        started.set(phase);
+        started
+    }
+    fn set(&self, phase: &str) {
+        *self.current.borrow_mut() = phase.into();
+        self.ctx.result("phase", Value::str(phase));
+    }
+    fn get(&self) -> String {
+        self.current.borrow().clone()
+    }
 }
 
 pub(crate) fn step_result(
@@ -112,7 +132,8 @@ pub(crate) trait RunBackend {
         request: &Value,
         deadline: Timestamp,
         timeout: f64,
-        created: &mut dyn FnMut(&str) -> Result<()>,
+        // The created instance ID, and the provider's own run ID if it names runs.
+        created: &mut dyn FnMut(&str, Option<&str>) -> Result<()>,
     ) -> Result<String>;
     fn remote(&self, command: &str, timeout: f64) -> Cmd;
     fn remote_result(
@@ -177,7 +198,7 @@ impl RunBackend for VastBackend {
         request: &Value,
         deadline: Timestamp,
         timeout: f64,
-        created: &mut dyn FnMut(&str) -> Result<()>,
+        created: &mut dyn FnMut(&str, Option<&str>) -> Result<()>,
     ) -> Result<String> {
         ctx.set_interrupt_notice(Some(format!(
             "Vast may have created an instance; boot expiry is {deadline}. Check: gpu ls"
@@ -199,7 +220,7 @@ impl RunBackend for VastBackend {
         ctx.result("id", Value::str(&id));
         ctx.result("created", Value::Bool(true));
         ctx.set_interrupt_notice(Some(format!("Instance {id} may still be running; it self-destroys at {deadline}. Check: gpu ls, gpu down {id} --yes")));
-        created(&id)?;
+        created(&id, None)?;
         ctx.check_cancelled()?;
         let remaining =
             (deadline.as_second() - DOWNLOAD_RESERVE - ctx.clock.now().as_second()) as f64;
@@ -528,7 +549,7 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
     {
         return Err(Error::usage("container_image must be a non-empty string."));
     }
-    phase(ctx, "launch");
+    let phase = Phase::start(ctx, "launch");
     ctx.result(
         "provider",
         Value::str(flags.provider.unwrap_or(Provider::Vast).key()),
@@ -650,20 +671,14 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
     let mut local = cwd.join("gpu-runs");
     let mut paths = None;
     let mut launched = false;
-    let provider = backend.provider();
     let job = (|| {
-        let id = backend.launch(ctx, &request, deadline, flags.timeout, &mut |id| {
+        let id = backend.launch(ctx, &request, deadline, flags.timeout, &mut |id, named| {
             // Record ownership before any local I/O can fail. Launch readiness
             // failures must still reach provider-state-verified destruction.
             created_id = Some(id.to_string());
-            run_id = if provider == Provider::Modal {
-                ctx.result_snapshot()
-                    .get("run_id")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| Error::msg("Modal launch has no run ID."))?
-                    .into()
-            } else {
-                format!("{}-{id}", now.strftime("%Y%m%dT%H%M%SZ"))
+            run_id = match named {
+                Some(named) => named.into(),
+                None => format!("{}-{id}", now.strftime("%Y%m%dT%H%M%SZ")),
             };
             local = cwd.join("gpu-runs").join(&run_id);
             fs::rename(staging.path(), &local).map_err(|e| crate::error::os_error(&e, &local))?;
@@ -683,7 +698,7 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
         let root = format!("/root/.local/state/gpu-run/{run_id}");
         paths = Some((root.clone(), jobdir.clone()));
         ctx.check_cancelled()?;
-        phase(ctx, "upload");
+        phase.set("upload");
         let command = format!(
             "mkdir -p {} && tar -xzf - --no-same-owner -C {}",
             shell_quote(&target),
@@ -740,18 +755,22 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
             &backend.remote(&start, 30.0).stdin(Input::Text(payload)),
             "Job startup unverified; instance will be destroyed.",
         )?;
-        follow(ctx, backend.as_ref(), &id, &root, &run_id, deadline, &local)
+        follow(
+            &phase,
+            backend.as_ref(),
+            &id,
+            &root,
+            &run_id,
+            deadline,
+            &local,
+        )
     })();
     // A create failure without an ID cannot be cleaned up, just as before.
     let Some(id) = created_id else {
         return job;
     };
     let mut outcome = job;
-    let mut failure_phase = ctx
-        .result_snapshot()
-        .get("phase")
-        .cloned()
-        .unwrap_or(Value::str("launch"));
+    let mut failure_phase = Value::str(phase.get());
     // Cancellation is cooperative, including a setup/start SSH error caused by SIGINT.
     if ctx.interrupts() > 0 {
         outcome = Err(Error::Cancelled(130));
@@ -813,7 +832,7 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
                     "Could not restore expiry to {deadline}; downloading anyway."
                 ));
             }
-            phase(ctx, "download");
+            phase.set("download");
             let downloaded = download(
                 ctx,
                 backend.as_ref(),
@@ -845,7 +864,7 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
             }
         }
     }
-    phase(ctx, "cleanup");
+    phase.set("cleanup");
     let cleaned = backend.destroy(ctx, &id);
     if let Err(error) = cleaned {
         outcome = Err(error);
@@ -871,7 +890,7 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
             .unwrap_or(Value::Null),
     );
     if outcome.is_ok() {
-        phase(ctx, "done");
+        phase.set("done");
     } else {
         ctx.result("phase", failure_phase);
     }
@@ -911,7 +930,7 @@ fn parse_status(text: &str) -> Option<Status> {
 }
 
 fn follow(
-    ctx: &Ctx,
+    phase: &Phase,
     backend: &dyn RunBackend,
     id: &str,
     root: &str,
@@ -919,6 +938,7 @@ fn follow(
     deadline: Timestamp,
     local: &Path,
 ) -> Result<()> {
+    let ctx = phase.ctx;
     let mut offset = 0u64;
     let mut retry = 1.0f64;
     let chunk = tempfile::NamedTempFile::new()?;
@@ -969,7 +989,7 @@ fn follow(
             retry = (retry * 2.0).min(15.0);
             continue;
         };
-        phase(ctx, &status.phase);
+        phase.set(&status.phase);
         let amount = status.size.saturating_sub(offset).min(CHUNK);
         if amount > 0 {
             let command = format!(

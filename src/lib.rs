@@ -227,12 +227,19 @@ fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
             }
             ctx.result("dry_run", pyjson::Value::Bool(flags.dry_run));
             if flags.target() == provider::Provider::Gcp {
-                gcp::launch(ctx, &gcp::TpuArgs::from_flags(&flags)?, &cfg, up_deadline)?;
-                return remote::after_up(ctx, wait && !flags.dry_run, timeout, wait_setup);
+                let launched =
+                    gcp::launch(ctx, &gcp::TpuArgs::from_flags(&flags)?, &cfg, up_deadline)?;
+                return remote::after_up(
+                    ctx,
+                    launched,
+                    wait && !flags.dry_run,
+                    timeout,
+                    wait_setup,
+                );
             }
             let dry_run = flags.dry_run;
-            launch::launch(ctx, &UpArgs::from(&flags), &cfg, up_deadline)?;
-            remote::after_up(ctx, wait && !dry_run, timeout, wait_setup)
+            let launched = launch::launch(ctx, &UpArgs::from(&flags), &cfg, up_deadline)?;
+            remote::after_up(ctx, launched, wait && !dry_run, timeout, wait_setup)
         }
         Command::Ls {
             json,

@@ -25,6 +25,37 @@ use crate::wizard::{LaunchWizard, Picks, TpuOptions, WizardOptions, MODES};
 
 const CLONE_URL: &str = ":clone-url:";
 
+/// What `gpu up` created, for the `--wait` that follows.
+#[derive(Debug, Default)]
+pub(crate) struct Launched {
+    /// The created instance; `None` for a dry run or a cancelled launch.
+    pub id: Option<String>,
+    /// The managed SSH alias when SSH already answered during the launch.
+    pub ready_alias: Option<String>,
+}
+
+/// The `gpu up` result fields every provider reports, in contract order,
+/// before anything is created.
+pub(crate) fn planned_result(
+    ctx: &Ctx,
+    provider: crate::provider::Provider,
+    id: Option<&str>,
+    rate: Option<f64>,
+    deadline: Option<Timestamp>,
+) {
+    ctx.result("provider", Value::str(provider.key()));
+    ctx.result("id", id.map_or(Value::Null, Value::str));
+    ctx.result("ssh_alias", Value::Null);
+    ctx.result("price_per_hour", rate.map_or(Value::Null, Value::Float));
+    ctx.result(
+        "expires_at",
+        deadline.map_or(Value::Null, |at| Value::str(at.to_string())),
+    );
+    ctx.result("ready", Value::Bool(false));
+    ctx.result("created", Value::Bool(false));
+    ctx.result("expiry_armed", Value::Bool(false));
+}
+
 /// The `gpu up` flags.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct UpArgs {
@@ -415,7 +446,12 @@ fn confirmation(
     Next::Screen(crate::prompt::confirmation_screen(job))
 }
 
-pub fn launch(ctx: &Ctx, args: &UpArgs, cfg: &Dict, deadline: Option<Timestamp>) -> Result<()> {
+pub(crate) fn launch(
+    ctx: &Ctx,
+    args: &UpArgs,
+    cfg: &Dict,
+    deadline: Option<Timestamp>,
+) -> Result<Launched> {
     validate_launch_args(args)?;
     // Whole seconds, as the boot guard and the SSH timer hold it.
     let deadline = deadline
@@ -518,17 +554,7 @@ pub fn launch(ctx: &Ctx, args: &UpArgs, cfg: &Dict, deadline: Option<Timestamp>)
     };
     let rate = rate.is_finite().then_some(rate);
     crate::guardrails::spending(ctx, cfg, rate, deadline)?;
-    ctx.result("provider", Value::str("vast"));
-    ctx.result("id", Value::Null);
-    ctx.result("ssh_alias", Value::Null);
-    ctx.result("price_per_hour", rate.map_or(Value::Null, Value::Float));
-    ctx.result(
-        "expires_at",
-        deadline.map_or(Value::Null, |at| Value::str(at.to_string())),
-    );
-    ctx.result("ready", Value::Bool(false));
-    ctx.result("created", Value::Bool(false));
-    ctx.result("expiry_armed", Value::Bool(false));
+    planned_result(ctx, crate::provider::Provider::Vast, None, rate, deadline);
     if args.dry_run {
         ctx.result("request", Value::List(request.clone()));
         ctx.println("DRY RUN: no instance created")?;
@@ -538,7 +564,7 @@ pub fn launch(ctx: &Ctx, args: &UpArgs, cfg: &Dict, deadline: Option<Timestamp>)
                 "Auto-destroy requested after {expire}; no timer installed (dry run)."
             ))?;
         }
-        return Ok(());
+        return Ok(Launched::default());
     }
     if !tty_confirmed {
         ctx.println(&format!(
@@ -549,7 +575,7 @@ pub fn launch(ctx: &Ctx, args: &UpArgs, cfg: &Dict, deadline: Option<Timestamp>)
         ))?;
         if !args.yes && !confirm(ctx, None)? {
             ctx.println("Cancelled.")?;
-            return Ok(());
+            return Ok(Launched::default());
         }
     }
     if deadline.is_some_and(|at| at <= ctx.clock.now()) {
@@ -591,6 +617,7 @@ pub fn launch(ctx: &Ctx, args: &UpArgs, cfg: &Dict, deadline: Option<Timestamp>)
         )
         .next("gpu ls"));
     }
+    let mut ready_alias = None;
     if args.expire().is_some() {
         let Some(instance_id) = &instance_id else {
             return Err(Error::msg(format!(
@@ -616,16 +643,20 @@ pub fn launch(ctx: &Ctx, args: &UpArgs, cfg: &Dict, deadline: Option<Timestamp>)
                 return Err(error.with_text(message));
             }
             Ok(alias) => {
-                ctx.result("ssh_alias", Value::str(alias));
+                ctx.result("ssh_alias", Value::str(&alias));
                 ctx.result("expiry_armed", Value::Bool(true));
                 ctx.result("ready", Value::Bool(true));
+                ready_alias = Some(alias);
             }
         }
     }
     announced?;
     record_picks(ctx, &[("mode", &mode), ("gpu", &gpu)]);
-    match instance_id {
-        Some(id) => crate::editors::offer_after_launch(ctx, cfg, &crate::provider::VastId(id)),
-        None => Ok(()),
+    if let Some(id) = &instance_id {
+        crate::editors::offer_after_launch(ctx, cfg, &crate::provider::VastId(id.clone()))?;
     }
+    Ok(Launched {
+        id: instance_id,
+        ready_alias,
+    })
 }

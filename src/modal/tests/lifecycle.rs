@@ -249,7 +249,7 @@ fn lost_create_reply_reconciles_only_its_run_tag() {
             let deadline = ctx.clock.now() + jiff::Span::new().minutes(30);
             let request = pyjson::loads(r#"{"gpu":"T4","tags":{}}"#).unwrap();
             let error = backend
-                .launch(&ctx, &request, deadline, 120.0, &mut |_| {
+                .launch(&ctx, &request, deadline, 120.0, &mut |_, _| {
                     panic!("no ID received")
                 })
                 .unwrap_err();
@@ -339,7 +339,7 @@ fn cancelled_create_still_reconciles_before_returning_130() {
     let deadline = ctx.clock.now() + jiff::Span::new().minutes(30);
     let request = pyjson::loads(r#"{"tags":{}}"#).unwrap();
     let error = ModalBackend::new(None)
-        .launch(&ctx, &request, deadline, 120.0, &mut |_| panic!())
+        .launch(&ctx, &request, deadline, 120.0, &mut |_, _| panic!())
         .unwrap_err();
     assert_eq!(error.exit_code(), 130);
     assert_eq!(runner.calls().last().unwrap().argv[5], "terminate");

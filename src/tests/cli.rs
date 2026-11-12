@@ -643,7 +643,7 @@ fn confirmed_launch(t: &TestEnv, response: Result<Output, String>) -> (i32, Stri
         ..up_args()
     };
     let status = match launch(&ctx, &args, &defaults(), None) {
-        Ok(()) => 0,
+        Ok(_) => 0,
         Err(err) => {
             ctx.eprintln(&format!("gpu: {}", err.text())).unwrap();
             1

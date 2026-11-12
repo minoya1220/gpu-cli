@@ -6,6 +6,7 @@ use crate::cli::UpFlags;
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use crate::process::Cmd;
+use crate::provider::Provider;
 use crate::pyjson::{self, Dict, Value};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -477,7 +478,7 @@ pub fn launch_from_picker(
     picks: &crate::wizard::Picks,
     cfg: &Dict,
     deadline: Option<Timestamp>,
-) -> Result<()> {
+) -> Result<crate::launch::Launched> {
     let tpu = TpuArgs::picked(args, picks)?;
     let deadline = picks.cloud.as_ref().and_then(|s| s.expiry_at).or(deadline);
     launch(ctx, &tpu, cfg, deadline)
@@ -616,7 +617,7 @@ pub(crate) fn launch_prepared(
     flags: &TpuArgs,
     cfg: &Dict,
     prepared: Prepared,
-) -> Result<()> {
+) -> Result<crate::launch::Launched> {
     launch_loop(
         ctx,
         flags,
@@ -627,7 +628,12 @@ pub(crate) fn launch_prepared(
     )
 }
 
-pub fn launch(ctx: &Ctx, flags: &TpuArgs, cfg: &Dict, deadline: Option<Timestamp>) -> Result<()> {
+pub(crate) fn launch(
+    ctx: &Ctx,
+    flags: &TpuArgs,
+    cfg: &Dict,
+    deadline: Option<Timestamp>,
+) -> Result<crate::launch::Launched> {
     launch_with_retry(ctx, flags, cfg, deadline, |screen| {
         crate::picker::pick(ctx, screen)
     })
@@ -640,7 +646,7 @@ pub(crate) fn launch_with_retry(
     retry: impl FnMut(
         crate::picker::Screen<String, Option<crate::gcp_retry::Choice>>,
     ) -> Result<Option<crate::gcp_retry::Choice>>,
-) -> Result<()> {
+) -> Result<crate::launch::Launched> {
     launch_loop(ctx, flags, cfg, deadline, None, retry)
 }
 
@@ -653,7 +659,7 @@ fn launch_loop(
     mut retry: impl FnMut(
         crate::picker::Screen<String, Option<crate::gcp_retry::Choice>>,
     ) -> Result<Option<crate::gcp_retry::Choice>>,
-) -> Result<()> {
+) -> Result<crate::launch::Launched> {
     let (settings, queue) = launch_setup(ctx, cfg)?;
     if prepared.is_none() && ctx.interactive() && !flags.yes && !flags.dry_run {
         prepared = Some(crate::gcp_wizard::choose_confirmed(
@@ -707,17 +713,10 @@ fn launch_loop(
             picks.directory
         ));
         if flags.dry_run {
-            ctx.result("provider", Value::str("gcp"));
-            ctx.result("id", Value::Null);
-            ctx.result("ssh_alias", Value::Null);
             let rate = crate::gcp_prices::cached(ctx, cfg, &picks.zone)
                 .and_then(|prices| prices.hourly(&picks.tpu, picks.spot));
             crate::guardrails::spending(ctx, cfg, rate, Some(deadline))?;
-            ctx.result("price_per_hour", rate.map_or(Value::Null, Value::Float));
-            ctx.result("expires_at", Value::str(deadline.to_string()));
-            ctx.result("ready", Value::Bool(false));
-            ctx.result("created", Value::Bool(false));
-            ctx.result("expiry_armed", Value::Bool(false));
+            crate::launch::planned_result(ctx, Provider::Gcp, None, rate, Some(deadline));
             ctx.println("DRY RUN: no TPU or expiry task created")?;
             let requests = [queue.create_args(ctx, &id, deadline)?, args];
             let requests = Value::List(
@@ -728,21 +727,14 @@ fn launch_loop(
             );
             ctx.result("request", requests.clone());
             ctx.println(&pyjson::dumps(&requests, Some(2)))?;
-            return Ok(());
+            return Ok(crate::launch::Launched::default());
         }
         let (price, rate) = approved
             .as_ref()
             .map(|p| (p.price.clone(), p.rate))
             .unwrap_or_else(|| quote(ctx, cfg, &picks));
         crate::guardrails::spending(ctx, cfg, rate, Some(deadline))?;
-        ctx.result("provider", Value::str("gcp"));
-        ctx.result("id", Value::str(id.cli()));
-        ctx.result("ssh_alias", Value::Null);
-        ctx.result("price_per_hour", rate.map_or(Value::Null, Value::Float));
-        ctx.result("expires_at", Value::str(deadline.to_string()));
-        ctx.result("ready", Value::Bool(false));
-        ctx.result("created", Value::Bool(false));
-        ctx.result("expiry_armed", Value::Bool(false));
+        crate::launch::planned_result(ctx, Provider::Gcp, Some(&id.cli()), rate, Some(deadline));
         let local = deadline_label(ctx, deadline);
         if approved.is_none() {
             ctx.println(&launch_title(ctx, &picks, &price))?;
@@ -751,7 +743,8 @@ fn launch_loop(
             confirm = true;
         }
         if approved.is_none() && confirm && !crate::prompt::confirm(ctx, None)? {
-            return ctx.println("Cancelled.");
+            ctx.println("Cancelled.")?;
+            return Ok(crate::launch::Launched::default());
         }
         if deadline.as_second() <= ctx.clock.now().as_second() {
             return Err(Error::msg("Expiry deadline passed. No TPU created")
@@ -803,7 +796,8 @@ fn launch_loop(
                             check_rate = choice.approved;
                             continue;
                         }
-                        return ctx.println("Cancelled.");
+                        ctx.println("Cancelled.")?;
+                        return Ok(crate::launch::Launched::default());
                     }
                     let alternatives =
                         crate::gcp_retry::alternatives(ctx, &settings, &picks, &attempted, 3);
@@ -850,7 +844,11 @@ fn launch_loop(
             id.cli(),
             id.cli()
         ))?;
-        return crate::editors::offer_after_launch(ctx, cfg, &id);
+        crate::editors::offer_after_launch(ctx, cfg, &id)?;
+        return Ok(crate::launch::Launched {
+            id: Some(id.cli()),
+            ready_alias: None,
+        });
     }
 }
 

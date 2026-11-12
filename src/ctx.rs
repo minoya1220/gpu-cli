@@ -566,12 +566,19 @@ impl Ctx {
 
     /// GPU-owned progress is useful in a terminal, but must not mix with a
     /// remote command's stderr or a non-terminal command's machine output.
+    /// A one-line step note on stderr, shown only to a person.
     pub(crate) fn progress(&self, text: &str) -> Result<()> {
         if self.interactive() {
             self.eprintln(text)
         } else {
             Ok(())
         }
+    }
+
+    /// An elapsed-time ticker on a terminal stderr for one long blocking
+    /// call; it stops when the returned guard drops.
+    pub(crate) fn waiting(&self, text: &str) -> Result<crate::progress::Wait> {
+        crate::progress::Wait::start(self, text)
     }
 
     pub fn interactive(&self) -> bool {

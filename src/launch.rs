@@ -132,14 +132,17 @@ pub fn validate_launch_args(args: &UpArgs) -> Result<()> {
 
 /// Repository names under `owner`. Blocks on the GitHub CLI.
 pub fn github_repos(ctx: &Ctx, owner: &str) -> Result<Vec<String>> {
-    let output = run(
+    github_names(&gh_repo_list(ctx, owner)?)
+}
+
+fn gh_repo_list(ctx: &Ctx, owner: &str) -> Result<String> {
+    run(
         ctx,
         &[
             "gh", "repo", "list", owner, "--json", "name", "--limit", "1000",
         ],
         Some(60.0),
-    )?;
-    github_names(&output)
+    )
 }
 
 fn github_names(output: &str) -> Result<Vec<String>> {
@@ -254,13 +257,7 @@ pub fn prompt_for_picks(
 
 /// `github_repos` for the line prompt: CLI failures are reported, not fatal.
 fn github_repos_for_prompt(ctx: &Ctx, owner: &str) -> Result<Vec<String>> {
-    match run(
-        ctx,
-        &[
-            "gh", "repo", "list", owner, "--json", "name", "--limit", "1000",
-        ],
-        Some(60.0),
-    ) {
+    match gh_repo_list(ctx, owner) {
         Ok(output) => github_names(&output),
         Err(err) => {
             ctx.eprintln(&format!("Could not list repositories: {}", err.text()))?;
@@ -306,9 +303,10 @@ pub fn select_offer(ctx: &Ctx, offers: Vec<Dict>, args: &UpArgs) -> Result<Dict>
 }
 
 pub(crate) fn created_id(response: &Dict) -> Option<String> {
-    response.get("new_contract").map(py_str).filter(|id| {
-        !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()) && id.bytes().any(|b| b != b'0')
-    })
+    response
+        .get("new_contract")
+        .map(py_str)
+        .filter(|id| crate::pyfmt::is_digits(id) && id.bytes().any(|b| b != b'0'))
 }
 
 /// Summarize a `vastai create instance --raw` reply (`None`: unreadable)

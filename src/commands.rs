@@ -4,7 +4,7 @@
 use jiff::Timestamp;
 
 use crate::ctx::Ctx;
-use crate::error::{Error, Result};
+use crate::error::{Error, ExitCode, Result};
 use crate::expiry::{expiry_summary, manage_expiry};
 use crate::instances::repo_name;
 use crate::process::RunError;
@@ -210,6 +210,58 @@ pub fn ssh(ctx: &Ctx, instance_id: &str, exec: bool) -> Result<()> {
     ctx.println(&redact_text(&url))
 }
 
+/// Ask Vast to `destroy` or `stop` an instance; completion is not verified.
+fn request(ctx: &Ctx, instance_id: &str, action: &str, timeout: f64) -> Result<String> {
+    let mut command = vec!["vastai", action, "instance", instance_id];
+    if action == "destroy" {
+        command.push("--yes");
+    }
+    run(ctx, &command, Some(timeout))
+}
+
+const DESTROY_ATTEMPTS: usize = 3;
+const DESTROY_VERIFY_SECONDS: f64 = 60.0;
+
+/// Only ever called with the ID this invocation just created. A successful
+/// mutation is not enough: verify disappearance. Always remove the local alias.
+pub(crate) fn destroy_created(ctx: &Ctx, id: &str) -> Result<()> {
+    let cleanup = || -> Result<()> {
+        // This invocation owns the freshly created ID. A lagging or broken
+        // inventory must never suppress the paid-resource cleanup request.
+        let mut verified = Ok(());
+        for _ in 0..DESTROY_ATTEMPTS {
+            let sent = request(ctx, id, "destroy", 30.0);
+            if let Err(error) = sent {
+                // A failed/timeout reply does not prove the mutation was rejected.
+                // A definite absence after the request still verifies completion.
+                let _ = ctx.eprintln(&format!(
+                    "Destroy request completion uncertain: {}",
+                    ctx.safe_diagnostic(error.text())
+                ));
+            }
+            verified = wait_for_lifecycle(
+                ctx,
+                id,
+                "destroy",
+                DESTROY_VERIFY_SECONDS / DESTROY_ATTEMPTS as f64,
+            );
+            if verified.is_ok() {
+                break;
+            }
+        }
+        verified
+    };
+    let outcome = cleanup();
+    let _ = remove_host(&ctx.env, id);
+    outcome.map_err(|_| {
+        Error::status(
+            ExitCode::CleanupUnverified,
+            format!("Instance {id}: destruction unverified; billing may continue"),
+        )
+        .next(format!("gpu down {id} --yes"))
+    })
+}
+
 /// `stop` keeps the instance; `down` destroys it after a typed confirmation.
 pub fn lifecycle(ctx: &Ctx, instance_id: &str, destroy: bool, yes: bool) -> Result<()> {
     // Prove the requested ID belongs to this account before authorizing a
@@ -232,11 +284,7 @@ pub fn lifecycle(ctx: &Ctx, instance_id: &str, destroy: bool, yes: bool) -> Resu
         return ctx.println("Cancelled.");
     }
     let action = if destroy { "destroy" } else { "stop" };
-    let mut command = vec!["vastai", action, "instance", instance_id];
-    if destroy {
-        command.push("--yes");
-    }
-    if let Err(err) = run(ctx, &command, Some(60.0)) {
+    if let Err(err) = request(ctx, instance_id, action, 60.0) {
         let message = format!(
             "Instance {instance_id}: {action} failed; completion not verified: {}",
             err.text()

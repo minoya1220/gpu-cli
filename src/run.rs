@@ -25,6 +25,8 @@ mod tests;
 pub const REMOTE_SOURCE: &str = include_str!("../remote/run_remote.sh");
 const DOWNLOAD_RESERVE: i64 = 600;
 const CHUNK: u64 = 131072;
+/// Where results land, under the directory `gpu run` was started in.
+const RESULTS_DIR: &str = "gpu-runs";
 
 /// The run's current phase, reported as the `phase` result field.
 struct Phase<'a> {
@@ -273,7 +275,7 @@ impl RunBackend for VastBackend {
     }
 
     fn destroy(&self, ctx: &Ctx, id: &str) -> Result<()> {
-        destroy(ctx, id)
+        crate::commands::destroy_created(ctx, id)
     }
 }
 
@@ -653,9 +655,11 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
     }
     // Prove the destination is writable before spending anything. Keep a unique
     // staging directory on the same filesystem, then rename once the ID is known.
-    let results = cwd.join("gpu-runs");
+    let results = cwd.join(RESULTS_DIR);
     if !results.exists() {
-        ctx.eprintln("Results go in gpu-runs/; add gpu-runs/ to .gitignore.")?;
+        ctx.eprintln(&format!(
+            "Results go in {RESULTS_DIR}/; add {RESULTS_DIR}/ to .gitignore."
+        ))?;
     }
     fs::create_dir_all(&results).map_err(|e| crate::error::os_error(&e, &results))?;
     let staging = tempfile::Builder::new()
@@ -668,7 +672,7 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
     ctx.begin_run();
     let mut created_id = None;
     let mut run_id = String::new();
-    let mut local = cwd.join("gpu-runs");
+    let mut local = results.clone();
     let mut paths = None;
     let mut launched = false;
     let job = (|| {
@@ -680,7 +684,7 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
                 Some(named) => named.into(),
                 None => format!("{}-{id}", now.strftime("%Y%m%dT%H%M%SZ")),
             };
-            local = cwd.join("gpu-runs").join(&run_id);
+            local = results.join(&run_id);
             fs::rename(staging.path(), &local).map_err(|e| crate::error::os_error(&e, &local))?;
             ctx.result("run_id", Value::str(&run_id));
             ctx.result(
@@ -992,14 +996,10 @@ fn follow(
         phase.set(&status.phase);
         let amount = status.size.saturating_sub(offset).min(CHUNK);
         if amount > 0 {
-            let command = format!(
-                "dd if={} bs=64K iflag=skip_bytes,count_bytes skip={offset} count={amount} status=none",
-                shell_quote(&format!("{root}/log"))
-            );
             if let Err(error) = checked(
                 ctx,
                 backend,
-                &backend.remote(&command, 15.0).stdout_file(chunk.path()),
+                &log_chunk(backend, root, offset, amount, chunk.path()),
                 "Log connection interrupted.",
             ) {
                 if backend.provider() == Provider::Modal
@@ -1016,18 +1016,7 @@ fn follow(
                 ctx.clock.sleep(1.0);
                 continue;
             }
-            let bytes = fs::read(chunk.path())?;
-            if bytes.len() as u64 != amount {
-                return Err(Error::msg(
-                    "Remote log truncated; refusing to lose or duplicate bytes.",
-                ));
-            }
-            log.write_all(&bytes)?;
-            if ctx.json() {
-                ctx.console.write_err_bytes(&bytes)?;
-            } else {
-                ctx.console.write_out_bytes(&bytes)?;
-            }
+            append_chunk(ctx, &mut log, chunk.path(), amount)?;
             offset += amount;
         }
         retry = 1.0;
@@ -1051,6 +1040,33 @@ fn follow(
     }
 }
 
+/// The remote command writing `amount` log bytes from `offset` to `into`.
+fn log_chunk(backend: &dyn RunBackend, root: &str, offset: u64, amount: u64, into: &Path) -> Cmd {
+    let command = format!(
+        "dd if={} bs=64K iflag=skip_bytes,count_bytes skip={offset} count={amount} status=none",
+        shell_quote(&format!("{root}/log"))
+    );
+    backend.remote(&command, 15.0).stdout_file(into)
+}
+
+/// Append a fetched chunk to the local log and echo it: to stderr under
+/// `--json`, so stdout stays one JSON document.
+fn append_chunk(ctx: &Ctx, log: &mut fs::File, chunk: &Path, amount: u64) -> Result<()> {
+    let bytes = fs::read(chunk)?;
+    if bytes.len() as u64 != amount {
+        return Err(Error::msg(
+            "Remote log truncated; refusing to lose or duplicate bytes.",
+        ));
+    }
+    log.write_all(&bytes)?;
+    if ctx.json() {
+        ctx.console.write_err_bytes(&bytes)?;
+    } else {
+        ctx.console.write_out_bytes(&bytes)?;
+    }
+    Ok(())
+}
+
 fn finish_log(
     ctx: &Ctx,
     backend: &dyn RunBackend,
@@ -1064,27 +1080,14 @@ fn finish_log(
     let chunk = tempfile::NamedTempFile::new()?;
     while offset < size && ctx.interrupts() < 2 {
         let amount = (size - offset).min(CHUNK);
-        let command = format!(
-            "dd if={} bs=64K iflag=skip_bytes,count_bytes skip={offset} count={amount} status=none",
-            shell_quote(&format!("{root}/log"))
-        );
         checked_transfer(
             ctx,
             backend,
-            &backend.remote(&command, 15.0).stdout_file(chunk.path()),
+            &log_chunk(backend, root, offset, amount, chunk.path()),
             2,
             "Final log fetch interrupted.",
         )?;
-        let bytes = fs::read(chunk.path())?;
-        if bytes.len() as u64 != amount {
-            return Err(Error::msg("Remote log truncated."));
-        }
-        log.write_all(&bytes)?;
-        if ctx.json() {
-            ctx.console.write_err_bytes(&bytes)?;
-        } else {
-            ctx.console.write_out_bytes(&bytes)?;
-        }
+        append_chunk(ctx, &mut log, chunk.path(), amount)?;
         offset += amount;
     }
     Ok(())
@@ -1093,8 +1096,6 @@ fn finish_log(
 /// Only SSH transport failures are retried, a few times; a remote tar error
 /// or an exhausted budget proceeds straight to destroy.
 const DOWNLOAD_RETRY_DELAYS: [f64; 3] = [5.0, 15.0, 30.0];
-const DESTROY_ATTEMPTS: usize = 3;
-const DESTROY_VERIFY_SECONDS: f64 = 60.0;
 
 fn download(
     ctx: &Ctx,
@@ -1148,48 +1149,4 @@ fn download(
         Value::str(local.join(outputs).to_string_lossy()),
     );
     Ok(())
-}
-
-/// Only ever called with the ID this invocation just created. A successful
-/// mutation is not enough: verify disappearance. Always remove the local alias.
-fn destroy(ctx: &Ctx, id: &str) -> Result<()> {
-    let cleanup = || -> Result<()> {
-        // This invocation owns the freshly created ID. A lagging or broken
-        // inventory must never suppress the paid-resource cleanup request.
-        let mut verified = Ok(());
-        for _ in 0..DESTROY_ATTEMPTS {
-            let sent = crate::vast::run(
-                ctx,
-                &["vastai", "destroy", "instance", id, "--yes"],
-                Some(30.0),
-            );
-            if let Err(error) = sent {
-                // A failed/timeout reply does not prove the mutation was rejected.
-                // A definite absence after the request still verifies completion.
-                let _ = ctx.eprintln(&format!(
-                    "Destroy request completion uncertain: {}",
-                    ctx.safe_diagnostic(error.text())
-                ));
-            }
-            verified = crate::commands::wait_for_lifecycle(
-                ctx,
-                id,
-                "destroy",
-                DESTROY_VERIFY_SECONDS / DESTROY_ATTEMPTS as f64,
-            );
-            if verified.is_ok() {
-                break;
-            }
-        }
-        verified
-    };
-    let outcome = cleanup();
-    let _ = crate::ssh_config::remove_host(&ctx.env, id);
-    outcome.map_err(|_| {
-        Error::status(
-            ExitCode::CleanupUnverified,
-            format!("Instance {id}: destruction unverified; billing may continue"),
-        )
-        .next(format!("gpu down {id} --yes"))
-    })
 }

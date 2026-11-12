@@ -11,7 +11,7 @@ use crate::provider::Provider;
 use crate::pyfmt::{fixed, py_float, py_str, truthy};
 use crate::pyjson::{Dict, Value};
 
-static SAFE_NAME: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[A-Za-z0-9._-]+$").unwrap());
+const NO_INSTANCES: &str = "No instances. Launch one: gpu up";
 static CLONE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"git clone [^\n]+ /workspace/([A-Za-z0-9._-]+)(?:\s|\z)").unwrap()
 });
@@ -19,7 +19,7 @@ static CLONE: LazyLock<Regex> = LazyLock::new(|| {
 /// Use metadata stored on the instance by `gpu up`, never local history.
 pub fn repo_name(instance: &Dict) -> Option<String> {
     if let Some(Value::Str(label)) = instance.get("label") {
-        if label != "no-repo" && SAFE_NAME.is_match(label) && label != "." && label != ".." {
+        if label != "no-repo" && crate::repos::is_name(label) {
             return Some(label.clone());
         }
     }
@@ -31,7 +31,7 @@ pub fn repo_name(instance: &Dict) -> Option<String> {
     if let Some(Value::Str(script)) = script {
         if let Some(captures) = CLONE.captures(script) {
             let name = &captures[1];
-            if name != "." && name != ".." {
+            if crate::repos::is_name(name) {
                 return Some(name.to_string());
             }
         }
@@ -119,7 +119,7 @@ fn table_price(item: &Dict) -> String {
 /// provider-specific fields. One column measurement covers every provider.
 pub(crate) fn render_table(ctx: &Ctx, items: &[Dict], long: bool) -> Result<()> {
     if items.is_empty() {
-        return ctx.println("No instances. Launch one: gpu up");
+        return ctx.println(NO_INSTANCES);
     }
     let ids = display_ids(items, long)?;
     let mut cells = vec![["ID", "Provider", "Type", "Status", "Price", "Uptime"].map(String::from)];
@@ -188,7 +188,7 @@ pub fn instance_label(item: &Dict) -> Result<String> {
 /// The instance picker; `Ok(None)` when there is nothing to select.
 pub fn select_instance(ctx: &Ctx, instances: &[Dict], action: &str) -> Result<Option<String>> {
     if instances.is_empty() {
-        ctx.println("No instances. Launch one: gpu up")?;
+        ctx.println(NO_INSTANCES)?;
         return Ok(None);
     }
     let mut options = Vec::new();

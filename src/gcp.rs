@@ -750,7 +750,7 @@ fn launch_loop(
             return Err(Error::msg("Expiry deadline passed. No TPU created")
                 .next("gpu up --provider gcp --expire 2h"));
         }
-        let wait = crate::progress::Wait::start(ctx, "Waiting for Google Cloud to create the TPU")?;
+        let wait = ctx.waiting("Waiting for Google Cloud to create the TPU")?;
         queue.check(ctx)?;
         // Arm and read back the control-plane task BEFORE issuing create. A laptop
         // crash, SSH failure, stopped VM or guest failure cannot remove this timer.
@@ -950,14 +950,11 @@ pub fn lifecycle(ctx: &Ctx, id: &TpuId, cfg: &Dict, destroy: bool, yes: bool) ->
     {
         return ctx.println("Cancelled.");
     }
-    let wait = crate::progress::Wait::start(
-        ctx,
-        if destroy {
-            "Waiting for Google Cloud to delete the TPU"
-        } else {
-            "Waiting for Google Cloud to stop the TPU"
-        },
-    )?;
+    let wait = ctx.waiting(if destroy {
+        "Waiting for Google Cloud to delete the TPU"
+    } else {
+        "Waiting for Google Cloud to stop the TPU"
+    })?;
     if destroy {
         crate::gcp_expiry::reconcile(ctx, cfg)?;
     }

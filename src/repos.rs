@@ -45,6 +45,10 @@ impl Repo {
 
 static PART: &str = r"[A-Za-z0-9._-]+";
 static NAME: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[A-Za-z0-9._-]+$").unwrap());
+/// A single repository name: GitHub's character set, never `.` or `..`.
+pub(crate) fn is_name(name: &str) -> bool {
+    name != "." && name != ".." && NAME.is_match(name)
+}
 static PATH: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(&format!(r"^{PART}(?:/{PART})*$")).unwrap());
 static NETLOC: LazyLock<Regex> =
@@ -143,7 +147,7 @@ pub fn resolve_repo(repo: &str, owner: &str) -> Result<(String, String)> {
     }
     let name = path.rsplit('/').next().unwrap_or("");
     let name = name.strip_suffix(".git").unwrap_or(name);
-    if name == "." || name == ".." || !NAME.is_match(name) {
+    if !is_name(name) {
         return Err(reject());
     }
     Ok((clone_url, name.to_string()))
@@ -162,7 +166,7 @@ fn names(value: &Value) -> Vec<String> {
     items
         .iter()
         .filter_map(Value::as_str)
-        .filter(|name| NAME.is_match(name) && *name != "." && *name != "..")
+        .filter(|name| is_name(name))
         .map(String::from)
         .collect()
 }

@@ -26,10 +26,10 @@ apt update || true; apt install -y gh || echo 'WARNING: gh install failed; conti
 touch /root/.no_auto_tmux
 rm -rf /venv
 mkdir -p /workspace
-git config --global user.name minoya1220
-git config --global user.email minoya1220@gmail.com
+git config --global user.name sampleuser
+git config --global user.email sampleuser@example.invalid
 if [ -n "${GH_TOKEN:-}" ]; then gh auth setup-git || echo "WARNING: gh auth setup-git failed; private GitHub repos may not clone." >&2; else echo "WARNING: GH_TOKEN is not set in Vast account environment; private GitHub repos may not clone." >&2; fi
-[ -d /workspace/gpu-kernels ] || git clone https://github.com/minoya1220/gpu-kernels /workspace/gpu-kernels
+[ -d /workspace/gpu-kernels ] || git clone https://github.com/sampleuser/gpu-kernels /workspace/gpu-kernels
 if [ -f /workspace/gpu-kernels/pyproject.toml ]; then uv sync --directory /workspace/gpu-kernels; fi
 echo done >/workspace/.gpu-setup
 trap - EXIT
@@ -82,7 +82,7 @@ fn test_container_script_uses_selected_repo_directory_only() {
     let script = startup_script(&repo("gpu-kernels"), "container", &defaults(), None).unwrap();
     assert_eq!(script, EXPECTED_CONTAINER_SCRIPT);
     assert!(script
-        .contains("git clone https://github.com/minoya1220/gpu-kernels /workspace/gpu-kernels"));
+        .contains("git clone https://github.com/sampleuser/gpu-kernels /workspace/gpu-kernels"));
     assert!(script.contains("uv sync --directory /workspace/gpu-kernels"));
     assert!(!script.contains("/workspace/cute-kernels"));
     assert!(script.contains("gh auth setup-git"));
@@ -531,7 +531,7 @@ fn test_interactive_gpu_stats_and_offers_share_unverified_filter() {
         &ctx,
         crate::wizard::Picks::new(args.repo.clone(), args.mode.as_deref(), None),
         &search,
-        "minoya1220",
+        "sampleuser",
     )
     .unwrap();
     let selected = crate::launch::select_offer(&ctx, offers, &args).unwrap();

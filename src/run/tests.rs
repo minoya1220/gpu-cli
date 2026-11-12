@@ -137,14 +137,9 @@ fn remote_step_errors_include_status_and_bounded_safe_cause() {
 }
 
 fn flags(extra: &[&str]) -> RunFlags {
-    use clap::Parser;
-    let mut args = vec!["gpu", "run", "--gpu", "T4", "--expire", "30m", "--yes"];
-    args.extend_from_slice(extra);
-    args.extend(["--", "true"]);
-    match crate::cli::Cli::parse_from(args).command.unwrap() {
-        crate::cli::Command::Run(flags) => flags,
-        _ => unreachable!(),
-    }
+    let mut options = vec!["--yes"];
+    options.extend_from_slice(extra);
+    crate::testing::run_flags(&options, &["true"])
 }
 
 #[test]
@@ -338,3 +333,6 @@ fn persistent_transport_failure_stops_after_a_small_budget() {
     assert_eq!(runner.calls().len(), DOWNLOAD_RETRY_DELAYS.len() + 1);
     assert!(clock.elapsed() <= 120.0);
 }
+
+mod expiry_prompt;
+mod lifecycle;

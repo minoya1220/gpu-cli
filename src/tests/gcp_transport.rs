@@ -1,9 +1,9 @@
-//! REST fixtures adapt existing stateful read handlers, never a real executable.
+//! REST fixtures consume curl config and emit real HTTP JSON pages/statuses.
 use crate::{
     process::{Cmd, Input, Output, RunError},
-    pyjson::{self, Dict, Value},
     testing::*,
 };
+
 pub fn curl(
     cmd: &Cmd,
     mut response: impl FnMut(&str) -> (u16, String),
@@ -40,104 +40,15 @@ pub fn curl(
     let (status, body) = response(cmd.argv.last().unwrap());
     Some(ok(&format!("{body}\n{status}")))
 }
-pub fn adapt(
-    cmd: &Cmd,
-    native: impl Fn(&Cmd) -> Result<Output, RunError>,
-) -> Option<Result<Output, RunError>> {
-    if cmd.argv.get(1).is_some_and(|a| a == "auth") {
-        return Some(ok("test-oauth-token\n"));
-    }
-    curl(cmd, |url| {
-        if url.starts_with("https://cloudbilling.") {
-            return (403, r#"{"error":{"status":"PERMISSION_DENIED"}}"#.into());
-        }
-        let rest = url.split("/projects/").nth(1).unwrap();
-        let project = rest.split('/').next().unwrap();
-        let path = rest.split('?').next().unwrap();
-        let zone = path
-            .split("/locations/")
-            .nth(1)
-            .unwrap_or("")
-            .split('/')
-            .next()
-            .unwrap();
-        let (args, key) = if url.contains("acceleratorTypes") {
-            (
-                vec![
-                    "compute".into(),
-                    "tpus".into(),
-                    "tpu-vm".into(),
-                    "accelerator-types".into(),
-                    "list".into(),
-                    format!("--zone={zone}"),
-                ],
-                "acceleratorTypes",
-            )
-        } else if url.contains("/nodes") {
-            (
-                vec![
-                    "compute".into(),
-                    "tpus".into(),
-                    "tpu-vm".into(),
-                    "list".into(),
-                    format!("--zone={zone}"),
-                ],
-                "nodes",
-            )
-        } else if url.contains("/tasks?") {
-            let queue = path
-                .split("/queues/")
-                .nth(1)
-                .unwrap()
-                .split('/')
-                .next()
-                .unwrap();
-            (
-                vec![
-                    "tasks".into(),
-                    "list".into(),
-                    format!("--location={zone}"),
-                    format!("--queue={queue}"),
-                ],
-                "tasks",
-            )
-        } else {
-            (
-                vec![
-                    "compute".into(),
-                    "tpus".into(),
-                    "locations".into(),
-                    "list".into(),
-                ],
-                "locations",
-            )
-        };
-        let mut argv = vec!["gcloud".to_string()];
-        argv.extend(args);
-        argv.extend([
-            format!("--project={project}"),
-            "--quiet".into(),
-            "--format=json".into(),
-        ]);
-        let out = native(&Cmd::new(&argv)).unwrap();
-        if out.code != 0 {
-            return (
-                if out.stderr.contains("NOT_FOUND") {
-                    404
-                } else {
-                    403
-                },
-                "{}".into(),
-            );
-        }
-        let mut page = Dict::new();
-        page.insert(key, json(&out.stdout));
-        (200, pyjson::dumps(&Value::Dict(page), None))
-    })
-}
 
 pub fn runner(
-    native: impl Fn(&Cmd) -> Result<Output, RunError> + Send + Sync + 'static,
+    response: impl Fn(&str) -> (u16, String) + Send + Sync + 'static,
 ) -> std::sync::Arc<FakeRunner> {
-    FakeRunner::new(move |cmd| adapt(cmd, &native).unwrap_or_else(|| native(cmd)))
+    FakeRunner::new(move |cmd| {
+        if cmd.argv.get(1).is_some_and(|a| a == "auth") {
+            assert_eq!(cmd.program(), "gcloud");
+            return ok("test-oauth-token\n");
+        }
+        curl(cmd, &response).unwrap_or_else(|| panic!("unexpected non-REST call: {cmd:?}"))
+    })
 }

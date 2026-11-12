@@ -191,7 +191,7 @@ fn python_redaction() {
 fn python_resolve_repo() {
     for row in rows("resolve_repo") {
         let repo = s(&row, "repo");
-        match resolve_repo(repo, "minoya1220") {
+        match resolve_repo(repo, "sampleuser") {
             Ok((url, name)) => {
                 let expected = row
                     .get("result")

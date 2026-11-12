@@ -310,3 +310,6 @@ pub(crate) fn tail(path: &Path) -> Result<String> {
     file.read_to_end(&mut text)?;
     Ok(String::from_utf8_lossy(&text).into_owned())
 }
+
+#[cfg(test)]
+mod tests;

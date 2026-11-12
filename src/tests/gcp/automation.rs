@@ -260,7 +260,7 @@ fn http_expired_auth_has_the_same_status_and_never_exposes_response_body() {
 fn tpu_spend_cap_refuses_before_arming_or_creating() {
     let (env, ctx, runner, _state) = fixture();
     super::super::gcp_prices::cache(&env);
-    let mut cfg = dict(CONFIG);
+    let mut cfg = configuration();
     cfg.insert("max_session_spend", Value::Float(0.01));
     std::fs::write(crate::config::config_path(&ctx.env), value(cfg)).unwrap();
     let mut flags = UP.to_vec();

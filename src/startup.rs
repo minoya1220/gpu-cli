@@ -123,8 +123,7 @@ pub fn run_script(deadline: Timestamp) -> Result<String> {
 }
 
 #[cfg(test)]
-#[path = "startup_review_tests.rs"]
-mod review_tests;
+mod tests;
 
 fn git_identity(cfg: &Dict, key: &str) -> Result<String> {
     let value = config::get(cfg, key)?;

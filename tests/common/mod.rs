@@ -16,7 +16,7 @@ entry=$tool; for arg in "$@"; do entry="$entry	$arg"; done
 printf '%s\n' "$entry" >> "$FAKE_CLI_LOG"
 sleep "${FAKE_CLI_DELAY:-0.3}"
 case "$tool $1 $2" in
-    "gh api user") echo 'minoya1220' ;;
+    "gh api user") echo 'sampleuser' ;;
     "gh repo list")
         echo '[{"name": "gpu-kernels"}, {"name": "other-repo"}]'
         ;;
@@ -49,6 +49,28 @@ printf '%s\n' "$entry" >> "$FAKE_CLI_LOG"
 echo "unexpected call: $tool $*" >&2
 exit 97
 "#;
+
+pub fn gcp_config(zone: Option<&str>, runtime: Option<&str>, account: Option<&str>) -> String {
+    use gpu::pyjson::{self, Value};
+    let mut config = pyjson::loads(include_str!("gcp_setup.json"))
+        .unwrap()
+        .as_dict()
+        .unwrap()
+        .clone();
+    let mut gcp = config.get("gcp").unwrap().as_dict().unwrap().clone();
+    for (key, value) in [("zone", zone), ("runtime", runtime)] {
+        if let Some(value) = value {
+            gcp.insert(key, Value::str(value));
+        }
+    }
+    if let Some(account) = account {
+        let mut expiry = gcp.get("expiry").unwrap().as_dict().unwrap().clone();
+        expiry.insert("service_account", Value::str(account));
+        gcp.insert("expiry", Value::Dict(expiry));
+    }
+    config.insert("gcp", Value::Dict(gcp));
+    pyjson::dumps(&Value::Dict(config), None)
+}
 
 pub struct Sandbox {
     _dir: tempfile::TempDir,
@@ -132,7 +154,7 @@ impl Sandbox {
     pub fn gcp_lifecycle(&self) {
         let config = self.root.join("config/gpu");
         std::fs::create_dir_all(&config).unwrap();
-        std::fs::write(config.join("config.json"),r#"{"gcp":{"setup":{"version":1,"project":"test-project"},"project":"test-project","expiry":{"queue":"gpu-expiry","location":"us-central1","service_account":"reaper@test-project.iam.gserviceaccount.com"}}}"#).unwrap();
+        std::fs::write(config.join("config.json"), gcp_config(None, None, None)).unwrap();
         self.gcp_reads("[]", true);
         self.stub("gcloud", include_str!("gcp_native.py"));
         self.stub(

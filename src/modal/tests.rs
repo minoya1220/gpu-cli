@@ -1,6 +1,6 @@
 use std::fs;
 
-use crate::cli::{self, Command, Parsed, RunFlags};
+use crate::cli::RunFlags;
 use crate::error::ExitCode;
 use crate::modal::*;
 use crate::process::{Output, RunError};
@@ -10,27 +10,9 @@ use crate::testing::{dict, FakeRunner, TestEnv};
 
 const RATES: &str = r#"{"gpu_hour_cost_t4":"0.59","gpu_hour_cost_h100":"3.95","cpu_hour_cost_sandbox":"0.1419","mem_gib_hour_cost_sandbox":"0.024"}"#;
 fn flags(extra: &[&str]) -> RunFlags {
-    let mut args = vec![
-        "gpu",
-        "run",
-        "--provider",
-        "modal",
-        "--gpu",
-        "T4",
-        "--expire",
-        "30m",
-        "--dry-run",
-    ];
-    args.extend(extra);
-    args.extend(["--", "true"]);
-    let args = args.into_iter().map(String::from).collect::<Vec<_>>();
-    match cli::parse(&args) {
-        Parsed::Run(command) => match *command {
-            Command::Run(f) => f,
-            _ => panic!(),
-        },
-        _ => panic!("invalid flags"),
-    }
+    let mut options = vec!["--provider", "modal", "--dry-run"];
+    options.extend_from_slice(extra);
+    crate::testing::run_flags(&options, &["true"])
 }
 fn rates_of(data: &str) -> Rates {
     Rates {
@@ -341,3 +323,5 @@ fn explicit_modal_provider_picker_lists_only_modal_rows_with_a_short_failure_rea
     });
     assert!(matches!(outcome, Outcome::Cancelled(_)));
 }
+
+mod lifecycle;

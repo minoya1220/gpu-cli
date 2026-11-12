@@ -49,10 +49,6 @@ pub mod vast;
 pub(crate) mod wizard;
 
 #[cfg(test)]
-mod run_files_tests;
-#[cfg(test)]
-mod run_tests;
-#[cfg(test)]
 mod testing;
 #[cfg(test)]
 mod tests;

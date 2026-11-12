@@ -1,6 +1,6 @@
 [
 {"repo": "", "result": ["", "no-repo"]},
-{"repo": "gpu-kernels", "result": ["https://github.com/minoya1220/gpu-kernels", "gpu-kernels"]},
+{"repo": "gpu-kernels", "result": ["https://github.com/sampleuser/gpu-kernels", "gpu-kernels"]},
 {"repo": "sgl-project/sglang", "result": ["https://github.com/sgl-project/sglang", "sglang"]},
 {"repo": "owner/.dotfiles", "result": ["https://github.com/owner/.dotfiles", ".dotfiles"]},
 {"repo": "a/b/c", "error": "Use a bare repo name, owner/name, https://host/path/repo.git, or git@host:path/repo.git (no credentials or query)."},
@@ -35,8 +35,8 @@
 {"repo": "ssh://git@host/a/b", "error": "Use a bare repo name, owner/name, https://host/path/repo.git, or git@host:path/repo.git (no credentials or query)."},
 {"repo": "file:///tmp/r", "error": "Use a bare repo name, owner/name, https://host/path/repo.git, or git@host:path/repo.git (no credentials or query)."},
 {"repo": "owner/repo/extra", "error": "Use a bare repo name, owner/name, https://host/path/repo.git, or git@host:path/repo.git (no credentials or query)."},
-{"repo": "-flag", "result": ["https://github.com/minoya1220/-flag", "-flag"]},
-{"repo": "repo.git", "result": ["https://github.com/minoya1220/repo.git", "repo"]},
+{"repo": "-flag", "result": ["https://github.com/sampleuser/-flag", "-flag"]},
+{"repo": "repo.git", "result": ["https://github.com/sampleuser/repo.git", "repo"]},
 {"repo": "o/r.git", "result": ["https://github.com/o/r.git", "r"]},
 {"repo": ".", "error": "Use a bare repo name, owner/name, https://host/path/repo.git, or git@host:path/repo.git (no credentials or query)."},
 {"repo": "..", "error": "Use a bare repo name, owner/name, https://host/path/repo.git, or git@host:path/repo.git (no credentials or query)."},

@@ -1,32 +1,14 @@
 //! Offline live-path regressions: every external call is a FakeRunner call.
-use super::*;
+use crate::modal::*;
 use crate::process::Output;
 use crate::testing::{self, FakeClock, FakeRunner, TestEnv};
 use std::sync::{Arc, Mutex};
 
 fn flags() -> RunFlags {
-    use clap::Parser;
-    let crate::cli::Command::Run(flags) = crate::cli::Cli::parse_from([
-        "gpu",
-        "run",
-        "--provider",
-        "modal",
-        "--gpu",
-        "T4",
-        "--expire",
-        "30m",
-        "--yes",
-        "--env",
-        "TOKEN",
-        "--",
-        "python",
-        "job.py",
-    ])
-    .command
-    .unwrap() else {
-        panic!()
-    };
-    flags
+    crate::testing::run_flags(
+        &["--provider", "modal", "--yes", "--env", "TOKEN"],
+        &["python", "job.py"],
+    )
 }
 const RATES: &str = r#"{"gpu_hour_cost_t4":"0.59","cpu_hour_cost_sandbox":"0.1419","mem_gib_hour_cost_sandbox":"0.024"}"#;
 

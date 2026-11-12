@@ -1,9 +1,5 @@
 //! Modal Sandbox planning and the pinned, private Python helper protocol.
 #[cfg(test)]
-#[path = "modal_live_tests.rs"]
-mod live_tests;
-#[cfg(test)]
-#[path = "modal_tests.rs"]
 mod tests;
 
 use std::io::Write;

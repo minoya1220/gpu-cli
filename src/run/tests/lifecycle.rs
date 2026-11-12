@@ -1,21 +1,14 @@
 //! Fake-only job lifecycle regressions. Files and archives are real; cloud/SSH are not.
-use crate::cli::{Cli, Command, RunFlags};
+use crate::cli::RunFlags;
 use crate::process::{Cmd, Input};
 use crate::pyjson::{self, Value};
 use crate::testing::{self, FakeClock, FakeRunner, TestEnv};
-use clap::Parser;
 use std::sync::{Arc, Mutex};
 
 fn flags(extra: &[&str]) -> RunFlags {
-    let mut argv = vec![
-        "gpu", "run", "--gpu", "RTX 4090", "--expire", "30m", "--yes",
-    ];
-    argv.extend_from_slice(extra);
-    argv.extend(["--", "python", "train.py", "a b", "$(false)"]);
-    match Cli::try_parse_from(argv).unwrap().command.unwrap() {
-        Command::Run(f) => f,
-        _ => unreachable!(),
-    }
+    let mut options = vec!["--gpu", "RTX 4090", "--yes"];
+    options.extend_from_slice(extra);
+    crate::testing::run_flags(&options, &["python", "train.py", "a b", "$(false)"])
 }
 
 #[derive(Clone, Copy)]
@@ -196,7 +189,7 @@ fn flow_with_flags(end: End, flags: RunFlags) -> (i32, Value, String, Vec<Cmd>) 
     builder.env = builder.env.with("TOKEN", "test-secret");
     let ctx = builder.build().for_command(true);
     *holder.lock().unwrap() = Some(ctx.clone());
-    let outcome = super::run::run(&ctx, &flags, &crate::config::defaults(), &cwd);
+    let outcome = crate::run::run(&ctx, &flags, &crate::config::defaults(), &cwd);
     let code = outcome.as_ref().err().map_or(0, |e| e.exit_code());
     let result = crate::output::envelope(&ctx, "run", &outcome);
     let dir = cwd.join("gpu-runs/20261107T120000Z-123");
@@ -327,7 +320,7 @@ fn nonterminal_run_requires_gpu_even_with_an_explicit_offer() {
     let mut args = flags(&[]);
     args.gpu = None;
     args.offer = Some(100);
-    let error = super::run::run(&ctx, &args, &crate::config::defaults(), &env.root).unwrap_err();
+    let error = crate::run::run(&ctx, &args, &crate::config::defaults(), &env.root).unwrap_err();
     assert_eq!(error.exit_code(), 2);
     assert!(
         error.text().contains("requires --gpu MODEL"),
@@ -356,7 +349,7 @@ fn invalid_preflight_never_searches_or_creates() {
         flags(&["--outputs", "../escape"]),
         flags(&["--expire", "5m"]),
     ] {
-        assert!(super::run::run(&ctx, &f, &crate::config::defaults(), &env.root).is_err());
+        assert!(crate::run::run(&ctx, &f, &crate::config::defaults(), &env.root).is_err());
     }
 }
 

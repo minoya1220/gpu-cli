@@ -7,7 +7,9 @@ use crate::{
     testing::*,
 };
 use std::sync::{Arc, Mutex};
-const CFG: &str = r#"{"gcp":{"setup":{"version":1,"project":"test-project"},"project":"test-project","zone":"us-east5-b"}}"#;
+fn configuration() -> Dict {
+    gcp_config(Some("us-east5-b"), None)
+}
 pub(crate) fn prices() -> Prices {
     Prices {
         region: "us-east5".into(),
@@ -168,8 +170,7 @@ fn future_tiered_monthly_or_malformed_money_is_never_quoted_as_an_hourly_rate() 
 
 fn fixture() -> (TestEnv, Ctx, Arc<FakeRunner>) {
     let env = TestEnv::new();
-    std::fs::create_dir(env.config.join("gpu")).unwrap();
-    std::fs::write(env.config.join("gpu/config.json"), CFG).unwrap();
+    write_config(&env, &configuration());
     let runner = FakeRunner::new(|cmd| {
         if cmd.program() == "gcloud" {
             assert_eq!(strs(&cmd.argv)[1..3], ["auth", "print-access-token"]);
@@ -202,7 +203,7 @@ fn fixture() -> (TestEnv, Ctx, Arc<FakeRunner>) {
 #[test]
 fn known_skus_batch_prices_and_cache_public_data_not_tokens() {
     let (env, ctx, runner) = fixture();
-    let cfg = dict(CFG);
+    let cfg = configuration();
     let p = gcp_prices::load(&ctx, &cfg, "us-east5-b").unwrap();
     assert_eq!(p.hourly("v6e-1", false), Some(2.75));
     assert_eq!(runner.calls().len(), 2);
@@ -223,7 +224,7 @@ fn gate_applies_even_to_cached_prices_and_errors_do_not_leak_credentials() {
     let env = TestEnv::new();
     cache(&env);
     let ctx = env.ctx().build();
-    assert!(gcp_prices::load(&ctx, &dict(CFG), "us-east5-b").is_err());
+    assert!(gcp_prices::load(&ctx, &configuration(), "us-east5-b").is_err());
     let (env, _ctx, _runner) = fixture();
     let runner = FakeRunner::new(|_| {
         Ok(crate::process::Output::failed(
@@ -232,21 +233,12 @@ fn gate_applies_even_to_cached_prices_and_errors_do_not_leak_credentials() {
         ))
     });
     let ctx = env.ctx().runner(&runner).build();
-    let error = gcp_prices::load(&ctx, &dict(CFG), "us-east5-b")
+    let error = gcp_prices::load(&ctx, &configuration(), "us-east5-b")
         .err()
         .unwrap()
         .text()
         .to_string();
     assert!(!error.contains("private"));
-}
-struct EmptySearch;
-impl crate::wizard::Search for EmptySearch {
-    fn offers(&self, _: &str, _: Option<&str>) -> crate::error::Result<Vec<Dict>> {
-        Ok(Vec::new())
-    }
-    fn stats(&self, _: &str) -> crate::error::Result<crate::offers::Stats> {
-        Ok(Default::default())
-    }
 }
 
 #[test]
@@ -263,7 +255,7 @@ fn tpu_prices_load_automatically_and_no_setup_note_is_visible() {
             &env.env(),
             crate::wizard::WizardOptions {
                 repos: Job::new(|| Ok(Vec::new())),
-                search: Some(Arc::new(EmptySearch)),
+                search: Some(Arc::new(OfferFixture::default())),
                 models: vec!["RTX 4090".into()],
                 recent_gpus: Vec::new(),
                 choose_offer: false,
@@ -308,7 +300,7 @@ fn tpu_prices_load_automatically_and_no_setup_note_is_visible() {
 #[test]
 fn shared_token_catalog_cache_and_fresh_preflight_do_not_duplicate_auth() {
     let (_env, ctx, runner) = fixture();
-    let cfg = dict(CFG);
+    let cfg = configuration();
     gcp_prices::load(&ctx, &cfg, "us-east5-b").unwrap();
     crate::gcp_catalog::zones(&ctx, "test-project", None).unwrap();
     let before = runner.calls().len();
@@ -332,7 +324,7 @@ fn shared_token_catalog_cache_and_fresh_preflight_do_not_duplicate_auth() {
 #[test]
 fn compute_engine_hours_are_chip_hours_and_regions_share_sku_cache() {
     let (_env, ctx, runner) = fixture();
-    let cfg = dict(CFG);
+    let cfg = configuration();
     let p = gcp_prices::load_for(&ctx, &cfg, "us-east5-b", Some(("v6e-1", false))).unwrap();
     assert_eq!(p.hourly("v6e-4", false), Some(11.0));
     let count = runner.calls().len();
@@ -346,7 +338,7 @@ fn live_prices_use_cached_skus_during_refresh_and_reprice_only_on_change() {
     for changed in [false, true] {
         let env = TestEnv::new();
         std::fs::create_dir(env.config.join("gpu")).unwrap();
-        std::fs::write(env.config.join("gpu/config.json"), CFG).unwrap();
+        write_config(&env, &configuration());
         cache(&env);
         let release = super::picker::Gate::default();
         let held = release.clone();
@@ -377,7 +369,7 @@ fn live_prices_use_cached_skus_during_refresh_and_reprice_only_on_change() {
             .runner(&runner)
             .clock(&FakeClock::at(prices().at))
             .build();
-        let cfg = dict(CFG);
+        let cfg = configuration();
         let job = gcp_prices::job(&ctx, &cfg);
         let again = gcp_prices::job_at(&ctx, &cfg, Some("us-east5-a"));
         let (rows, observer) = (job.clone(), job.observer());

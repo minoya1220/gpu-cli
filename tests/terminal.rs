@@ -513,7 +513,15 @@ fn test_auto_tpu_prices_use_stubs_and_without_setup_explain_the_gate() {
         if configured {
             let config = sandbox.root.join("config/gpu");
             std::fs::create_dir_all(&config).unwrap();
-            std::fs::write(config.join("config.json"),r#"{"gcp":{"setup":{"version":1,"project":"test-project"},"project":"test-project","zone":"us-east5-b","expiry":{"queue":"gpu-expiry","location":"us-central1","service_account":"123456-compute@developer.gserviceaccount.com"}}}"#).unwrap();
+            std::fs::write(
+                config.join("config.json"),
+                common::gcp_config(
+                    Some("us-east5-b"),
+                    None,
+                    Some("123456-compute@developer.gserviceaccount.com"),
+                ),
+            )
+            .unwrap();
             sandbox.gcp_reads("[]", true);
             sandbox.stub(
                 "gcloud",
@@ -628,7 +636,11 @@ fn test_tpu_category_and_type_search_continue_into_cloud_dry_run() {
         let sandbox = Sandbox::new();
         let config = sandbox.root.join("config/gpu");
         std::fs::create_dir_all(&config).unwrap();
-        std::fs::write(config.join("config.json"), r#"{"gcp":{"setup":{"version":1,"project":"test-project"},"project":"test-project","zone":"us-central1-a","runtime":"v2-alpha-tpuv5lite","expiry":{"queue":"gpu-expiry","location":"us-central1","service_account":"reaper@test-project.iam.gserviceaccount.com"}}}"#).unwrap();
+        std::fs::write(
+            config.join("config.json"),
+            common::gcp_config(Some("us-central1-a"), Some("v2-alpha-tpuv5lite"), None),
+        )
+        .unwrap();
         sandbox.gcp_reads("[]", false);
         // The only cloud calls allowed are read-only catalog requests. All
         // lifecycle, IAM and task operations fail if this dry run reaches them.
@@ -809,7 +821,11 @@ fn test_type_first_priced_zones_and_last_zone_highlight_in_terminal() {
     let sandbox = Sandbox::new();
     let config = sandbox.root.join("config/gpu");
     std::fs::create_dir_all(&config).unwrap();
-    std::fs::write(config.join("config.json"),r#"{"gcp":{"setup":{"version":1,"project":"test-project"},"project":"test-project","expiry":{"queue":"gpu-expiry","location":"us-central1","service_account":"reaper@test-project.iam.gserviceaccount.com"}}}"#).unwrap();
+    std::fs::write(
+        config.join("config.json"),
+        common::gcp_config(None, None, None),
+    )
+    .unwrap();
     let history = sandbox.history_path();
     std::fs::create_dir_all(history.parent().unwrap()).unwrap();
     std::fs::write(&history, r#"{"gcp_zone:test-project":["us-central1-a"]}"#).unwrap();
@@ -1637,7 +1653,11 @@ fn test_cloud_generation_and_size_left_restores_gpu_page() {
         let sandbox = Sandbox::new();
         let config = sandbox.root.join("config/gpu");
         std::fs::create_dir_all(&config).unwrap();
-        std::fs::write(config.join("config.json"),r#"{"gcp":{"setup":{"version":1,"project":"test-project"},"project":"test-project","expiry":{"queue":"gpu-expiry","location":"us-central1","service_account":"reaper@test-project.iam.gserviceaccount.com"}}}"#).unwrap();
+        std::fs::write(
+            config.join("config.json"),
+            common::gcp_config(None, None, None),
+        )
+        .unwrap();
         sandbox.gcp_reads("[]", true);
         sandbox.stub(
             "gcloud",

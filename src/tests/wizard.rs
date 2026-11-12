@@ -98,7 +98,7 @@ fn wizard(
             tpu_cached_prices: None,
             tpu_types: vec!["v5e-1".into(), "v6e-1".into()],
             tpu_catalog: None,
-            owner: "minoya1220".into(),
+            owner: "sampleuser".into(),
         },
     )
 }
@@ -483,7 +483,7 @@ fn test_repository_shortcuts_full_list_and_global_filter() {
                 tpu_cached_prices: None,
                 tpu_types: Vec::new(),
                 tpu_catalog: None,
-                owner: "minoya1220".into(),
+                owner: "sampleuser".into(),
             },
         );
         let result = run(
@@ -567,7 +567,7 @@ fn test_short_repository_lists_keep_static_digits_and_omit_all() {
                 tpu_cached_prices: None,
                 tpu_types: Vec::new(),
                 tpu_catalog: None,
-                owner: "minoya1220".into(),
+                owner: "sampleuser".into(),
             },
         );
         let result = run(

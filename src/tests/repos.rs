@@ -1,4 +1,4 @@
-//! Port of tests/test_repos.py: optional and arbitrary repositories, with no
+//! Optional and arbitrary repositories, with no
 //! network, credentials, or paid instances.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -7,18 +7,15 @@ use std::sync::Arc;
 use super::cli::{bash_n, dry_run_request};
 use super::picker::Gate;
 use super::repo_cache::{flow, gated};
-use crate::error::Result;
 use crate::launch::prompt_for_picks;
-use crate::offers::Stats;
 use crate::picker::testing::*;
 use crate::picker::{Job, JobState, Outcome};
 use crate::process::Output;
-use crate::pyjson::Dict;
 use crate::repos::{cache_path, load_cached_repos, resolve_repo, save_cached_repos, Repo};
 use crate::startup::startup_script;
 use crate::testing::fixture_config as defaults;
 use crate::testing::*;
-use crate::wizard::{Picks, Search};
+use crate::wizard::Picks;
 
 fn tesla() -> Picks {
     Picks::new(None, None, Some("Tesla T4"))
@@ -33,7 +30,7 @@ fn test_resolve_repo() {
     let cases = [
         (
             "gpu-kernels",
-            "https://github.com/minoya1220/gpu-kernels",
+            "https://github.com/sampleuser/gpu-kernels",
             "gpu-kernels",
         ),
         (
@@ -65,7 +62,7 @@ fn test_resolve_repo() {
     ];
     for (repo, url, name) in cases {
         assert_eq!(
-            resolve_repo(repo, "minoya1220").unwrap(),
+            resolve_repo(repo, "sampleuser").unwrap(),
             (url.to_string(), name.to_string()),
             "{repo}"
         );
@@ -96,7 +93,7 @@ fn test_unsafe_or_credential_bearing_repos_are_rejected() {
         "https://host/../repo",
     ];
     for repo in cases {
-        assert!(resolve_repo(repo, "minoya1220").is_err(), "{repo:?}");
+        assert!(resolve_repo(repo, "sampleuser").is_err(), "{repo:?}");
     }
 }
 
@@ -126,7 +123,7 @@ fn test_generated_script_new_choices() {
                     !script.contains("pyproject.toml") && !script.contains("/workspace/no-repo")
                 );
             } else {
-                let (url, name) = resolve_repo(repo, "minoya1220").unwrap();
+                let (url, name) = resolve_repo(repo, "sampleuser").unwrap();
                 assert!(script.contains(&format!("git clone {url} /workspace/{name}")));
                 assert!(script.contains(&format!(
                     "if [ -f /workspace/{name}/pyproject.toml ]; then uv sync --directory /workspace/{name}; fi"
@@ -191,7 +188,7 @@ fn test_cli_dry_run_skips_github_and_prompts() {
             flags[1]
         };
         let label = &request[request.iter().position(|a| a == "--label").unwrap() + 1];
-        assert_eq!(*label, resolve_repo(repo, "minoya1220").unwrap().1);
+        assert_eq!(*label, resolve_repo(repo, "sampleuser").unwrap().1);
         let script = &request[request.iter().position(|a| a == "--onstart-cmd").unwrap() + 1];
         // `--expire 2h` starts the boot-time guard with the absolute deadline.
         let deadline: i64 = script
@@ -250,7 +247,7 @@ fn test_flag_conflict_and_invalid_repo_fail_before_network() {
 #[test]
 fn test_no_repo_usable_while_github_is_blocked() {
     let t = TestEnv::new();
-    save_cached_repos(&t.env(), "minoya1220", &["own-repo".to_string()]).unwrap();
+    save_cached_repos(&t.env(), "sampleuser", &["own-repo".to_string()]).unwrap();
     let gate = Gate::default();
     let job = gated(&gate, Ok(vec!["own-repo"]));
     let observer = job.observer();
@@ -330,7 +327,7 @@ fn test_cache_contains_only_repo_names_and_no_recent_rows() {
     let t = TestEnv::new();
     save_cached_repos(
         &t.env(),
-        "minoya1220",
+        "sampleuser",
         &[
             "own-repo".to_string(),
             "https://user:token@host/repo".to_string(),
@@ -338,10 +335,10 @@ fn test_cache_contains_only_repo_names_and_no_recent_rows() {
     )
     .unwrap();
     assert_eq!(
-        load_cached_repos(&t.env(), "minoya1220"),
+        load_cached_repos(&t.env(), "sampleuser"),
         Some(vec!["own-repo".to_string()])
     );
-    assert!(!read(&cache_path(&t.env(), "minoya1220")).contains("token"));
+    assert!(!read(&cache_path(&t.env(), "sampleuser")).contains("token"));
     let result = super::wizard::run(
         &own_repo(&t),
         Picks::new(None, Some("vm"), Some("B200")),
@@ -380,21 +377,6 @@ fn test_paste_url_in_same_application() {
     assert_eq!(picks.repo, Some(Repo::from_arg(repo)));
 }
 
-struct OneOffer;
-
-impl Search for OneOffer {
-    fn offers(&self, _mode: &str, gpu: Option<&str>) -> Result<Vec<Dict>> {
-        Ok(vec![dict(&format!(
-            r#"{{"id": 42, "gpu_name": "{}"}}"#,
-            gpu.unwrap_or_default()
-        ))])
-    }
-
-    fn stats(&self, _mode: &str) -> Result<Stats> {
-        Ok(Stats::new())
-    }
-}
-
 #[test]
 fn test_line_picker_no_repo_choice_and_url_refusal_without_terminal() {
     for (answers, expected) in [
@@ -410,8 +392,8 @@ fn test_line_picker_no_repo_choice_and_url_refusal_without_terminal() {
         let result = prompt_for_picks(
             &ctx,
             Picks::new(None, Some("vm"), Some("B200")),
-            &OneOffer,
-            "minoya1220",
+            &OfferFixture::one(42),
+            "sampleuser",
         );
         if let Some(repo) = expected {
             assert_eq!(result.unwrap().0.repo, Some(repo));

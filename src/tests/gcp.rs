@@ -1,5 +1,4 @@
 //! No test in this module can invoke a real cloud command.
-#[path = "gcp_automation.rs"]
 mod automation;
 use crate::ctx::Ctx;
 use crate::gcp::TpuId;
@@ -8,7 +7,9 @@ use crate::pyjson::{self, Dict, Value};
 use crate::testing::*;
 use std::sync::{Arc, Mutex};
 
-const CONFIG: &str = r#"{"gcp":{"setup":{"version":1,"project":"test-project"},"project":"test-project","zone":"us-east5-b","runtime":"v2-alpha-tpuv6e","expiry":{"queue":"gpu-expiry","location":"us-central1","service_account":"reaper@test-project.iam.gserviceaccount.com"}}}"#;
+fn configuration() -> Dict {
+    gcp_config(Some("us-east5-b"), Some("v2-alpha-tpuv6e"))
+}
 const ID: &str = "gcp:test-project:us-east5-b:test-tpu";
 const QUEUE: &str = "projects/test-project/locations/us-central1/queues/gpu-expiry";
 const UP: &[&str] = &[
@@ -69,11 +70,10 @@ fn node(spot: bool) -> Dict {
 }
 fn fixture() -> (TestEnv, Ctx, Arc<FakeRunner>, Arc<Mutex<State>>) {
     let env = TestEnv::new();
-    let path = env.config.join("gpu");
-    std::fs::create_dir(&path).unwrap();
-    std::fs::write(path.join("config.json"), CONFIG).unwrap();
+    write_config(&env, &configuration());
     let state = Arc::new(Mutex::new(State::default()));
     let shared = state.clone();
+    let rest_state = state.clone();
     let native = move |cmd: &Cmd| {
         let mut state = shared.lock().unwrap();
         let a = strs(&cmd.argv);
@@ -85,12 +85,6 @@ fn fixture() -> (TestEnv, Ctx, Arc<FakeRunner>, Arc<Mutex<State>>) {
             return ok(
                 r#"[{"id":123,"gpu_name":"RTX 4090","actual_status":"running","instance_api_key":"not-for-output"}]"#,
             );
-        }
-        if a[0] == "gcloud" && a.get(1) == Some(&"auth") {
-            return Ok(Output::failed(
-                1,
-                "test deliberately has no Billing credentials",
-            ));
         }
         if ["code", "cursor", "zed", "ssh"].contains(&a[0]) {
             return ok("");
@@ -137,7 +131,6 @@ fn fixture() -> (TestEnv, Ctx, Arc<FakeRunner>, Arc<Mutex<State>>) {
                     }
                     return ok(&value(task));
                 }
-                "list" => return ok(&list(state.tasks.clone())),
                 "delete" => {
                     if state.fail_delete_task {
                         return Ok(Output::failed(1, "cannot delete"));
@@ -152,12 +145,8 @@ fn fixture() -> (TestEnv, Ctx, Arc<FakeRunner>, Arc<Mutex<State>>) {
             }
         }
         assert_eq!(a[1..3], ["compute", "tpus"]);
-        if a[3] == "locations" {
-            return ok(r#"[{"locationId":"us-east5-b"},{"locationId":"us-central1-a"}]"#);
-        }
         assert_eq!(a[3], "tpu-vm");
         match a[4] {
-            "accelerator-types" => if state.empty_types { ok("[]") } else { ok(r#"[{"type":"v6e-1"},{"type":"v5p-8"},{"type":"v5p-16"}]"#) },
             "list" if state.fail_presence => Ok(Output::failed(1,"PERMISSION_DENIED")),
             "list" => ok(&list(if ["us-east5-b","-"].contains(&arg(cmd,"zone").as_str()) {state.nodes.clone()} else {Vec::new()})),
             "describe" if state.fail_presence => Ok(Output::failed(1,"PERMISSION_DENIED: secret")),
@@ -191,7 +180,58 @@ fn fixture() -> (TestEnv, Ctx, Arc<FakeRunner>, Arc<Mutex<State>>) {
         }
     };
     let runner = FakeRunner::new(move |cmd| {
-        super::gcp_transport::adapt(cmd, &native).unwrap_or_else(|| native(cmd))
+        if cmd.program() == "gcloud" && cmd.argv.get(1).is_some_and(|arg| arg == "auth") {
+            return ok("test-oauth-token");
+        }
+        super::gcp_transport::curl(cmd, |url| {
+            let state = rest_state.lock().unwrap();
+            assert!(url.starts_with("https://"));
+            if url.starts_with("https://cloudbilling.") {
+                return (403, "{}".into());
+            }
+            assert!(
+                url.contains("/projects/test-project/locations"),
+                "unscoped REST request: {url}"
+            );
+            let (key, rows) = if url.contains("/acceleratorTypes?") {
+                (
+                    "acceleratorTypes",
+                    if state.empty_types {
+                        Vec::new()
+                    } else {
+                        dicts(r#"[{"type":"v6e-1"},{"type":"v5p-8"},{"type":"v5p-16"}]"#)
+                    },
+                )
+            } else if url.contains("/nodes?") {
+                if state.fail_presence {
+                    return (403, r#"{"error":{"status":"PERMISSION_DENIED"}}"#.into());
+                }
+                (
+                    "nodes",
+                    if url.contains("/locations/-/") || url.contains("/locations/us-east5-b/") {
+                        state.nodes.clone()
+                    } else {
+                        Vec::new()
+                    },
+                )
+            } else if url.contains("/queues/gpu-expiry/tasks?") {
+                ("tasks", state.tasks.clone())
+            } else if url.contains("/locations?") {
+                (
+                    "locations",
+                    dicts(r#"[{"locationId":"us-east5-b"},{"locationId":"us-central1-a"}]"#),
+                )
+            } else {
+                panic!("unexpected REST request: {url}")
+            };
+            let mut page = Dict::new();
+            page.insert(
+                key,
+                Value::List(rows.into_iter().map(Value::Dict).collect()),
+            );
+            (200, value(page))
+        })
+        .unwrap_or_else(|| native(cmd))
     });
     let ctx = env
         .ctx()
@@ -870,7 +910,7 @@ fn tpu_flag_routes_without_provider_and_catalog_jobs_use_real_keys() {
     // gated Runner and wait for rendered choices before sending Enter.
     use crate::picker::{testing::*, JobState, Outcome};
     use crate::process::Runner;
-    let settings = crate::gcp::Settings::load(&dict(CONFIG)).unwrap();
+    let settings = crate::gcp::Settings::load(&configuration()).unwrap();
     for (kind, title, expected) in [
         ("locations", "TPU zone", "us-east5-b"),
         ("accelerator-types", "TPU type", "v6e-1"),
@@ -908,7 +948,7 @@ fn tpu_flag_routes_without_provider_and_catalog_jobs_use_real_keys() {
 fn catalog_choices_share_a_stack_and_back_does_not_refetch() {
     use crate::picker::{testing::*, Next, Outcome};
     let (_env, ctx, runner, _state) = fixture();
-    let settings = crate::gcp::Settings::load(&dict(CONFIG)).unwrap();
+    let settings = crate::gcp::Settings::load(&configuration()).unwrap();
     let Next::Screen(first) = crate::gcp_wizard::next(ctx, settings, Default::default()) else {
         panic!("missing first screen")
     };
@@ -946,7 +986,7 @@ fn catalog_choices_share_a_stack_and_back_does_not_refetch() {
 fn expiry_entry_has_duration_help_validation_and_back_to_capacity() {
     use crate::picker::{testing::*, Next, Outcome};
     let (_env, ctx, runner, _state) = fixture();
-    let settings = crate::gcp::Settings::load(&dict(CONFIG)).unwrap();
+    let settings = crate::gcp::Settings::load(&configuration()).unwrap();
     let Next::Screen(first) = crate::gcp_wizard::next(
         ctx,
         settings,
@@ -1100,7 +1140,7 @@ fn declining_creation_or_destruction_never_creates_paid_resources() {
 #[test]
 fn malformed_node_list_never_verifies_destruction() {
     let (env, _, _, _) = fixture();
-    let runner = super::gcp_transport::runner(|cmd| {
+    let runner = FakeRunner::new(|cmd| {
         if cmd.argv[1] == "tasks" {
             return ok("[]");
         }
@@ -1192,7 +1232,7 @@ fn capacity_prices_reuse_the_size_job_without_blocking_input() {
         held.lock().unwrap().recv().unwrap();
         Ok(Arc::new(super::gcp_prices::prices()))
     });
-    let settings = crate::gcp::Settings::load(&dict(CONFIG)).unwrap();
+    let settings = crate::gcp::Settings::load(&configuration()).unwrap();
     let selected = crate::gcp_wizard::Selection {
         tpu: Some("v6e-4".into()),
         zone: Some("us-east5-b".into()),
@@ -1202,7 +1242,7 @@ fn capacity_prices_reuse_the_size_job_without_blocking_input() {
     let screen = crate::gcp_wizard::capacity_screen(
         ctx,
         settings,
-        dict(CONFIG),
+        configuration(),
         selected.clone(),
         Some(crate::gcp_wizard::Types {
             initial: Vec::new(),
@@ -1254,7 +1294,7 @@ fn failed_or_missing_capacity_prices_still_allow_number_selection() {
     use crate::picker::{testing::*, Job, Outcome};
     for failed in [false, true] {
         let (_env, ctx, runner, _) = fixture();
-        let settings = crate::gcp::Settings::load(&dict(CONFIG)).unwrap();
+        let settings = crate::gcp::Settings::load(&configuration()).unwrap();
         let selected = crate::gcp_wizard::Selection {
             tpu: Some("v5e-1".into()),
             zone: Some("us-east5-b".into()),
@@ -1264,7 +1304,7 @@ fn failed_or_missing_capacity_prices_still_allow_number_selection() {
         let screen = crate::gcp_wizard::capacity_screen(
             ctx,
             settings,
-            dict(CONFIG),
+            configuration(),
             selected.clone(),
             Some(crate::gcp_wizard::Types {
                 initial: Vec::new(),
@@ -1616,10 +1656,10 @@ fn retry_can_return_to_grouped_zone_picker_without_authorizing_payment() {
         directory: "/workspace".into(),
         deadline: "2026-11-03T02:00:00Z".parse().unwrap(),
     };
-    let settings = crate::gcp::Settings::load(&dict(CONFIG)).unwrap();
+    let settings = crate::gcp::Settings::load(&configuration()).unwrap();
     let skipped = ["us-east5-b".into()].into_iter().collect();
     let result = drive(
-        crate::gcp_retry::screen(&ctx, &settings, &dict(CONFIG), &picks, &skipped),
+        crate::gcp_retry::screen(&ctx, &settings, &configuration(), &picks, &skipped),
         |keys| {
             keys.wait(|s| s.labels.iter().any(|l| l.starts_with("Retry")));
             keys.press_until("2", on("TPU zone"));
@@ -1796,12 +1836,12 @@ fn type_filter_counts_and_prices_exclude_unsupported_remembered_zone() {
     cache.insert("zones", Value::List(zones));
     crate::gcp_http::write_cache(&ctx, "tpu-catalog-test-project.json", cache);
     crate::gcp_preferences::remember(&ctx, "test-project", "us-central1-a");
-    let settings = crate::gcp::Settings::load(&dict(CONFIG)).unwrap();
+    let settings = crate::gcp::Settings::load(&configuration()).unwrap();
     let result = drive(
         crate::gcp_wizard::priced_zone_screen(
             &ctx,
             &settings,
-            &dict(CONFIG),
+            &configuration(),
             "v6e-1",
             true,
             &Default::default(),
@@ -1859,7 +1899,7 @@ fn generation_and_size_preferences_are_scoped_and_highlight_without_reordering()
         crate::gcp_preferences::generation(&ctx, "other-project"),
         None
     );
-    let settings = crate::gcp::Settings::load(&dict(CONFIG)).unwrap();
+    let settings = crate::gcp::Settings::load(&configuration()).unwrap();
     let Next::Screen(first) = crate::gcp_wizard::next(ctx, settings, Default::default()) else {
         panic!("generation")
     };

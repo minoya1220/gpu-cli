@@ -4,10 +4,11 @@ use jiff::Timestamp;
 
 use crate::config;
 use crate::error::{Error, Result};
-use crate::expiry::{deadline_seconds, GUARD_SOURCE};
+use crate::expiry::deadline_seconds;
 use crate::pyfmt::{py_str, shell_quote, shell_quote_value};
 use crate::pyjson::Dict;
 use crate::repos::{resolve_repo, Repo};
+use crate::vast::expiry::GUARD_SOURCE;
 
 /// Vast's limit on the onstart field. The API reference gives 4048
 /// characters ("Key Quirks": "`onstart` field is limited to 4048 characters

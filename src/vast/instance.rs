@@ -5,13 +5,13 @@ use jiff::Timestamp;
 
 use crate::ctx::Ctx;
 use crate::error::{Error, ExitCode, Result};
-use crate::expiry::{expiry_summary, manage_expiry};
 use crate::instances::repo_name;
 use crate::process::RunError;
 use crate::prompt::confirm;
 use crate::pyfmt::{general, py_str, truthy};
 use crate::pyjson::{Dict, Value};
 use crate::redact::redact_text;
+use crate::vast::expiry::{expiry_summary, manage_expiry};
 use crate::vast::run;
 use crate::vast::ssh_config::{has_host, remove_host, update_host, HostError};
 use crate::vast::{find_instance, list_instances};

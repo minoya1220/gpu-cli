@@ -248,7 +248,7 @@ impl RunBackend for VastBackend {
         );
         let (alias, _) =
             crate::vast::instance::wait_for_ssh_with_hint(ctx, &id, wait_timeout, &hint)?;
-        crate::expiry::manage_expiry(ctx, &alias, &id, "arm", Some(deadline))?;
+        crate::vast::expiry::manage_expiry(ctx, &alias, &id, "arm", Some(deadline))?;
         self.alias = alias;
         ctx.result("expiry_armed", Value::Bool(true));
         Ok(id)
@@ -271,7 +271,7 @@ impl RunBackend for VastBackend {
     }
 
     fn restore_expiry(&self, ctx: &Ctx, id: &str, deadline: Timestamp) -> Result<()> {
-        crate::expiry::manage_expiry(ctx, &self.alias, id, "arm", Some(deadline)).map(|_| ())
+        crate::vast::expiry::manage_expiry(ctx, &self.alias, id, "arm", Some(deadline)).map(|_| ())
     }
 
     fn hook(&self, id: &str) -> String {

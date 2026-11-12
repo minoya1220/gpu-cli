@@ -6,13 +6,13 @@ use jiff::Timestamp;
 
 use super::instances::{fake_vast, ssh_ready};
 use crate::ctx::Clock;
-use crate::expiry::{
-    expiry_summary, local_zone, manage_expiry, parse_duration, parse_expire_arguments, parse_when,
-    remote_command, transport_payload, REMOTE_SOURCE,
-};
+use crate::expiry::{local_zone, parse_duration, parse_expire_arguments, parse_when};
 use crate::process::{Output, RunError};
 use crate::pyjson::Value;
 use crate::testing::*;
+use crate::vast::expiry::{
+    expiry_summary, manage_expiry, remote_command, transport_payload, REMOTE_SOURCE,
+};
 
 fn now() -> Timestamp {
     "2026-01-01T12:00:00Z".parse().unwrap()

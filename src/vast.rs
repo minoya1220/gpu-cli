@@ -1,5 +1,6 @@
 //! The authenticated `vastai` CLI: offer search, instance listing, and the
 //! exact `create instance` request.
+pub mod expiry;
 pub(crate) mod instance;
 pub mod offers;
 pub(crate) mod ssh_config;

@@ -11,13 +11,14 @@ use jiff::Timestamp;
 use super::cli::bash_n;
 use super::instances::{editor_stubs, ssh_ready};
 use crate::ctx::Clock;
-use crate::expiry::{local_time, GUARD_SOURCE};
+use crate::expiry::local_time;
 use crate::process::{Output, RunError};
 use crate::pyjson::{Dict, Value};
 use crate::redact::redact_text;
 use crate::repos::Repo;
 use crate::testing::fixture_config as defaults;
 use crate::testing::*;
+use crate::vast::expiry::GUARD_SOURCE;
 use crate::vast::startup::{startup_script, ONSTART_LIMIT};
 
 const DEADLINE: i64 = 4_102_444_800;

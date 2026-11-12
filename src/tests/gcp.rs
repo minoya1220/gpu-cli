@@ -1604,7 +1604,7 @@ fn interactive_capacity_retry_is_one_key_and_keeps_original_deadline() {
     let flags = retry_flags();
     let clock = ctx.clock.clone();
     let watched = state.clone();
-    let result = crate::gcp::launch_with_retry(
+    let result = crate::gcp::launch::launch_with_retry(
         &ctx,
         &flags,
         &cfg,
@@ -1662,7 +1662,7 @@ fn ambiguous_create_never_offers_capacity_retry_or_disarms_timer() {
         s.ambiguous_create = true;
     }
     let cfg = crate::config::load_config(&ctx.env).unwrap();
-    assert!(crate::gcp::launch_with_retry(
+    assert!(crate::gcp::launch::launch_with_retry(
         &ctx,
         &retry_flags(),
         &cfg,
@@ -1724,7 +1724,7 @@ fn cleanup_failure_never_offers_retry_and_keeps_expiry() {
         s.fail_delete_task = true;
     }
     let cfg = crate::config::load_config(&ctx.env).unwrap();
-    assert!(crate::gcp::launch_with_retry(
+    assert!(crate::gcp::launch::launch_with_retry(
         &ctx,
         &retry_flags(),
         &cfg,
@@ -1749,7 +1749,7 @@ fn retry_does_not_extend_an_expired_deadline_or_create_again() {
     state.lock().unwrap().reject_creates = 1;
     let cfg = crate::config::load_config(&ctx.env).unwrap();
     let clock = ctx.clock.clone();
-    let result = crate::gcp::launch_with_retry(
+    let result = crate::gcp::launch::launch_with_retry(
         &ctx,
         &retry_flags(),
         &cfg,
@@ -1792,7 +1792,7 @@ fn changed_retry_estimate_requires_a_new_confirmation() {
     super::gcp_prices::cache(&env);
     state.lock().unwrap().reject_creates = 1;
     let cfg = crate::config::load_config(&ctx.env).unwrap();
-    crate::gcp::launch_with_retry(
+    crate::gcp::launch::launch_with_retry(
         &ctx,
         &retry_flags(),
         &cfg,

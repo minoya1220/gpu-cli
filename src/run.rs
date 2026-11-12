@@ -90,14 +90,15 @@ fn ssh(alias: &str, command: &str, timeout: f64) -> Cmd {
 
 /// The shared runner owns uploads, supervision, logs and downloads. A backend
 /// owns provider planning, paid-resource lifecycle and remote command transport.
-struct RunPlan {
-    gpu: Value,
-    rate: f64,
+#[derive(Debug)]
+pub(crate) struct RunPlan {
+    pub(crate) gpu: Value,
+    pub(crate) rate: f64,
     // Report request errors after publishing pricing, preserving partial JSON.
-    request: Result<Value>,
+    pub(crate) request: Result<Value>,
 }
 
-trait RunBackend {
+pub(crate) trait RunBackend {
     fn provider(&self) -> &'static str;
     fn plan(
         &self,
@@ -128,6 +129,7 @@ trait RunBackend {
 #[derive(Default)]
 struct VastBackend {
     alias: String,
+    offer: Option<Dict>,
 }
 
 impl RunBackend for VastBackend {
@@ -137,13 +139,16 @@ impl RunBackend for VastBackend {
 
     fn plan(
         &self,
-        ctx: &Ctx,
+        _ctx: &Ctx,
         flags: &RunFlags,
         cfg: &Dict,
         deadline: Timestamp,
         label: String,
     ) -> Result<RunPlan> {
-        let offer = choose(ctx, flags, cfg, &args(flags))?;
+        let offer = self
+            .offer
+            .clone()
+            .ok_or_else(|| Error::msg("No Vast offer selected."))?;
         let rate = offer_price(&offer)?;
         if !rate.is_finite() || rate < 0.0 {
             return Err(Error::msg(
@@ -320,15 +325,40 @@ fn args(flags: &RunFlags) -> UpArgs {
     }
 }
 
-fn choose(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, args: &UpArgs) -> Result<Dict> {
-    let search = OfferSearch::new(Vast::new(ctx), args, cfg)?;
+enum Selection {
+    Vast(Dict),
+    Modal(String, Option<crate::modal::Rates>),
+}
+
+fn choose(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, args: &UpArgs) -> Result<Selection> {
     if ctx.interactive() {
+        let modal_only = flags.provider.as_deref() == Some("modal");
+        let search = if modal_only {
+            None
+        } else {
+            Some(OfferSearch::new(Vast::new(ctx), args, cfg)?)
+        };
+        let modal = if flags.dry_run && flags.provider.as_deref() != Some("vast") {
+            let worker = ctx.clone();
+            let (cpu, memory) = crate::modal::resources(flags)?;
+            let rates =
+                Job::new(move || crate::modal::rates(&worker).map_err(|e| e.text().to_string()));
+            Some((rates, flags.num_gpus, cpu, memory))
+        } else {
+            None
+        };
         let wizard = crate::wizard::LaunchWizard::new(
             &ctx.env,
             crate::wizard::WizardOptions {
                 repos: Job::new(|| Ok(Vec::new())),
-                search: Some(Arc::new(search.clone())),
-                models: crate::offers::known_gpu_models(&ctx.env),
+                search: search
+                    .clone()
+                    .map(|s| Arc::new(s) as Arc<dyn crate::wizard::Search>),
+                models: if modal_only {
+                    Vec::new()
+                } else {
+                    crate::offers::known_gpu_models(&ctx.env)
+                },
                 recent_gpus: crate::history::recent_picks(&ctx.env, "gpu"),
                 choose_offer: !flags.yes && flags.offer.is_none(),
                 owner: String::new(),
@@ -339,7 +369,8 @@ fn choose(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, args: &UpArgs) -> Result<Dict
                 tpu_types: Vec::new(),
                 tpu_catalog: None,
             },
-        );
+        )
+        .with_modal(modal.clone(), modal_only);
         let picks = wizard.run(
             ctx,
             crate::wizard::Picks::new(
@@ -348,19 +379,29 @@ fn choose(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, args: &UpArgs) -> Result<Dict
                 flags.gpu.as_deref(),
             ),
         )?;
+        if let Some(name) = picks.modal {
+            return Ok(Selection::Modal(
+                name,
+                modal.and_then(|(rates, ..)| rates.result()),
+            ));
+        }
         if picks.tpu.is_some() {
             return Err(Error::Usage("gpu run supports Vast GPUs only.".into()));
         }
         if let Some(offer) = picks.offer {
-            return Ok(offer);
+            return Ok(Selection::Vast(offer));
         }
+        let search = search.ok_or_else(|| Error::Usage("Modal requires --gpu MODEL.".into()))?;
         return crate::launch::select_offer(
             ctx,
             search.offers("container", picks.gpu.as_deref())?,
             args,
-        );
+        )
+        .map(Selection::Vast);
     }
+    let search = OfferSearch::new(Vast::new(ctx), args, cfg)?;
     crate::launch::select_offer(ctx, search.offers("container", flags.gpu.as_deref())?, args)
+        .map(Selection::Vast)
 }
 
 /// `cwd` is explicit so all file tests are isolated without process-wide chdir.
@@ -392,6 +433,16 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
         }
     };
     let seconds = run_duration(expire, now)?;
+    if flags.provider.as_deref() == Some("modal") {
+        crate::modal::validate(flags, seconds)?;
+        if !flags.dry_run {
+            return Err(Error::Usage(crate::modal::NOT_LIVE.into()));
+        }
+    } else if flags.cpu.is_some() || flags.memory.is_some() {
+        return Err(Error::Usage(
+            "--cpu and --memory require --provider modal.".into(),
+        ));
+    }
     let deadline = Timestamp::from_second(now.as_second() + seconds)
         .map_err(|_| Error::Usage("Expiry out of range.".into()))?;
     let linger = if flags.linger == "0" {
@@ -467,16 +518,22 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
     if let Some(image) = &flags.image {
         cfg.insert("container_image", Value::str(image));
     }
-    // Validate generated startup and config before even searching offers.
-    crate::startup::run_script(deadline)?;
-    if !matches!(cfg.get("container_image"), Some(Value::Str(image)) if !image.is_empty()) {
+    // Vast startup/config do not apply to Modal's default Debian image.
+    if flags.provider.as_deref() != Some("modal") {
+        crate::startup::run_script(deadline)?;
+    }
+    if flags.provider.as_deref() != Some("modal")
+        && !matches!(cfg.get("container_image"), Some(Value::Str(image)) if !image.is_empty())
+    {
         return Err(Error::Usage(
             "container_image must be a non-empty string.".into(),
         ));
     }
-    let mut backend = VastBackend::default();
     phase(ctx, "launch");
-    ctx.result("provider", Value::str(backend.provider()));
+    ctx.result(
+        "provider",
+        Value::str(flags.provider.as_deref().unwrap_or("vast")),
+    );
     ctx.result("dry_run", Value::Bool(flags.dry_run));
     ctx.result("created", Value::Bool(false));
     ctx.result("destroyed", Value::Bool(false));
@@ -521,7 +578,28 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
         .unwrap_or_default()
         .to_string_lossy()
         .to_string();
-    let plan = backend.plan(ctx, flags, &cfg, deadline, label)?;
+    let mut selected_flags = flags.clone();
+    let mut backend: Box<dyn RunBackend> = if flags.provider.as_deref() == Some("modal")
+        && (flags.gpu.is_some() || !ctx.interactive())
+    {
+        Box::new(crate::modal::ModalBackend { rates: None })
+    } else {
+        match choose(ctx, flags, &cfg, &args)? {
+            Selection::Vast(offer) => Box::new(VastBackend {
+                offer: Some(offer),
+                ..VastBackend::default()
+            }),
+            Selection::Modal(name, rates) => {
+                selected_flags.provider = Some("modal".into());
+                selected_flags.gpu = Some(name);
+                ctx.result("provider", Value::str("modal"));
+                crate::modal::validate(&selected_flags, seconds)?;
+                Box::new(crate::modal::ModalBackend { rates })
+            }
+        }
+    };
+    ctx.result("provider", Value::str(backend.provider()));
+    let plan = backend.plan(ctx, &selected_flags, &cfg, deadline, label)?;
     let rate = plan.rate;
     crate::guardrails::spending(ctx, &cfg, Some(rate), Some(deadline))?;
     let estimate = rate * seconds as f64 / 3600.0;
@@ -652,7 +730,7 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
             &backend.remote(&start, 30.0).stdin(Input::Text(payload)),
             "Job startup unverified; instance will be destroyed.",
         )?;
-        follow(ctx, &backend, &id, &root, &run_id, deadline, &local)
+        follow(ctx, backend.as_ref(), &id, &root, &run_id, deadline, &local)
     })();
     // A create failure without an ID cannot be cleaned up, just as before.
     let Some(id) = created_id else {
@@ -706,7 +784,7 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
         if ctx.interrupts() < 2 {
             // Fetch bytes written during cancellation/TERM grace, too.
             if let Some(status) = last.or_else(status) {
-                let _ = finish_log(ctx, &backend, &root, &local, status.size);
+                let _ = finish_log(ctx, backend.as_ref(), &root, &local, status.size);
             }
             // The finished job shortened expiry to linger; an attached
             // download keeps the original deadline.
@@ -718,7 +796,7 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
             phase(ctx, "download");
             let downloaded = download(
                 ctx,
-                &backend,
+                backend.as_ref(),
                 &root,
                 &jobdir,
                 &flags.outputs,

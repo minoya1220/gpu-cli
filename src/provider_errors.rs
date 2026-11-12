@@ -1,6 +1,22 @@
 //! Translate known provider failure signatures once, without exposing secrets.
 use crate::error::{Error, ExitCode};
 
+/// Modal's private helper reports exception kinds, not human message signatures.
+pub(crate) fn modal(kind: &str, detail: &str) -> Error {
+    let detail = crate::redact::redact_text(detail);
+    let code = match kind {
+        "MissingToken" => ExitCode::NotSetup,
+        "AuthError" => ExitCode::AuthExpired,
+        "ResourceExhaustedError" | "SchedulingTimeout" => ExitCode::NoCapacity,
+        "NotFoundError" => ExitCode::NotFound,
+        "InstanceLost" => ExitCode::InstanceLost,
+        "CleanupUnverified" => ExitCode::CleanupUnverified,
+        "CommandTimeout" => ExitCode::CommandTimeout,
+        _ => return Error::msg(detail),
+    };
+    Error::status(code, detail)
+}
+
 /// Whether `text` contains HTTP status `code` as its own token right after
 /// a status word (`error 401`, `status: 401`), so instance
 /// and offer IDs that merely contain the digits never match.

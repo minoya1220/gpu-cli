@@ -196,6 +196,7 @@ pub fn prompt_for_picks(
             gpu: Some(gpu),
             offer: None,
             tpu: None,
+            modal: None,
             cloud: None,
         },
         offers,
@@ -418,6 +419,7 @@ pub fn launch(ctx: &Ctx, args: &UpArgs, cfg: &Dict, deadline: Option<Timestamp>)
         gpu: args.gpu.clone(),
         offer: None,
         tpu: None,
+        modal: None,
         cloud: None,
     };
     let mut tty_confirmed = false;

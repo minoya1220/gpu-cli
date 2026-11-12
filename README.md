@@ -84,6 +84,52 @@ Job exit codes pass through (`remote_exit` in JSON). **17** `job_timeout`, **18*
 
 Build checks: [Vast's base Dockerfile](https://github.com/vast-ai/base-image/blob/main/Dockerfile) installs uv into `/usr/local/bin`; a fallback installer handles other images. The fallback installs uv **0.10.4** from architecture-specific release archives, checked against pinned SHA-256 digests; VM CUDA keyring **1.1-1** is also checksum-verified before installation. The base image's [entrypoint](https://github.com/vast-ai/base-image/blob/main/ROOT/opt/instance-tools/bin/entrypoint.sh) delegates to the default/custom boot script rather than waiting on portal ports itself; custom images must provide compatible SSH/onstart behavior. Local uv 0.10.4 experiments confirmed that system-site imports alone do **not** guarantee dependency reuse during resolution (an offline reinstall of an already-present requirement was refused). No GPU rental is used in these checks.
 
+### Modal setup and dry runs (preview)
+
+Vast remains the default. Modal planning uses a bundled Python helper with the exact
+`modal==1.6.3` client pin, launched by `uv run --quiet --script`; the `modal`
+executable is not required. Install [uv](https://docs.astral.sh/uv/getting-started/installation/),
+then authenticate and check readiness:
+
+```sh
+uvx modal@1.6.3 token new
+gpu setup --provider modal
+gpu run --provider modal --gpu T4 --expire 30m --dry-run --json -- python train.py
+```
+
+Setup makes read-only calls to validate the token and report its workspace and
+environment; it creates no Modal resources and writes no credentials. Normal Modal
+profiles, `MODAL_CONFIG_PATH`, `MODAL_PROFILE` and token environment variables are
+honored. First use of the pinned helper needs network access to populate uv's cache.
+Dry runs fetch live, workspace-specific rates; offline testing can stub `uv` on PATH.
+They never create apps, Sandboxes, volumes or secrets.
+
+In a terminal, the **run --dry-run** GPU screen also includes **Modal T4**,
+**Modal H100**, etc. with live total hourly prices; type `modal` to filter them.
+Selecting one chooses Modal rather than a Vast offer. `--provider vast` and runs
+without `--dry-run` keep only the existing choices and never start the helper;
+`--provider modal` without `--gpu` lists only Modal rows. Prices load in a
+background job and do not block keyboard input; if they fail (no `uv`, no token),
+Vast rows still work and a highlighted Modal row shows a short reason, not a price.
+An unavailable quote is not a capacity promise and a missing rate fails planning
+closed.
+
+Modal accepts its own GPU names (case-insensitive, spaces become hyphens), not
+Vast consumer model aliases. Use `--num-gpus`, `--cpu` (physical cores, default 4)
+and `--memory` (GiB, default 16). The compute estimate is GPU × count + CPU +
+memory at Sandbox rates, with CPU and memory request equal to limit. `--max-price`
+and configured `max_session_spend` apply to that total. Image-build compute and
+egress are not included; this is not an invoice ceiling. No region is requested.
+`--offer`, `--disk`, `--reliability` and `--unverified` are refused. Expiry must be
+longer than 10 minutes and at most 24 hours. The planned default image is Modal's
+Debian slim with Python 3.13 (or pass `--image`). Forwarded `--env` values are
+excluded from the request and process arguments: dry-run JSON contains names only.
+
+**Live Modal runs are not yet supported** in this preview and fail with a usage
+error. Execution, downloads, verified termination and Modal `ls`/`down` recovery
+will follow separately. GPU Sandboxes can be preempted, have ephemeral storage,
+and have a maximum 24-hour lifetime; they are not persistent workspaces.
+
 ## Connect and edit
 
 ```sh
@@ -455,7 +501,7 @@ Failures set `ok:false` and add `error:{code,message,exit_code}`; `result` retai
 - `up`: `provider`, `id`, `ssh_alias`, `price_per_hour` (USD), `expires_at` (UTC), `created`, `expiry_armed`, `ready`, `setup_done`, `dry_run`; dry runs also include the exact unmodified `request` that would be sent. Unknown values are null; `ssh_alias` stays null until its SSH alias is configured (Vast: by `--expire` or `--wait`; TPU: by `--wait`), or use `gpu wait`. Check `created` and `expiry_armed` before assuming success.
 - `wait`: `id`, `ssh_alias`, `ready`, `setup_done` (null if unknown, false while pending, true when finished), plus `setup_ok` when finished; SSH-ready can still mean setup failed. `up` reports the same setup fields when observed. `exec`/`cp` also carry these readiness fields; `exec`/`cp` add `exit_code`, `stdout`, `stderr`; `cp` also returns `source`, `destination`. Captured streams are UTF-8 text (invalid bytes replaced); plain execution preserves bytes.
 - `stop`/`down`: `id`, `state` (`stopped`/`destroyed`/`already_absent`); unknown IDs fail before mutation rather than claiming billing stopped. `down` of an ID gpu recorded (SSH alias or pending TPU expiry task) whose instance is already gone cleans those up and reports `already_absent`. `expire`: `id`, `action`, `expiry:{status,deadlines}` (UTC list).
-- `setup`: `provider`, `project`, `action`, `dry_run`, plus `ready` for a selected provider or `vast_ready`/`gcp_ready` for status. GCP plans also report `queue` and `enable_apis` when applicable.
+- `setup`: `provider`, `project`, `action`, `dry_run`, plus `ready` for a selected provider or `vast_ready`/`gcp_ready` for status. GCP plans also report `queue` and `enable_apis` when applicable. Modal also reports `workspace`, `environment` and `client_version`.
 - `ssh`: `id`, `ssh_command`; `edit`/`cursor`: `id`, `ssh_alias`, `directory`, `editor`.
 
 Exit codes: **0** success, **1** other failure, **2** usage/missing flags, **10** no capacity, including a Vast offer that cannot start now (change model/zone), **11** over max price (raise limit/change hardware), **12** not set up (`gpu setup`), **13** authentication expired (sign in again), **14** readiness timeout (inspect state/retry with a longer timeout), **15** spending guardrail (shorten expiry/choose cheaper hardware/change cap), **16** `not_found` (refresh IDs with `gpu ls`). `exec`/`cp`/`run` preserve the job/subprocess status, which may overlap these codes; JSON distinguishes `remote_exit`. `run` also uses **17** `job_timeout`, **18** `instance_lost`, **19** `cleanup_unverified`. `exec`/`cp` use **20** `command_timeout` for their optional execution deadline. Transient/unreadable provider reads use `provider_unavailable` (exit 1); wait loops retry until their deadline, while authentication and definite not-found errors stop early. Unlike `up`, `run` attempts verified destruction after any failure once its created ID is known.
@@ -496,7 +542,7 @@ cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
 ```
 
-Tests use `Runner` mocks and PATH stubs, never real Vast or Google Cloud accounts. Use a temporary HOME for SSH config tests. `tests/golden/` pins serialization, numeric formatting, and other byte contracts; update prose expectations deliberately, not unrelated formats. `docs/PLAN.md` is historical implementation context.
+Tests use `Runner` mocks and PATH stubs (including a stubbed `uv` for the Modal helper), never real Vast, Google Cloud or Modal accounts. Use a temporary HOME for SSH config tests. `tests/golden/` pins serialization, numeric formatting, and other byte contracts; update prose expectations deliberately, not unrelated formats. `docs/PLAN.md` is historical implementation context.
 
 ### Workspace and local files
 
@@ -510,7 +556,7 @@ Vast's documented onstart limits disagree: the [API reference](https://docs.vast
 
 `src/expiry.rs` sends `remote/expiry_remote.sh` over SSH stdin; `remote/expiry_guard.sh` is the boot guard and shares its state file, lock and `/proc` worker identity. The Linux host needs bash, curl, flock, setsid, writable `~/.local/state/gpu-expire`, and outbound HTTPS. No init manager or package installation is needed. The detached worker's readiness handshake and `/proc` identity are verified before success. State stores the deadline and worker identity, never the key. A shared lock serializes replacement, cancellation, and destruction.
 
-Local network calls use authenticated `gh`, `vastai`, and (for TPUs) `gcloud`, plus authenticated, read-only curl calls to Google's TPU, Cloud Tasks and public pricing APIs. TPU expiry runs in Cloud Tasks using the project's default Compute identity, not in a guest worker. The Vast remote expiry worker is the exception: it uses only Vast-injected `CONTAINER_ID` and `CONTAINER_API_KEY`, from its environment, `/etc/environment`, or PID 1. ID mismatch or a missing scoped key fails closed. No account key, local Vast config, or create-response key is uploaded. The key reaches curl on stdin, not argv; requests use no proxy or redirects. Never print raw Vast output or remote diagnostics that could contain credentials. Neovim release archives use pinned SHA-256 digests in `src/editors.rs`.
+Local network calls use authenticated `gh`, `vastai`, (for TPUs) `gcloud`, (for Modal) the pinned `remote/modal_helper.py` via `uv`, plus authenticated, read-only curl calls to Google's TPU, Cloud Tasks and public pricing APIs. TPU expiry runs in Cloud Tasks using the project's default Compute identity, not in a guest worker. The Vast remote expiry worker is the exception: it uses only Vast-injected `CONTAINER_ID` and `CONTAINER_API_KEY`, from its environment, `/etc/environment`, or PID 1. ID mismatch or a missing scoped key fails closed. No account key, local Vast config, or create-response key is uploaded. The key reaches curl on stdin, not argv; requests use no proxy or redirects. Never print raw Vast output or remote diagnostics that could contain credentials. Neovim release archives use pinned SHA-256 digests in `src/editors.rs`.
 
 Vast references: [instance-scoped keys](https://docs.vast.ai/api-reference/hello-world), [container environment](https://docs.vast.ai/guides/instances/docker-environment), [destroy endpoint](https://docs.vast.ai/api-reference/instances/destroy-instance), [VM environment](https://docs.vast.ai/linux-virtual-machines).
 

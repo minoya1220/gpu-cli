@@ -552,7 +552,7 @@ impl RunBackend for ModalBackend {
 /// GNU tar runs the checkpoint action; other tars keep the fixed grace.
 fn upload(root: &str, extract: &str) -> String {
     format!(
-        "mkdir -p {root} && printf '%s\\n' '#!/bin/sh' 'date +%s >{root}/upload' >{root}/beat && chmod 700 {root}/beat || exit; case $(tar --version 2>/dev/null) in *'GNU tar'*) export TAR_OPTIONS='--checkpoint=100 --checkpoint-action=exec={root}/beat';; esac; {extract}"
+        "mkdir -p {root} && printf '%s\\n' '#!/bin/sh' 'date +%s >{root}/upload.tmp && mv -f {root}/upload.tmp {root}/upload' >{root}/beat && chmod 700 {root}/beat || exit; case $(tar --version 2>/dev/null) in *'GNU tar'*) export TAR_OPTIONS='--checkpoint=100 --checkpoint-action=exec={root}/beat';; esac; {extract}"
     )
 }
 

@@ -414,12 +414,13 @@ fn upload_beats_only_while_bytes_arrive() {
     stdin.write_all(head).unwrap();
     stdin.flush().unwrap();
     let until = Instant::now() + Duration::from_secs(10);
-    while !beat.is_file() {
-        assert!(Instant::now() < until, "no beat while bytes arrived");
+    while !fs::read_to_string(&beat).is_ok_and(|s| s.trim().parse::<u64>().is_ok()) {
+        assert!(
+            Instant::now() < until,
+            "no numeric beat while bytes arrived"
+        );
         std::thread::sleep(Duration::from_millis(50));
     }
-    let stamp = fs::read_to_string(&beat).unwrap();
-    assert!(stamp.trim().parse::<u64>().is_ok(), "{stamp:?}");
     std::thread::sleep(Duration::from_millis(500));
     fs::remove_file(&beat).unwrap();
     std::thread::sleep(Duration::from_secs(2));

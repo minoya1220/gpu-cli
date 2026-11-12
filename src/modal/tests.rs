@@ -361,6 +361,35 @@ fn upload_extracts_small_archives_promptly_and_keeps_tar_status() {
     assert_eq!(fs::read(t.root.join("target/job.py")).unwrap(), b"hi\n");
 }
 
+#[test]
+fn upload_writes_a_beat_script_that_stamps_the_keeper_clock() {
+    let t = TestEnv::new();
+    let root = t.root.join("keeper");
+    let status = std::process::Command::new("bash")
+        .args(["-c", &upload(&root.to_string_lossy(), "true")])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let out = std::process::Command::new(root.join("beat"))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let after = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let stamp = fs::read_to_string(root.join("upload")).unwrap();
+    let beat: u64 = stamp.trim().parse().unwrap_or_else(|_| panic!("{stamp:?}"));
+    assert!(
+        (before..=after).contains(&beat),
+        "{beat} not in {before}..={after}"
+    );
+}
+
 /// GNU tar is what Modal's Debian images ship; macOS has bsdtar.
 #[cfg(target_os = "linux")]
 #[test]

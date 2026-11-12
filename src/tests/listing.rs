@@ -28,23 +28,23 @@ fn one_table_aligns_both_providers_and_formats_prices_status_and_ids() {
 fn colliding_short_names_fall_back_to_unique_node_names_or_full_ids() {
     for (input, expected) in [
         (
-            r#"[{"id":"gcp:p1:z1:gpu-100-same"},{"id":"gcp:p1:z2:gpu-200-same"}]"#,
+            r#"[{"id":"gcp:p1:z1:gpu-100-same","provider":"gcp"},{"id":"gcp:p1:z2:gpu-200-same","provider":"gcp"}]"#,
             vec!["gpu-100-same", "gpu-200-same"],
         ),
         (
-            r#"[{"id":"gcp:p1:z1:gpu-100-same"},{"id":"gcp:p1:z2:gpu-100-same"}]"#,
+            r#"[{"id":"gcp:p1:z1:gpu-100-same","provider":"gcp"},{"id":"gcp:p1:z2:gpu-100-same","provider":"gcp"}]"#,
             vec!["gcp:p1:z1:gpu-100-same", "gcp:p1:z2:gpu-100-same"],
         ),
         (
-            r#"[{"id":"gcp:p1:z1:gpu-100-same"},{"id":"gcp:p1:z2:gpu-same"}]"#,
+            r#"[{"id":"gcp:p1:z1:gpu-100-same","provider":"gcp"},{"id":"gcp:p1:z2:gpu-same","provider":"gcp"}]"#,
             vec!["gpu-100-same", "gcp:p1:z2:gpu-same"],
         ),
         (
-            r#"[{"id":"gcp:p1:z1:custom-name"},{"id":123}]"#,
+            r#"[{"id":"gcp:p1:z1:custom-name","provider":"gcp"},{"id":123}]"#,
             vec!["custom-name", "123"],
         ),
         (
-            r#"[{"id":"gcp:p1:z1:123"},{"id":123}]"#,
+            r#"[{"id":"gcp:p1:z1:123","provider":"gcp"},{"id":123}]"#,
             vec!["gcp:p1:z1:123", "123"],
         ),
     ] {

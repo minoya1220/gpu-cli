@@ -13,6 +13,7 @@ use crate::launch::UpArgs;
 use crate::offers::{offer_price, OfferSearch};
 use crate::picker::Job;
 use crate::process::{Cmd, Input, Output};
+use crate::provider::Provider;
 use crate::pyfmt::{shell_join, shell_quote};
 use crate::pyjson::{self, Dict, Value};
 use crate::run_files;
@@ -91,7 +92,7 @@ pub(crate) struct RunPlan {
 }
 
 pub(crate) trait RunBackend {
-    fn provider(&self) -> &'static str;
+    fn provider(&self) -> Provider;
     fn plan(
         &self,
         ctx: &Ctx,
@@ -136,8 +137,8 @@ struct VastBackend {
 }
 
 impl RunBackend for VastBackend {
-    fn provider(&self) -> &'static str {
-        "vast"
+    fn provider(&self) -> Provider {
+        Provider::Vast
     }
 
     fn plan(
@@ -336,13 +337,13 @@ enum Selection {
 
 fn choose(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, args: &UpArgs) -> Result<Selection> {
     if ctx.interactive() {
-        let modal_only = flags.provider.as_deref() == Some("modal");
+        let modal_only = flags.provider == Some(Provider::Modal);
         let search = if modal_only {
             None
         } else {
             Some(OfferSearch::new(Vast::new(ctx), args, cfg)?)
         };
-        let modal = if flags.provider.as_deref() != Some("vast") {
+        let modal = if flags.provider != Some(Provider::Vast) {
             let worker = ctx.clone();
             let (cpu, memory) = crate::modal::resources(flags)?;
             let rates =
@@ -437,7 +438,7 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
         }
     };
     let seconds = run_duration(expire, now)?;
-    if flags.provider.as_deref() == Some("modal") {
+    if flags.provider == Some(Provider::Modal) {
         crate::modal::validate(flags, seconds)?;
     } else if flags.cpu.is_some() || flags.memory.is_some() {
         return Err(Error::usage("--cpu and --memory require --provider modal."));
@@ -516,10 +517,10 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
         cfg.insert("container_image", Value::str(image));
     }
     // Vast startup/config do not apply to Modal's default Debian image.
-    if flags.provider.as_deref() != Some("modal") {
+    if flags.provider != Some(Provider::Modal) {
         crate::startup::run_script(deadline)?;
     }
-    if flags.provider.as_deref() != Some("modal")
+    if flags.provider != Some(Provider::Modal)
         && !matches!(cfg.get("container_image"), Some(Value::Str(image)) if !image.is_empty())
     {
         return Err(Error::usage("container_image must be a non-empty string."));
@@ -527,7 +528,7 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
     phase(ctx, "launch");
     ctx.result(
         "provider",
-        Value::str(flags.provider.as_deref().unwrap_or("vast")),
+        Value::str(flags.provider.unwrap_or(Provider::Vast).key()),
     );
     ctx.result("dry_run", Value::Bool(flags.dry_run));
     ctx.result("created", Value::Bool(false));
@@ -574,26 +575,25 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
         .to_string_lossy()
         .to_string();
     let mut selected_flags = flags.clone();
-    let mut backend: Box<dyn RunBackend> = if flags.provider.as_deref() == Some("modal")
-        && (flags.gpu.is_some() || !ctx.interactive())
-    {
-        Box::new(crate::modal::ModalBackend::new(None))
-    } else {
-        match choose(ctx, flags, &cfg, &args)? {
-            Selection::Vast(offer) => Box::new(VastBackend {
-                offer: Some(offer),
-                ..VastBackend::default()
-            }),
-            Selection::Modal(name, rates) => {
-                selected_flags.provider = Some("modal".into());
-                selected_flags.gpu = Some(name);
-                ctx.result("provider", Value::str("modal"));
-                crate::modal::validate(&selected_flags, seconds)?;
-                Box::new(crate::modal::ModalBackend::new(rates))
+    let mut backend: Box<dyn RunBackend> =
+        if flags.provider == Some(Provider::Modal) && (flags.gpu.is_some() || !ctx.interactive()) {
+            Box::new(crate::modal::ModalBackend::new(None))
+        } else {
+            match choose(ctx, flags, &cfg, &args)? {
+                Selection::Vast(offer) => Box::new(VastBackend {
+                    offer: Some(offer),
+                    ..VastBackend::default()
+                }),
+                Selection::Modal(name, rates) => {
+                    selected_flags.provider = Some(Provider::Modal);
+                    selected_flags.gpu = Some(name);
+                    ctx.result("provider", Value::str(Provider::Modal.key()));
+                    crate::modal::validate(&selected_flags, seconds)?;
+                    Box::new(crate::modal::ModalBackend::new(rates))
+                }
             }
-        }
-    };
-    ctx.result("provider", Value::str(backend.provider()));
+        };
+    ctx.result("provider", Value::str(backend.provider().key()));
     let plan = backend.plan(ctx, &selected_flags, &cfg, deadline, label)?;
     let rate = plan.rate;
     crate::guardrails::spending(ctx, &cfg, Some(rate), Some(deadline))?;
@@ -610,14 +610,14 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
     if !flags.yes
         && !crate::prompt::confirm(
             ctx,
-            &format!(
-                "Run {} ({} files, {} bytes) at ${}/hr, at most {expire} (up to ${})? Type 'yes': ",
+            Some(&format!(
+                "Run {} ({} files, {} bytes) at ${}/hr, at most {expire} (up to ${})?",
                 shell_join(&flags.command),
                 upload.files.len(),
                 upload.bytes,
                 crate::pyfmt::fixed(rate, 3),
                 crate::pyfmt::fixed(estimate, 3)
-            ),
+            )),
         )?
     {
         return Err(Error::Cancelled(130));
@@ -647,12 +647,13 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
     let mut local = cwd.join("gpu-runs");
     let mut paths = None;
     let mut launched = false;
+    let provider = backend.provider();
     let job = (|| {
         let id = backend.launch(ctx, &request, deadline, flags.timeout, &mut |id| {
             // Record ownership before any local I/O can fail. Launch readiness
             // failures must still reach provider-state-verified destruction.
             created_id = Some(id.to_string());
-            run_id = if id.starts_with("modal:") {
+            run_id = if provider == Provider::Modal {
                 ctx.result_snapshot()
                     .get("run_id")
                     .and_then(Value::as_str)
@@ -754,7 +755,7 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
     }
     // Ephemeral Modal files cannot be recovered once the sandbox is lost.
     // Do not replace exit 18 with the inevitable download transport failure.
-    let modal_lost = backend.provider() == "modal"
+    let modal_lost = backend.provider() == Provider::Modal
         && (matches!(outcome, Err(Error::Status(ExitCode::InstanceLost, _)))
             || (outcome.is_err() && backend.lost(ctx, &id)));
     if modal_lost && ctx.interrupts() == 0 {
@@ -828,7 +829,7 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
                             | Error::Status(ExitCode::JobTimeout | ExitCode::InstanceLost, _))
                     )
                 {
-                    outcome = if backend.provider() == "modal" && backend.lost(ctx, &id) {
+                    outcome = if backend.provider() == Provider::Modal && backend.lost(ctx, &id) {
                         Err(Error::status(
                             ExitCode::InstanceLost,
                             "Modal sandbox ended during download; ephemeral outputs are lost.",
@@ -941,7 +942,7 @@ fn follow(
                     ExitCode::NotSetup | ExitCode::AuthExpired | ExitCode::CommandTimeout,
                     _,
                 ),
-            ) if backend.provider() == "modal" => return Err(error),
+            ) if backend.provider() == Provider::Modal => return Err(error),
             response => response.ok(),
         };
         if response.as_ref().is_some_and(|o| o.stdout.trim() == "lost") {
@@ -978,7 +979,7 @@ fn follow(
                 &backend.remote(&command, 15.0).stdout_file(chunk.path()),
                 "Log connection interrupted.",
             ) {
-                if backend.provider() == "modal"
+                if backend.provider() == Provider::Modal
                     && matches!(
                         error,
                         Error::Status(

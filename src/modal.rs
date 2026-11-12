@@ -225,7 +225,13 @@ pub fn check(ctx: &Ctx) -> Result<()> {
     }
     ctx.result("provider", Value::str("modal"));
     ctx.result("ready", Value::Bool(true));
-    ctx.println(&format!("Modal  ✓ set up (workspace: {})\nNext: gpu run --provider modal --gpu T4 --expire 30m --dry-run -- <command>", ctx.safe_diagnostic(workspace)))
+    ctx.println(&format!(
+        "{}  {} (workspace: {})",
+        crate::provider::Provider::Modal.label(),
+        crate::setup::READY,
+        ctx.safe_diagnostic(workspace)
+    ))?;
+    ctx.println("Next: gpu run --provider modal --gpu T4 --expire 30m --dry-run -- <command>")
 }
 
 #[derive(Clone)]
@@ -286,8 +292,8 @@ impl ModalBackend {
     }
 }
 impl RunBackend for ModalBackend {
-    fn provider(&self) -> &'static str {
-        "modal"
+    fn provider(&self) -> crate::provider::Provider {
+        crate::provider::Provider::Modal
     }
     fn plan(
         &self,
@@ -610,7 +616,7 @@ pub fn down(ctx: &Ctx, id: &str, yes: bool) -> Result<()> {
     // A missing sandbox requested by the user is exit 16; absence after our
     // own termination request, in contrast, verifies successful cleanup.
     status(ctx, id)?;
-    if !yes && !crate::prompt::confirm(ctx, &format!("Terminate sandbox {id}? Type 'yes': "))? {
+    if !yes && !crate::prompt::confirm(ctx, Some(&format!("Terminate sandbox {id}?")))? {
         return Err(Error::Cancelled(130));
     }
     terminate(ctx, id)?;

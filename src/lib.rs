@@ -251,7 +251,9 @@ fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
                 || flags.spot
                 || flags.on_demand;
             // TPU flags imply Google Cloud; only an explicit --provider vast rejects them.
-            if flags.provider.as_deref() == Some("gcp") || (flags.provider.is_none() && tpu_flags) {
+            if flags.provider == Some(crate::provider::Provider::Gcp)
+                || (flags.provider.is_none() && tpu_flags)
+            {
                 gcp::launch(ctx, &flags, &cfg, up_deadline)?;
                 return remote::after_up(ctx, wait && !flags.dry_run, timeout, wait_setup);
             }
@@ -268,21 +270,13 @@ fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
             long,
             provider,
             envelope,
-        } => provider::ls(ctx, &cfg, json, long, provider.as_deref(), envelope),
+        } => provider::ls(ctx, &cfg, json, long, provider, envelope),
         Command::Expire { .. } => {
             let (id, action, deadline) = expire_plan.expect("parsed above");
             ctx.result("action", pyjson::Value::str(&action));
-            let Some(id) = provider::selected_id(ctx, &cfg, id.as_deref(), "expire")? else {
-                return Ok(());
-            };
-            match provider::InstanceId::parse(&id)? {
-                provider::InstanceId::Vast(id) => {
-                    commands::expire_instance(ctx, &id, &action, deadline).map(drop)
-                }
-                provider::InstanceId::Gcp(id) => {
-                    gcp_expiry::manage(ctx, &cfg, &id, &action, deadline)
-                }
-                provider::InstanceId::Modal(_) => Err(modal::unsupported()),
+            match provider::select(ctx, &cfg, id.as_deref(), "expire")? {
+                Some(instance) => instance.expire(ctx, &cfg, &action, deadline),
+                None => Ok(()),
             }
         }
         Command::Edit {
@@ -290,56 +284,26 @@ fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
             editor,
             nvim_config,
         } => {
-            let Some(id) = provider::selected_id(ctx, &cfg, id.as_deref(), "edit")? else {
+            let Some(instance) = provider::select(ctx, &cfg, id.as_deref(), "edit")? else {
                 return Ok(());
             };
             let nvim_config = match nvim_config {
                 Some(config) => Some(pyjson::Value::Str(config)),
                 None => config::nvim_config(&cfg)?,
             };
-            match provider::InstanceId::parse(&id)? {
-                provider::InstanceId::Vast(id) => commands::edit_instance(
-                    ctx,
-                    &id,
-                    editor.as_deref(),
-                    nvim_config.as_ref(),
-                    120.0,
-                ),
-                provider::InstanceId::Gcp(id) => {
-                    gcp_ssh::edit(ctx, &cfg, &id, editor.as_deref(), nvim_config.as_ref())
-                }
-                provider::InstanceId::Modal(_) => Err(modal::unsupported()),
-            }
+            instance.edit(ctx, editor.as_deref(), nvim_config.as_ref())
         }
-        Command::Ssh { id, exec } => {
-            let Some(id) = provider::selected_id(ctx, &cfg, id.as_deref(), "ssh")? else {
-                return Ok(());
-            };
-            match provider::InstanceId::parse(&id)? {
-                provider::InstanceId::Vast(id) => commands::ssh(ctx, &id, exec),
-                provider::InstanceId::Gcp(id) => gcp_ssh::ssh(ctx, &id, exec),
-                provider::InstanceId::Modal(_) => Err(modal::unsupported()),
-            }
-        }
-        Command::Stop { id } => {
-            let Some(id) = provider::selected_id(ctx, &cfg, id.as_deref(), "stop")? else {
-                return Ok(());
-            };
-            match provider::InstanceId::parse(&id)? {
-                provider::InstanceId::Vast(id) => commands::lifecycle(ctx, &id, false, false),
-                provider::InstanceId::Gcp(id) => gcp::lifecycle(ctx, &id, &cfg, false, false),
-                provider::InstanceId::Modal(_) => Err(modal::unsupported()),
-            }
-        }
-        Command::Down { id, yes } => {
-            let Some(id) = provider::selected_id(ctx, &cfg, id.as_deref(), "down")? else {
-                return Ok(());
-            };
-            match provider::InstanceId::parse(&id)? {
-                provider::InstanceId::Vast(id) => commands::lifecycle(ctx, &id, true, yes),
-                provider::InstanceId::Gcp(id) => gcp::lifecycle(ctx, &id, &cfg, true, yes),
-                provider::InstanceId::Modal(id) => modal::down(ctx, &id, yes),
-            }
-        }
+        Command::Ssh { id, exec } => match provider::select(ctx, &cfg, id.as_deref(), "ssh")? {
+            Some(instance) => instance.ssh(ctx, exec),
+            None => Ok(()),
+        },
+        Command::Stop { id } => match provider::select(ctx, &cfg, id.as_deref(), "stop")? {
+            Some(instance) => instance.stop(ctx, &cfg),
+            None => Ok(()),
+        },
+        Command::Down { id, yes } => match provider::select(ctx, &cfg, id.as_deref(), "down")? {
+            Some(instance) => instance.down(ctx, &cfg, yes),
+            None => Ok(()),
+        },
     }
 }

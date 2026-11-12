@@ -1,59 +1,20 @@
-//! `ls`, `ssh`, `stop`, `down`, `edit` and `expire`, plus the
-//! polling shared by them.
+//! Vast instance commands: SSH readiness, `ssh`, `stop`, `down` and
+//! `expire`, plus the polling shared by them.
 
 use jiff::Timestamp;
 
 use crate::ctx::Ctx;
-use crate::editors::{check_editor, editor_label, editor_screen, launch_editor, EDITORS};
 use crate::error::{Error, Result};
 use crate::expiry::{expiry_summary, manage_expiry};
-use crate::history::{recent_picks, record_picks_best_effort as record_picks};
-use crate::instances::{repo_name, select_instance};
-use crate::offers::offer_dicts;
-use crate::picker::pick;
+use crate::instances::repo_name;
 use crate::process::RunError;
 use crate::prompt::confirm;
 use crate::pyfmt::{general, py_str, truthy};
-use crate::pyjson::{self, Dict, Value};
-use crate::redact::{redact, redact_text};
+use crate::pyjson::{Dict, Value};
+use crate::redact::redact_text;
 use crate::ssh_config::{has_host, remove_host, update_host, HostError};
 use crate::vast::run;
 use crate::vast::{find_instance, list_instances};
-
-pub fn ls(ctx: &Ctx, json: bool) -> Result<()> {
-    let raw = run(ctx, &["vastai", "show", "instances", "--raw"], None)?;
-    let value = crate::vast::parse_reply(&raw)?;
-    if json {
-        ctx.println(&pyjson::dumps(&redact(&value), Some(1)))
-    } else {
-        render_instances(ctx, &value)
-    }
-}
-
-pub fn render_instances(ctx: &Ctx, instances: &Value) -> Result<()> {
-    if !truthy(instances) {
-        return ctx.println("No instances. Launch one: gpu up");
-    }
-    crate::instances::render_table(ctx, &offer_dicts(instances.clone())?, false)
-}
-
-/// The given ID, or one picked from the live instance list (`None` when
-/// there is nothing to pick).
-pub fn selected_id(ctx: &Ctx, id: Option<&str>, command: &str) -> Result<Option<String>> {
-    match id {
-        Some(id) => Ok(Some(id.to_string())),
-        None if !ctx.interactive() => {
-            Err(Error::usage("Missing instance ID").next(format!("gpu {command} ID")))
-        }
-        None => select_instance(ctx, &list_instances(ctx, None)?, command),
-    }
-}
-
-pub fn last_editor(env: &crate::ctx::Env) -> Option<String> {
-    recent_picks(env, "editor")
-        .into_iter()
-        .find(|e| EDITORS.iter().any(|(key, _)| key == e))
-}
 
 /// Bounded provider read with typed retryability.
 fn poll_instances(ctx: &Ctx, timeout: f64) -> Result<Vec<Dict>> {
@@ -206,42 +167,6 @@ pub(crate) fn wait_for_ssh_with_hint(
     }
 }
 
-pub fn edit_instance(
-    ctx: &Ctx,
-    instance_id: &str,
-    editor: Option<&str>,
-    nvim_config: Option<&Value>,
-    timeout: f64,
-) -> Result<()> {
-    let editor = match editor.map(String::from).or_else(|| last_editor(&ctx.env)) {
-        Some(editor) => editor,
-        None => {
-            if !ctx.interactive() {
-                return Err(Error::usage(
-                    format!("No previous editor; specify --editor cursor|code|zed|nvim. Example: gpu edit {instance_id} --editor code"),
-                ));
-            }
-            pick(ctx, editor_screen())?
-        }
-    };
-    check_editor(&ctx.env, &editor)?;
-    let (alias, directory) = wait_for_ssh(ctx, instance_id, timeout)?;
-    ctx.result("ssh_alias", Value::str(&alias));
-    ctx.result("directory", Value::str(&directory));
-    ctx.result("editor", Value::str(&editor));
-    let nvim_config = if editor == "nvim" {
-        crate::config::nvim_config_text(nvim_config)?
-    } else {
-        None
-    };
-    launch_editor(ctx, &editor, &alias, &directory, nvim_config.as_deref())?;
-    record_picks(ctx, &[("editor", &editor)]);
-    ctx.println(&format!(
-        "Opened {} at {directory} on {alias}.",
-        editor_label(&editor).unwrap_or(&editor)
-    ))
-}
-
 pub fn expire_instance(
     ctx: &Ctx,
     instance_id: &str,
@@ -308,13 +233,7 @@ pub fn lifecycle(ctx: &Ctx, instance_id: &str, destroy: bool, yes: bool) -> Resu
         .filter(|name| truthy(name))
         .map(py_str)
         .unwrap_or_else(|| "unknown GPU".into());
-    if destroy
-        && !yes
-        && !confirm(
-            ctx,
-            &format!("Destroy instance {instance_id}? Type 'yes' to confirm: "),
-        )?
-    {
+    if destroy && !yes && !confirm(ctx, Some(&format!("Destroy instance {instance_id}?")))? {
         return ctx.println("Cancelled.");
     }
     let action = if destroy { "destroy" } else { "stop" };

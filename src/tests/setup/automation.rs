@@ -1,6 +1,29 @@
 use super::*;
 
 #[test]
+fn setup_status_lists_every_provider_with_its_readiness() {
+    let (env, ctx, _runner, _state) = fixture();
+    assert_eq!(main(&ctx, &["setup"]), 0, "{}", err(&ctx));
+    let printed = out(&ctx);
+    for row in [
+        "Vast.ai       ✓ set up",
+        "Google Cloud  not set up",
+        "Modal         not set up",
+    ] {
+        assert!(printed.contains(row), "{printed}");
+    }
+    assert_eq!(main(&ctx, &["setup", "--json"]), 0);
+    let object = dict(&out(&ctx));
+    let result = object.get("result").unwrap().as_dict().unwrap();
+    assert_eq!(result.get("modal_ready"), Some(&Value::Bool(false)));
+    std::fs::write(env.home.join(".modal.toml"), "").unwrap();
+    assert_eq!(main(&ctx, &["setup", "--json"]), 0);
+    let object = dict(&out(&ctx));
+    let result = object.get("result").unwrap().as_dict().unwrap();
+    assert_eq!(result.get("modal_ready"), Some(&Value::Bool(true)));
+}
+
+#[test]
 fn setup_json_reports_status_plan_applied_and_removed_results() {
     let (_env, ctx, _runner, _state) = fixture();
     assert_eq!(main(&ctx, &["setup", "--json"]), 0);

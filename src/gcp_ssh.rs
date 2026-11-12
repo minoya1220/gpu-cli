@@ -371,51 +371,22 @@ fn workspace(node: &Dict) -> Result<&str> {
     Ok(directory)
 }
 
-pub fn edit(
-    ctx: &Ctx,
-    cfg: &Dict,
-    id: &TpuId,
-    editor: Option<&str>,
-    nvim_config: Option<&Value>,
-) -> Result<()> {
-    ctx.require_gcloud()?;
-    let editor = match editor
-        .map(String::from)
-        .or_else(|| crate::commands::last_editor(&ctx.env))
-    {
-        Some(e) => e,
-        None if ctx.interactive() => crate::picker::pick(ctx, crate::editors::editor_screen())?,
-        None => {
-            return Err(Error::usage("Choose an editor")
-                .next(format!("gpu edit {} --editor code", id.cli())))
-        }
-    };
-    crate::editors::check_editor(&ctx.env, &editor)?;
+/// Wait for SSH and write the managed alias an editor connects through.
+pub(crate) fn editor_target(ctx: &Ctx, id: &TpuId, editor: &str) -> Result<crate::editors::Target> {
     let node = wait_for_ssh(
         ctx,
         id,
         &format!("gpu edit {} --editor {editor}", id.cli()),
-        120.0,
+        crate::editors::EDITOR_WAIT,
     )?;
-    let directory = workspace(&node)?;
-    ctx.result("directory", Value::str(directory));
-    ctx.result("editor", Value::str(&editor));
-    ctx.result("ssh_alias", Value::str(alias(id)));
+    let directory = workspace(&node)?.to_string();
     let mut dry = ssh_args(id);
     dry.push("--dry-run".into());
     let command = gcp::run_timeout(ctx, &dry, &format!("gpu ssh {} --exec", id.cli()), 15.0)?;
     save(ctx, id, &stanza(id, &command)?)?;
-    let configured = crate::config::nvim_config(cfg)?;
-    let nvim = if editor == "nvim" {
-        crate::config::nvim_config_text(nvim_config.or(configured.as_ref()))?
-    } else {
-        None
-    };
-    crate::editors::launch_editor(ctx, &editor, &alias(id), directory, nvim.as_deref())?;
-    crate::history::record_picks_best_effort(ctx, &[("editor", &editor)]);
-    ctx.println(&format!(
-        "Opened {} at {directory} on {}.",
-        crate::editors::editor_label(&editor).unwrap_or(&editor),
-        id.cli()
-    ))
+    Ok(crate::editors::Target {
+        alias: alias(id),
+        directory,
+        shown: id.cli(),
+    })
 }

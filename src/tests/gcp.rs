@@ -648,6 +648,37 @@ fn explicit_ssh_routes_without_listing_and_exec_uses_gcloud() {
 }
 
 #[test]
+fn tpu_edit_shares_the_vast_editor_messages_and_result_order() {
+    let (env, ctx, _runner, state) = fixture();
+    state.lock().unwrap().nodes.push(node(false));
+    assert_eq!(main(&ctx, &["edit", ID]), 2);
+    assert_eq!(
+        err(&ctx),
+        format!(
+            "No previous editor; specify --editor cursor|code|zed|nvim. Next: gpu edit {ID} --editor code\n"
+        )
+    );
+    env.executable("code", "#!/bin/sh\nexit 0\n");
+    assert_eq!(
+        main(&ctx, &["edit", ID, "--editor", "code", "--json"]),
+        0,
+        "{}",
+        err(&ctx)
+    );
+    let object = dict(&out(&ctx));
+    let keys = object
+        .get("result")
+        .unwrap()
+        .as_dict()
+        .unwrap()
+        .iter()
+        .map(|(key, _)| key.clone())
+        .collect::<Vec<_>>();
+    let tail = &keys[keys.len() - 3..];
+    assert_eq!(tail, ["ssh_alias", "directory", "editor"]);
+}
+
+#[test]
 fn edit_reuses_gcloud_user_keys_and_workspace_in_temp_home() {
     let (env, ctx, runner, state) = fixture();
     env.executable("code", "#!/bin/sh\nexit 0\n");
@@ -717,7 +748,7 @@ fn every_tpu_editor_waits_for_creating_and_ssh_key_propagation_without_mutating_
             }
         }
         assert_eq!(
-            crate::commands::last_editor(&ctx.env).as_deref(),
+            crate::editors::last_editor(&ctx.env).as_deref(),
             Some(editor)
         );
     }

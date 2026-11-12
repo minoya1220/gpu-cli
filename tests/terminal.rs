@@ -906,7 +906,10 @@ fn test_vast_confirmation_left_restores_offer_and_only_yes_enter_creates() {
     .read_in_chunks(16);
     term.wait(on("Offer: RTX 4090"));
     term.wait(shows("id=100"));
-    term.press_until(RIGHT, with_footer(shows("Type yes:"), "← back"));
+    term.press_until(
+        RIGHT,
+        with_footer(shows("Type 'yes' to confirm:"), "← back"),
+    );
     assert_eq!(
         term.title(),
         "Launch RTX 4090 container for gpu-cli at $0.30/hr?"
@@ -934,8 +937,11 @@ fn test_vast_confirmation_left_restores_offer_and_only_yes_enter_creates() {
         .calls()
         .iter()
         .any(|a| a.iter().any(|s| s == "create")));
-    term.press_until(ENTER, with_footer(shows("Type yes:"), "← back"));
-    assert!(!shows("Type yes: ye")(&term));
+    term.press_until(
+        ENTER,
+        with_footer(shows("Type 'yes' to confirm:"), "← back"),
+    );
+    assert!(!shows("Type 'yes' to confirm: ye")(&term));
     term.press("yes");
     term.press(RIGHT);
     term.pump(Duration::from_millis(100));
@@ -992,7 +998,10 @@ fn test_tpu_confirmation_left_restores_filtered_zone_in_direct_and_shared_flows(
             term.wait(on("TPU zone"));
         }
         term.press_until("us-east5-b", shows("Filter: us-east5-b"));
-        term.press_until(ENTER, with_footer(shows("Type yes:"), "← back"));
+        term.press_until(
+            ENTER,
+            with_footer(shows("Type 'yes' to confirm:"), "← back"),
+        );
         assert!(term
             .title()
             .starts_with("Launch v6e-1 Spot in us-east5-b for $"));
@@ -1010,8 +1019,11 @@ fn test_tpu_confirmation_left_restores_filtered_zone_in_direct_and_shared_flows(
             .calls()
             .iter()
             .any(|a| a.iter().any(|s| s == "create" || s == "create-http-task")));
-        term.press_until(RIGHT, with_footer(shows("Type yes:"), "← back"));
-        assert!(!shows("Type yes: ye")(&term));
+        term.press_until(
+            RIGHT,
+            with_footer(shows("Type 'yes' to confirm:"), "← back"),
+        );
+        assert!(!shows("Type 'yes' to confirm: ye")(&term));
         term.press_until("yes\r", shows("Open workspace"));
         term.press("2");
         assert_eq!(term.exit_status(), 0, "{}", term.output_text());
@@ -1263,12 +1275,12 @@ fn test_tpu_retry_manual_zone_confirmation_keeps_back_navigation() {
             "2h",
         ],
     );
-    term.wait(shows("Type yes:"));
+    term.wait(shows("Type 'yes' to confirm:"));
     term.press("yes\r");
     term.wait(shows("Retry v5e-1 Spot"));
     term.press_until("2", shows("TPU zone"));
     term.press_until("us-central1-a", shows("Filter: us-central1-a"));
-    term.press_until(ENTER, shows("Type yes:"));
+    term.press_until(ENTER, shows("Type 'yes' to confirm:"));
     term.press("ye");
     term.press_until(LEFT, shows("TPU zone"));
     assert!(shows("Filter: us-central1-a")(&term));
@@ -1284,7 +1296,7 @@ fn test_tpu_retry_manual_zone_confirmation_keeps_back_navigation() {
         !sandbox.root.join("gcp-task.json").exists(),
         "back must not arm another paid attempt"
     );
-    term.press_until(ENTER, shows("Type yes:"));
+    term.press_until(ENTER, shows("Type 'yes' to confirm:"));
     term.press_until("yes\r", shows("Open workspace"));
     term.press("2");
     assert_eq!(term.exit_status(), 0, "{}", term.output_text());
@@ -1323,7 +1335,7 @@ fn test_tpu_wait_timer_counts_in_place_and_clears_for_retry_and_results() {
             "2h",
         ],
     );
-    term.wait(shows("Type yes:"));
+    term.wait(shows("Type 'yes' to confirm:"));
     let confirmation = term
         .lines()
         .into_iter()
@@ -1482,7 +1494,7 @@ fn test_tpu_post_launch_editor_then_edit_uses_instance_picker() {
     term.press_until(RIGHT, on("TPU capacity"));
     term.press_until("2", on("TPU zone"));
     term.press_until("us-east5-b", shows("Filter: us-east5-b"));
-    term.press_until(RIGHT, shows("Type yes:"));
+    term.press_until(RIGHT, shows("Type 'yes' to confirm:"));
     term.press_until("yes\r", |t| {
         shows("Open workspace")(t) && shows("Don't open")(t)
     });

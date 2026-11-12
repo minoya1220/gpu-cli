@@ -6,6 +6,7 @@ use crate::ctx::Ctx;
 use crate::error::{Error, ExitCode, Result};
 use crate::gcp::{self, component, text};
 use crate::picker::{pick, Job, Next, Opt, Screen};
+use crate::provider::Provider;
 use crate::pyjson::{Dict, Value};
 
 pub(crate) fn gcp_not_setup(code: Option<ExitCode>) -> Error {
@@ -37,34 +38,48 @@ pub fn gcp_ready(cfg: &Dict) -> bool {
         && text(gcp, "project").is_some_and(|p| component(p) && text(setup, "project") == Some(p))
 }
 
+pub(crate) const READY: &str = "✓ set up";
+const NOT_READY: &str = "not set up";
+
+/// One status row per provider. Vast is ready when an authenticated read
+/// succeeds (`None` while it runs), Google Cloud when its setup record is
+/// complete, Modal when local credentials exist.
+fn status_rows(ctx: &Ctx, cfg: &Dict, vast: Option<bool>) -> Vec<(Provider, String)> {
+    let gcp = gcp_ready(cfg);
+    let modal = crate::modal::configured(ctx);
+    let cells = Provider::ALL.map(|provider| {
+        let ready = match provider {
+            Provider::Vast => vast,
+            Provider::Gcp => Some(gcp),
+            Provider::Modal => Some(modal),
+        };
+        let state = match ready {
+            Some(true) => READY,
+            Some(false) => NOT_READY,
+            None => "checking…",
+        };
+        [provider.label().to_string(), state.to_string()]
+    });
+    Provider::ALL
+        .into_iter()
+        .zip(crate::table::aligned_rows(
+            &cells,
+            [crate::table::Column::Left, crate::table::Column::Plain],
+        ))
+        .collect()
+}
+
 pub(crate) fn provider_screen(ctx: &Ctx, cfg: &Dict) -> Screen<String, String> {
     let worker = ctx.clone();
     let vast = Job::new(move || Ok(crate::vast::list_instances(&worker, None).is_ok()));
     let status = vast.clone();
-    let ready = gcp_ready(cfg);
+    let (ctx, cfg) = (ctx.clone(), cfg.clone());
     Screen::new(
         "Provider setup",
         move || {
-            let state = match status.result() {
-                Some(true) => "✓ set up",
-                Some(false) => "not set up",
-                None => "checking…",
-            };
-            let rows = [
-                ["Vast.ai".into(), state.into()],
-                [
-                    "Google Cloud".into(),
-                    if ready { "✓ set up" } else { "not set up" }.into(),
-                ],
-                ["Modal".into(), "check readiness".into()],
-            ];
-            ["vast", "gcp", "modal"]
+            status_rows(&ctx, &cfg, status.result())
                 .into_iter()
-                .zip(crate::table::aligned_rows(
-                    &rows,
-                    [crate::table::Column::Left, crate::table::Column::Plain],
-                ))
-                .map(|(value, label)| Opt::new(value.into(), label))
+                .map(|(provider, row)| Opt::new(provider.key().to_string(), row))
                 .collect()
         },
         Next::Done,
@@ -76,7 +91,9 @@ pub(crate) fn provider_screen(ctx: &Ctx, cfg: &Dict) -> Screen<String, String> {
 pub fn run(ctx: &Ctx, cfg: &Dict, flags: &SetupFlags) -> Result<()> {
     ctx.result(
         "provider",
-        flags.provider.as_ref().map_or(Value::Null, Value::str),
+        flags
+            .provider
+            .map_or(Value::Null, |provider| Value::str(provider.key())),
     );
     ctx.result(
         "project",
@@ -97,13 +114,11 @@ pub fn run(ctx: &Ctx, cfg: &Dict, flags: &SetupFlags) -> Result<()> {
         return Err(Error::msg("Setup needs no TPU zone. Choose it at launch")
             .next("gpu setup --provider gcp"));
     }
-    if flags.remove && (flags.zone.is_some() || flags.location.is_some()) {
-        return Err(
-            Error::msg("Removal uses the setup record. Omit --zone and --location")
-                .next("gpu setup --provider gcp --remove --help"),
-        );
+    if flags.remove && flags.location.is_some() {
+        return Err(Error::msg("Removal uses the setup record. Omit --location")
+            .next("gpu setup --provider gcp --remove --help"));
     }
-    if flags.provider.as_deref() != Some("gcp")
+    if flags.provider != Some(crate::provider::Provider::Gcp)
         && (flags.project.is_some()
             || flags.zone.is_some()
             || flags.confirm_project.is_some()
@@ -114,41 +129,28 @@ pub fn run(ctx: &Ctx, cfg: &Dict, flags: &SetupFlags) -> Result<()> {
         return Err(Error::msg("Select Google Cloud for these setup flags")
             .next("gpu setup --provider gcp --help"));
     }
-    let provider = match &flags.provider {
-        Some(p) => p.clone(),
-        None if ctx.interactive() => pick(ctx, provider_screen(ctx, cfg))?,
+    let provider = match flags.provider {
+        Some(provider) => provider,
+        None if ctx.interactive() => {
+            let key = pick(ctx, provider_screen(ctx, cfg))?;
+            Provider::from_key(&key)
+                .ok_or_else(|| Error::msg(format!("Unknown provider: {key}")))?
+        }
         None => {
             let vast = crate::vast::list_instances(ctx, None).is_ok();
             ctx.result("vast_ready", Value::Bool(vast));
             ctx.result("gcp_ready", Value::Bool(gcp_ready(cfg)));
-            let rows = [
-                [
-                    "Vast.ai".into(),
-                    if vast { "✓ set up" } else { "not set up" }.into(),
-                ],
-                [
-                    "Google Cloud".into(),
-                    if gcp_ready(cfg) {
-                        "✓ set up"
-                    } else {
-                        "not set up"
-                    }
-                    .into(),
-                ],
-            ];
-            for row in crate::table::aligned_rows(
-                &rows,
-                [crate::table::Column::Left, crate::table::Column::Plain],
-            ) {
+            ctx.result("modal_ready", Value::Bool(crate::modal::configured(ctx)));
+            for (_, row) in status_rows(ctx, cfg, Some(vast)) {
                 ctx.println(&row)?;
             }
             return ctx.println("Next: gpu setup --provider gcp --help");
         }
     };
-    if provider == "modal" {
+    if provider == Provider::Modal {
         return crate::modal::check(ctx);
     }
-    if provider == "vast" {
+    if provider == Provider::Vast {
         crate::vast::list_instances(ctx, None).map_err(|error| match error {
             Error::Status(_, _) => error,
             _ => Error::status(
@@ -158,7 +160,10 @@ pub fn run(ctx: &Ctx, cfg: &Dict, flags: &SetupFlags) -> Result<()> {
             .next("vastai login"),
         })?;
         ctx.result("ready", Value::Bool(true));
-        return ctx.println("Vast.ai  ✓ set up\nNext: gpu up");
+        return ctx.println(&format!(
+            "{}  {READY}\nNext: gpu up",
+            Provider::Vast.label()
+        ));
     }
     // No status probe, hardware screen, or other command receives this capability.
     let cloud = ctx.for_gcp_setup();
@@ -383,7 +388,7 @@ impl Plan {
             return Err(invalid());
         }
         let number = text(setup, "project_number")
-            .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+            .filter(|s| crate::pyfmt::is_digits(s))
             .ok_or_else(invalid)?
             .to_string();
         let enabled = match setup.get("enabled_apis") {
@@ -520,7 +525,7 @@ fn setup_gcp(ctx: &Ctx, cfg: &Dict, flags: &SetupFlags) -> Result<()> {
     let number = selected
         .get("projectNumber")
         .map(crate::pyfmt::py_str)
-        .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+        .filter(|s| crate::pyfmt::is_digits(s))
         .ok_or_else(gcp::bad_reply)?;
     if previous
         .as_ref()
@@ -582,8 +587,10 @@ fn setup_gcp(ctx: &Ctx, cfg: &Dict, flags: &SetupFlags) -> Result<()> {
         "  VM + expiry identity: {}. VM users inherit its roles.",
         plan.account()
     ))?;
-    ctx.println("Adds only the gpu-expiry queue. No project/identity/IAM/network/billing/quota edits.\nEnabling APIs may \
-        add Google-managed defaults. Undo keeps those.")?;
+    ctx.println(&format!(
+        "Adds only the {QUEUE} queue. No project/identity/IAM/network/billing/quota edits.\n\
+         Enabling APIs may add Google-managed defaults. Undo keeps those."
+    ))?;
     ctx.println(&format!(
         "Keep undo record: {}.\nNo concurrent setup or cloud edits.",
         crate::config::config_path(&ctx.env).display()
@@ -635,10 +642,14 @@ fn setup_gcp(ctx: &Ctx, cfg: &Dict, flags: &SetupFlags) -> Result<()> {
                 "--max-backoff=60s",
             ],
         )
-        .map_err(|_| Error::msg("Setup stopped creating gpu-expiry. Completion unverified."))?;
-        ctx.println("Created queue: gpu-expiry.")?;
+        .map_err(|_| {
+            Error::msg(format!(
+                "Setup stopped creating {QUEUE}. Completion unverified."
+            ))
+        })?;
+        ctx.println(&format!("Created queue: {QUEUE}."))?;
     } else {
-        ctx.println("Reused queue: gpu-expiry (unchanged).")?;
+        ctx.println(&format!("Reused queue: {QUEUE} (unchanged)."))?;
     }
     plan.queue()?.check(ctx)?;
     ctx.println("Fetching TPU types, zones and SKU IDs...")?;
@@ -699,7 +710,7 @@ fn ensure_unused(ctx: &Ctx, plan: &Plan, enabled: &[String]) -> Result<bool> {
                 "tasks",
                 "list",
                 &format!("--location={}", plan.location),
-                "--queue=gpu-expiry",
+                &format!("--queue={QUEUE}"),
             ],
         )?)?;
         if !tasks.is_empty() {
@@ -767,11 +778,15 @@ fn remove_gcp(ctx: &Ctx, cfg: &Dict, flags: &SetupFlags) -> Result<()> {
                 &format!("--location={}", plan.location),
             ],
         )
-        .map_err(|_| Error::msg("Removal stopped deleting gpu-expiry. Completion unverified."))?;
+        .map_err(|_| {
+            Error::msg(format!(
+                "Removal stopped deleting {QUEUE}. Completion unverified."
+            ))
+        })?;
         if plan.queue_exists(ctx)? {
             return Err(Error::msg("Queue deletion unverified. APIs not disabled."));
         }
-        ctx.println("Deleted queue: gpu-expiry.")?;
+        ctx.println(&format!("Deleted queue: {QUEUE}."))?;
     }
     // Reverse enable order; never --force (do not disable dependents).
     for api in plan.enabled.iter().rev() {

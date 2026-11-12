@@ -31,7 +31,7 @@ pub(crate) fn nonterminal(ctx: &Ctx, command: &Command, cfg: &Dict) -> Result<()
             if flags.expire.as_deref().is_none_or(str::is_empty) {
                 missing.push("Non-terminal gpu up requires --expire DURATION (e.g. --expire 2h), or default_expire in config.json.");
             }
-            let tpu = flags.provider.as_deref() == Some("gcp")
+            let tpu = flags.provider == Some(crate::provider::Provider::Gcp)
                 || flags.tpu.is_some()
                 || flags.zone.is_some()
                 || flags.runtime.is_some()
@@ -83,7 +83,7 @@ pub(crate) fn nonterminal(ctx: &Ctx, command: &Command, cfg: &Dict) -> Result<()
                 Error::usage("Non-terminal destruction requires --yes").next("gpu down ID --yes")
             )
         }
-        Command::Setup(flags) if flags.provider.as_deref() == Some("gcp") => {
+        Command::Setup(flags) if flags.provider == Some(crate::provider::Provider::Gcp) => {
             if !flags.remove && flags.project.is_none() {
                 return Err(Error::usage("Choose a project: pass --project PROJECT")
                     .next("gpu setup --provider gcp --help"));

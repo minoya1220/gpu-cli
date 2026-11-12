@@ -348,10 +348,10 @@ fn cancelled_create_still_reconciles_before_returning_130() {
 
 #[test]
 fn modal_ids_are_qualified_and_validated_locally() {
-    use crate::provider::InstanceId;
+    use crate::provider::{parse, Provider};
     assert_eq!(
-        InstanceId::parse("modal:sb-abc_123").unwrap(),
-        InstanceId::Modal("modal:sb-abc_123".into())
+        parse("modal:sb-abc_123").unwrap().provider(),
+        Provider::Modal
     );
     for id in [
         "modal:",
@@ -361,10 +361,7 @@ fn modal_ids_are_qualified_and_validated_locally() {
         "modal:sb-foo\n",
         "modal:sb-$(id)",
     ] {
-        assert!(InstanceId::parse(id).is_err(), "{id}");
+        assert!(parse(id).is_err(), "{id}");
     }
-    assert_eq!(
-        InstanceId::parse("123").unwrap(),
-        InstanceId::Vast("123".into())
-    );
+    assert_eq!(parse("123").unwrap().provider(), Provider::Vast);
 }

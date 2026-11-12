@@ -433,7 +433,7 @@ pub(crate) fn picker_flags(args: &crate::launch::UpArgs, picks: &crate::wizard::
         _ => None,
     };
     UpFlags {
-        provider: Some("gcp".into()),
+        provider: Some(crate::provider::Provider::Gcp),
         tpu: picks.cloud.as_ref().and_then(|s| s.tpu.clone()).or(tpu),
         zone: picks.cloud.as_ref().and_then(|s| s.zone.clone()),
         runtime: None,
@@ -735,7 +735,7 @@ fn launch_loop(
         if check_rate && rate != approved_rate {
             confirm = true;
         }
-        if approved.is_none() && confirm && !crate::prompt::confirm(ctx, "Type yes: ")? {
+        if approved.is_none() && confirm && !crate::prompt::confirm(ctx, None)? {
             return ctx.println("Cancelled.");
         }
         if deadline.as_second() <= ctx.clock.now().as_second() {
@@ -835,16 +835,7 @@ fn launch_loop(
             id.cli(),
             id.cli()
         ))?;
-        if ctx.interactive() {
-            let editor = crate::picker::pick(
-                ctx,
-                crate::editors::after_up_screen(crate::commands::last_editor(&ctx.env)),
-            )?;
-            if editor != "none" {
-                crate::gcp_ssh::edit(ctx, cfg, &id, Some(&editor), None)?;
-            }
-        }
-        return Ok(());
+        return crate::editors::offer_after_launch(ctx, cfg, &id);
     }
 }
 
@@ -941,7 +932,7 @@ pub fn lifecycle(ctx: &Ctx, id: &TpuId, cfg: &Dict, destroy: bool, yes: bool) ->
         && !yes
         && !crate::prompt::confirm(
             ctx,
-            &format!("Destroy TPU {} and its boot disk? Type yes: ", id.cli()),
+            Some(&format!("Destroy TPU {} and its boot disk?", id.cli())),
         )?
     {
         return ctx.println("Cancelled.");

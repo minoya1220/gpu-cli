@@ -15,7 +15,16 @@ fn unreadable_instances_reply_has_retry_hint_without_raw_output() {
         assert_eq!(list_instances(&ctx, None).unwrap_err().text(), expected);
         for json in [false, true] {
             assert_eq!(
-                crate::commands::ls(&ctx, json).unwrap_err().text(),
+                crate::provider::ls(
+                    &ctx,
+                    &Dict::new(),
+                    json,
+                    false,
+                    Some(crate::provider::Provider::Vast),
+                    false
+                )
+                .unwrap_err()
+                .text(),
                 expected
             );
             assert!(testing::out(&ctx).is_empty());

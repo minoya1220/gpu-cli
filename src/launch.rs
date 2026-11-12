@@ -5,16 +5,15 @@ use std::sync::Arc;
 
 use jiff::Timestamp;
 
-use crate::commands::{edit_instance, expire_instance, last_editor};
+use crate::commands::expire_instance;
 use crate::config;
 use crate::ctx::Ctx;
-use crate::editors::after_up_screen;
 use crate::error::{Error, Result};
 use crate::history::{recent_picks, record_picks_best_effort as record_picks};
 use crate::offers::{
     gpu_stats, known_gpu_models, offer_label, offer_price, OfferSearch, NO_OFFERS,
 };
-use crate::picker::{pick, Job};
+use crate::picker::Job;
 use crate::process::run;
 use crate::prompt::{choose, choose_gpu, confirm, Choices};
 use crate::pyfmt::{fixed, py_str, truthy};
@@ -540,7 +539,7 @@ pub fn launch(ctx: &Ctx, args: &UpArgs, cfg: &Dict, deadline: Option<Timestamp>)
             py_str(crate::offers::field(&offer, "id")?),
             fixed(offer_price(&offer)?, 3)
         ))?;
-        if !args.yes && !confirm(ctx, "Type 'yes' to create this paid instance: ")? {
+        if !args.yes && !confirm(ctx, None)? {
             ctx.println("Cancelled.")?;
             return Ok(());
         }
@@ -617,19 +616,8 @@ pub fn launch(ctx: &Ctx, args: &UpArgs, cfg: &Dict, deadline: Option<Timestamp>)
     }
     announced?;
     record_picks(ctx, &[("mode", &mode), ("gpu", &gpu)]);
-    if let Some(instance_id) = instance_id {
-        if ctx.interactive() {
-            let editor = pick(ctx, after_up_screen(last_editor(&ctx.env)))?;
-            if editor != "none" {
-                edit_instance(
-                    ctx,
-                    &instance_id,
-                    Some(&editor),
-                    config::nvim_config(cfg)?.as_ref(),
-                    120.0,
-                )?;
-            }
-        }
+    match instance_id {
+        Some(id) => crate::editors::offer_after_launch(ctx, cfg, &crate::provider::VastId(id)),
+        None => Ok(()),
     }
-    Ok(())
 }

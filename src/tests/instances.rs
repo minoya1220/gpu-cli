@@ -3,12 +3,12 @@
 
 use std::sync::{Arc, Mutex};
 
-use crate::commands::edit_instance;
 use crate::instances::{instance_label, repo_name};
 use crate::launch::{launch, UpArgs};
 use crate::picker::testing::*;
 use crate::picker::{Next, Opt, Outcome, Screen};
 use crate::process::{Cmd, Output, RunError};
+use crate::provider::{Instance, VastId};
 use crate::pyfmt::py_str;
 use crate::pyjson::{self, Dict, Value};
 use crate::repos::Repo;
@@ -273,7 +273,9 @@ fn test_ssh_wait_timeout() {
     loading.insert("actual_status", Value::str("loading"));
     let runner = fake_vast(vec![loading], no_other);
     let ctx = t.ctx().runner(&runner).interactive(true).build();
-    let error = edit_instance(&ctx, "12", Some("cursor"), None, 4.0).unwrap_err();
+    let error = VastId("12".into())
+        .edit(&ctx, Some("cursor"), None)
+        .unwrap_err();
     assert!(error.text().contains("Timed out waiting"));
     assert!(err(&ctx).contains("Waiting for instance"));
 }
@@ -287,7 +289,9 @@ fn test_ssh_probe_failure_times_out() {
         _ => panic!("launched before SSH: {:?}", cmd.argv),
     });
     let ctx = t.ctx().runner(&runner).build();
-    let error = edit_instance(&ctx, "12", Some("cursor"), None, 4.0).unwrap_err();
+    let error = VastId("12".into())
+        .edit(&ctx, Some("cursor"), None)
+        .unwrap_err();
     assert!(error.text().contains("Timed out waiting"));
 }
 

@@ -3,6 +3,8 @@
 use clap::error::ErrorKind;
 use clap::{ArgAction, CommandFactory, Parser, Subcommand};
 
+use crate::provider::Provider;
+
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn up_help() -> String {
@@ -66,8 +68,8 @@ pub enum Command {
         #[arg(long)]
         long: bool,
         /// Limit listing to one provider
-        #[arg(long, value_parser = ["vast", "gcp", "modal"])]
-        provider: Option<String>,
+        #[arg(long, value_parser = Provider::parser(&Provider::ALL))]
+        provider: Option<Provider>,
     },
     /// Wait until the instance answers a non-interactive SSH probe
     Wait {
@@ -180,8 +182,8 @@ impl Command {
 #[derive(clap::Args, Debug, Default)]
 pub struct SetupFlags {
     /// Choose a provider explicitly (otherwise open the provider picker)
-    #[arg(long, value_parser = ["vast", "gcp", "modal"])]
-    pub provider: Option<String>,
+    #[arg(long, value_parser = Provider::parser(&Provider::ALL))]
+    pub provider: Option<Provider>,
     /// Google Cloud project ID (otherwise choose from your projects)
     #[arg(long)]
     pub project: Option<String>,
@@ -205,8 +207,8 @@ pub struct SetupFlags {
 #[derive(clap::Args, Clone, Debug)]
 pub struct UpFlags {
     /// Provider (optional; TPU flags or a TPU picked on the GPU screen use gcp)
-    #[arg(long, value_parser = ["vast", "gcp"])]
-    pub provider: Option<String>,
+    #[arg(long, value_parser = Provider::parser(&[Provider::Vast, Provider::Gcp]))]
+    pub provider: Option<Provider>,
     /// Full TPU accelerator type, e.g. v5e-1 or v6e-1
     #[arg(long, visible_alias = "type")]
     pub tpu: Option<String>,
@@ -278,8 +280,8 @@ pub struct UpFlags {
 #[derive(clap::Args, Clone, Debug)]
 pub struct RunFlags {
     /// Provider (Vast by default; Modal also available in the GPU picker)
-    #[arg(long, value_parser = ["vast", "modal"])]
-    pub provider: Option<String>,
+    #[arg(long, value_parser = Provider::parser(&[Provider::Vast, Provider::Modal]))]
+    pub provider: Option<Provider>,
     /// Modal physical CPU cores (default: 4; request equals limit)
     #[arg(long, allow_negative_numbers = true)]
     pub cpu: Option<f64>,

@@ -311,17 +311,25 @@ pub(crate) fn confirmation_screen<V: crate::picker::PickValue, T: Clone + Send +
         if text.trim().eq_ignore_ascii_case("yes") {
             Ok(())
         } else {
-            Err("Type yes to confirm".into())
+            Err(CONFIRM.into())
         }
     })))
-    .input_label("Type yes")
+    .input_label(CONFIRM)
     .submit_on_right(false)
     .back_clears_input(false)
     .settle_active_only()
 }
 
-/// `input(prompt).strip().lower() == "yes"`; end of input cancels with status 1.
-pub fn confirm(ctx: &Ctx, prompt: &str) -> Result<bool> {
-    let answer = read_text(ctx, prompt)?;
+/// The one instruction every paid or destructive confirmation shows.
+pub(crate) const CONFIRM: &str = "Type 'yes' to confirm";
+
+/// Ask `question` (or only the instruction, after a question already
+/// printed); true when the answer is "yes". End of input cancels with status 1.
+pub fn confirm(ctx: &Ctx, question: Option<&str>) -> Result<bool> {
+    let prompt = match question {
+        Some(question) => format!("{question} {CONFIRM}: "),
+        None => format!("{CONFIRM}: "),
+    };
+    let answer = read_text(ctx, &prompt)?;
     Ok(answer.trim().to_lowercase() == "yes")
 }

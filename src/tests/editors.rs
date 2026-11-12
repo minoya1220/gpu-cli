@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 use sha2::{Digest, Sha256};
 
 use super::instances::{editor_stubs, fake_vast, instances, ssh_ready};
-use crate::commands::{edit_instance, last_editor};
+use crate::editors::last_editor;
 use crate::editors::{
     after_up_screen, editor_screen, launch_editor, nvim_bootstrap, nvim_bootstrap_with,
     nvim_session, EDITORS, NVIM_VERSION,
@@ -17,6 +17,7 @@ use crate::history::recent_picks;
 use crate::picker::testing::*;
 use crate::picker::Outcome;
 use crate::process::{Input, Output};
+use crate::provider::{Instance, VastId};
 use crate::pyfmt::shell_quote;
 use crate::pyjson::Value;
 use crate::testing::*;
@@ -186,12 +187,12 @@ fn test_history_only_after_success() {
         });
         let ctx = t.ctx().runner(&runner).build();
         if success {
-            edit_instance(&ctx, "12", Some("code"), None, 120.0).unwrap();
+            VastId("12".into()).edit(&ctx, Some("code"), None).unwrap();
             assert_eq!(last_editor(&t.env()).as_deref(), Some("code"));
-            edit_instance(&ctx, "12", None, None, 120.0).unwrap();
+            VastId("12".into()).edit(&ctx, None, None).unwrap();
             assert_eq!(recent_picks(&t.env(), "editor"), ["code", "code"]);
         } else {
-            assert!(edit_instance(&ctx, "12", Some("code"), None, 120.0).is_err());
+            assert!(VastId("12".into()).edit(&ctx, Some("code"), None).is_err());
             assert_eq!(last_editor(&t.env()), None);
         }
     }
@@ -203,8 +204,12 @@ fn test_nvim_config_type_only_matters_for_nvim() {
     let runner = fake_vast(vec![instances()[0].clone()], |_| Ok(Output::status(0)));
     let ctx = t.ctx().runner(&runner).build();
     let config = Value::Int(5);
-    edit_instance(&ctx, "12", Some("code"), Some(&config), 120.0).unwrap();
-    let error = edit_instance(&ctx, "12", Some("nvim"), Some(&config), 120.0).unwrap_err();
+    VastId("12".into())
+        .edit(&ctx, Some("code"), Some(&config))
+        .unwrap();
+    let error = VastId("12".into())
+        .edit(&ctx, Some("nvim"), Some(&config))
+        .unwrap_err();
     assert_eq!(
         error.text(),
         "Config 'editor.nvim_config' must be a git URL or directory path string."
@@ -213,14 +218,16 @@ fn test_nvim_config_type_only_matters_for_nvim() {
         .calls()
         .iter()
         .any(|c| c.argv.iter().any(|a| a == "bash -s")));
-    edit_instance(&ctx, "12", Some("nvim"), Some(&Value::Int(0)), 120.0).unwrap();
+    VastId("12".into())
+        .edit(&ctx, Some("nvim"), Some(&Value::Int(0)))
+        .unwrap();
 }
 
 #[test]
 fn test_no_history_noninteractive() {
     let t = TestEnv::new();
     let ctx = t.ctx().interactive(false).build();
-    let error = edit_instance(&ctx, "12", None, None, 120.0).unwrap_err();
+    let error = VastId("12".into()).edit(&ctx, None, None).unwrap_err();
     assert!(error.text().contains("gpu edit 12 --editor code"));
 }
 

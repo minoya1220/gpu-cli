@@ -7,6 +7,7 @@ use crate::error::{Error, Result};
 use crate::picker::{Next, Opt, Screen};
 use crate::process::{Cmd, Input};
 use crate::pyfmt::shell_quote;
+use crate::pyjson::Value;
 
 pub const EDITORS: [(&str, &str); 4] = [
     ("cursor", "Cursor"),
@@ -20,6 +21,90 @@ pub const NVIM_SHA256_X86_64: &str =
     "b2f91117be5b5ea39edd7297156dc2a4a8df4add6c95a90809a8df19e7ab6f52";
 pub const NVIM_SHA256_ARM64: &str =
     "ea4f9a31b11cc1477ff014aebb7b207684e7280f94ffa97abdab6cacd9b98519";
+
+/// How long `gpu edit` waits for SSH before giving up.
+pub(crate) const EDITOR_WAIT: f64 = 120.0;
+
+/// Where an editor connects to an instance.
+pub(crate) struct Target {
+    pub alias: String,
+    pub directory: String,
+    /// How the closing message names the instance.
+    pub shown: String,
+}
+
+/// The most recent editor picked on this machine.
+pub fn last_editor(env: &Env) -> Option<String> {
+    crate::history::recent_picks(env, "editor")
+        .into_iter()
+        .find(|e| EDITORS.iter().any(|(key, _)| key == e))
+}
+
+/// The one `gpu edit` flow: choose and check the editor, let the provider
+/// wait for its SSH target, launch, and remember the choice.
+pub(crate) fn open(
+    ctx: &Ctx,
+    id: &str,
+    editor: Option<&str>,
+    nvim_config: Option<&Value>,
+    connect: impl FnOnce(&str) -> Result<Target>,
+) -> Result<()> {
+    let editor = match editor.map(String::from).or_else(|| last_editor(&ctx.env)) {
+        Some(editor) => editor,
+        None if ctx.interactive() => crate::picker::pick(ctx, editor_screen())?,
+        None => {
+            let keys = EDITORS.map(|(key, _)| key).join("|");
+            return Err(
+                Error::usage(format!("No previous editor; specify --editor {keys}"))
+                    .next(format!("gpu edit {id} --editor code")),
+            );
+        }
+    };
+    check_editor(&ctx.env, &editor)?;
+    let target = connect(&editor)?;
+    ctx.result("ssh_alias", Value::str(&target.alias));
+    ctx.result("directory", Value::str(&target.directory));
+    ctx.result("editor", Value::str(&editor));
+    let nvim_config = if editor == "nvim" {
+        crate::config::nvim_config_text(nvim_config)?
+    } else {
+        None
+    };
+    launch_editor(
+        ctx,
+        &editor,
+        &target.alias,
+        &target.directory,
+        nvim_config.as_deref(),
+    )?;
+    crate::history::record_picks_best_effort(ctx, &[("editor", &editor)]);
+    ctx.println(&format!(
+        "Opened {} at {} on {}.",
+        editor_label(&editor).unwrap_or(&editor),
+        target.directory,
+        target.shown
+    ))
+}
+
+/// After an interactive launch, offer to open the new instance in an editor.
+pub(crate) fn offer_after_launch(
+    ctx: &Ctx,
+    cfg: &crate::pyjson::Dict,
+    instance: &dyn crate::provider::Instance,
+) -> Result<()> {
+    if !ctx.interactive() {
+        return Ok(());
+    }
+    let editor = crate::picker::pick(ctx, after_up_screen(last_editor(&ctx.env)))?;
+    if editor == "none" {
+        return Ok(());
+    }
+    instance.edit(
+        ctx,
+        Some(&editor),
+        crate::config::nvim_config(cfg)?.as_ref(),
+    )
+}
 
 pub fn editor_label(editor: &str) -> Option<&'static str> {
     EDITORS

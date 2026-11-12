@@ -2,7 +2,6 @@
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use crate::process::Cmd;
-use crate::provider::InstanceId;
 use crate::pyjson::Value;
 
 pub fn wait(ctx: &Ctx, id: &str, timeout: f64) -> Result<String> {
@@ -14,11 +13,7 @@ pub fn wait_with_setup(ctx: &Ctx, id: &str, timeout: f64, wait_setup: bool) -> R
     ctx.result("setup_done", Value::Null);
     ctx.result("id", Value::str(id));
     ctx.result("ready", Value::Bool(false));
-    let alias = match InstanceId::parse(id)? {
-        InstanceId::Vast(id) => crate::commands::wait_for_ssh(ctx, &id, timeout)?.0,
-        InstanceId::Gcp(id) => crate::gcp_ssh::ready_alias(ctx, &id, timeout)?,
-        InstanceId::Modal(_) => return Err(crate::modal::unsupported()),
-    };
+    let alias = crate::provider::parse(id)?.wait_ssh(ctx, timeout)?;
     ctx.result("ssh_alias", Value::str(&alias));
     ctx.result("ready", Value::Bool(true));
     ctx.progress(&format!("Instance {id} answers SSH ({alias})."))?;

@@ -60,7 +60,7 @@ pub fn parse_expire_arguments(
     let mut values = values.to_vec();
     let id = if values.first().is_some_and(|v| {
         is_digits(v)
-            || v.starts_with("gcp:")
+            || crate::provider::qualified(v)
             || (values.len() == 2 && crate::provider::short_candidate(v))
     }) {
         Some(values.remove(0))

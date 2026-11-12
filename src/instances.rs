@@ -7,6 +7,7 @@ use regex::Regex;
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use crate::picker::{pick, Next, Opt, Screen};
+use crate::provider::Provider;
 use crate::pyfmt::{fixed, py_float, py_str, truthy};
 use crate::pyjson::{Dict, Value};
 
@@ -73,8 +74,7 @@ pub(crate) fn display_ids(items: &[Dict], long: bool) -> Result<Vec<String>> {
         .iter()
         .map(|item| {
             let full = item.get("id").map(py_str).unwrap_or_else(|| "-".into());
-            let tpu = full
-                .starts_with("gcp:")
+            let tpu = (Provider::of(item) == Provider::Gcp)
                 .then(|| crate::gcp::TpuId::parse(&full))
                 .transpose()?;
             Ok((full, tpu))
@@ -130,17 +130,13 @@ pub(crate) fn render_table(ctx: &Ctx, items: &[Dict], long: bool) -> Result<()> 
                 .map(py_str)
                 .unwrap_or_else(|| "-".into())
         };
-        let provider = match item.get("provider").and_then(Value::as_str) {
-            Some("gcp") => "gcp",
-            Some("modal") => "modal",
-            _ => "vast",
-        };
+        let provider = Provider::of(item);
         let kind = field("gpu_name");
         cells.push(
             [
                 id,
-                provider.into(),
-                if provider == "gcp" {
+                provider.key().into(),
+                if provider == Provider::Gcp {
                     crate::gcp_types::public(kind)
                 } else {
                     kind
@@ -199,11 +195,7 @@ pub fn select_instance(ctx: &Ctx, instances: &[Dict], action: &str) -> Result<Op
     for item in instances {
         let id = py_str(item.get("id").ok_or_else(|| Error::key("id"))?);
         let label = instance_label(item)?;
-        let label = match item.get("provider") {
-            Some(Value::Str(p)) if p == "vast" => format!("Vast.ai  {label}"),
-            Some(Value::Str(p)) if p == "gcp" => format!("Google Cloud  {label}"),
-            _ => label,
-        };
+        let label = format!("{}  {label}", Provider::of(item).label());
         options.push(Opt::new(id, label));
     }
     // Even a single instance must be explicitly selected.

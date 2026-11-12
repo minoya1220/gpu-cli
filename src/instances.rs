@@ -111,7 +111,7 @@ fn table_price(item: &Dict) -> String {
         .filter(|v| !matches!(v, Value::Bool(_)))
         .and_then(|v| py_float(v).ok())
         .filter(|p| p.is_finite() && *p >= 0.0)
-        .map(|p| format!("${}/hr", fixed(p, 2)))
+        .map(crate::table::hourly)
         .unwrap_or_else(|| "-".into())
 }
 

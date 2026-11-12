@@ -23,9 +23,9 @@ fn mixed_listing_full_ids_json_precision_and_short_id_resolution_use_only_stubs(
     assert_eq!(
         String::from_utf8(short.stdout).unwrap(),
         concat!(
-            "ID          Provider  Type      Status    Price     Uptime\n",
-            "30306428    vast      RTX 4090  created   $0.10/hr  5m\n",
-            "gpu-uwhcp7  gcp       v5e-1     deleting  $0.36/hr  7m\n",
+            "ID          Provider  Type      Status    Price      Uptime\n",
+            "30306428    vast      RTX 4090  created   $0.102/hr  5m\n",
+            "gpu-uwhcp7  gcp       v5e-1     deleting  $0.359/hr  7m\n",
         )
     );
     assert!(short.stderr.is_empty());

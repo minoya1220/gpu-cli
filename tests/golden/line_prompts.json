@@ -7,6 +7,7 @@
    ],
    "prompt": "Repository",
    "step": null,
+   "flag": "--repo or --no-repo",
    "answers": [
     "2"
    ],
@@ -21,6 +22,7 @@
    ],
    "prompt": "Repository",
    "step": "repo",
+   "flag": "--repo or --no-repo",
    "answers": [
     ""
    ],
@@ -70,6 +72,7 @@
    ],
    "prompt": "GPU",
    "step": null,
+   "flag": "--gpu",
    "answers": [
     "n",
     "n",
@@ -117,6 +120,7 @@
    ],
    "prompt": "GPU",
    "step": null,
+   "flag": "--gpu",
    "answers": [
     "GPU 1",
     "",
@@ -138,6 +142,7 @@
    ],
    "prompt": "Mode",
    "step": "mode",
+   "flag": "--mode",
    "answers": [
     "T",
     "",
@@ -160,6 +165,7 @@
    ],
    "prompt": "Mode",
    "step": "mode",
+   "flag": "--mode",
    "answers": [
     "zzz",
     ""
@@ -177,6 +183,7 @@
    ],
    "prompt": "Offer",
    "step": null,
+   "flag": "--offer",
    "answers": [
     "N"
    ],
@@ -191,6 +198,7 @@
    ],
    "prompt": "Offer",
    "step": null,
+   "flag": "--offer",
    "answers": [
     "3",
     "00",
@@ -204,6 +212,7 @@
    "options": [],
    "prompt": "Empty Thing",
    "step": null,
+   "flag": "--thing",
    "answers": [],
    "history": null,
    "error": "No choices available for empty thing",
@@ -216,6 +225,7 @@
    ],
    "prompt": "Mode",
    "step": null,
+   "flag": "--mode",
    "answers": [],
    "history": null,
    "error": "Input ended at Mode. Pass --mode to choose without a prompt.",
@@ -228,6 +238,7 @@
    ],
    "prompt": "Mode",
    "step": null,
+   "flag": "--mode",
    "answers": [
     "ab'c",
     "1"

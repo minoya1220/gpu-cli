@@ -19,6 +19,18 @@ pub const MODES: [&str; 2] = ["container", "vm"];
 
 pub const TPU_CATEGORY: &str = "TPU (Google Cloud)";
 
+const MODAL_NOTE: &str =
+    "Modal total compute: GPU + capped CPU + memory. Capacity unknown; GPU Sandboxes can be preempted.";
+
+/// A failed job's error as a one-line, redacted selection note.
+fn error_note(error: &str) -> String {
+    crate::redact::redact_text(error)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum TpuChoice {
     ChooseType,
@@ -535,13 +547,6 @@ impl LaunchWizard {
                 .or_else(|| self.state.tpu.cached_prices.clone())
         }
     }
-    fn price_placeholder(state: JobState) -> &'static str {
-        if matches!(state, JobState::Idle | JobState::Running) {
-            "…"
-        } else {
-            "-"
-        }
-    }
     fn tpu_rows(&self, shortcuts: Vec<String>) -> Vec<(Choice, HardwareColumns)> {
         let shortcuts = if self.state.tpu.setup_error.is_some() {
             Vec::new()
@@ -573,11 +578,7 @@ impl LaunchWizard {
                 } else if self.state.tpu.setup_error.is_some() {
                     ["needs gpu setup".into(), "Spot -".into()]
                 } else {
-                    let pending = matches!(
-                        self.state.tpu_prices.state(),
-                        JobState::Idle | JobState::Running
-                    );
-                    let value = if pending { "…" } else { "-" };
+                    let value = self.state.tpu_prices.state().placeholder();
                     [value.into(), format!("Spot {value}")]
                 };
                 (
@@ -599,7 +600,7 @@ impl LaunchWizard {
                     .as_ref()
                     .and_then(|r| r.price(name, *count, *cpu, *memory).ok())
                     .map(|p| format!("${}/hr", crate::pyfmt::fixed(p, 3)))
-                    .unwrap_or_else(|| Self::price_placeholder(job.state()).into());
+                    .unwrap_or_else(|| job.state().placeholder().into());
                 (
                     Choice::Modal((*name).into()),
                     [format!("Modal {name}"), price, "Spot -".into(), "-".into()],
@@ -623,7 +624,7 @@ impl LaunchWizard {
                 }
                 let stats = prices.result().unwrap_or_default();
                 let status = prices.state();
-                let pending = Self::price_placeholder(status);
+                let pending = status.placeholder();
                 let mut rows = Vec::new();
                 for model in &opts.state.recent_gpus {
                     let mut cells = model_columns(model, &stats, pending);
@@ -656,7 +657,7 @@ impl LaunchWizard {
                     .map(|model| {
                         (
                             Choice::Gpu(model.clone()),
-                            model_columns(model, &stats, Self::price_placeholder(status)),
+                            model_columns(model, &stats, status.placeholder()),
                         )
                     })
                     .collect::<Vec<_>>();
@@ -707,10 +708,18 @@ impl LaunchWizard {
         .prices(self.state.tpu_prices.clone())
         .selection_note(move |choice| {
             if matches!(choice, Choice::Modal(_)) {
-                cloud.state.modal.as_ref().map(|(job, ..)| {
-                    if job.state() == JobState::Failed { crate::redact::redact_text(&job.error()).lines().next().unwrap_or("").to_string() }
-                    else { "Modal total compute: GPU + capped CPU + memory. Capacity unknown; GPU Sandboxes can be preempted.".into() }
-                }).unwrap_or_default()
+                cloud
+                    .state
+                    .modal
+                    .as_ref()
+                    .map(|(job, ..)| {
+                        if job.state() == JobState::Failed {
+                            error_note(&job.error())
+                        } else {
+                            MODAL_NOTE.into()
+                        }
+                    })
+                    .unwrap_or_default()
             } else if matches!(choice, Choice::Tpu(_)) {
                 if let Some(prices) = cloud.tpu_prices() {
                     let cache = prices.cache_note();
@@ -726,18 +735,10 @@ impl LaunchWizard {
                 } else if cloud.state.tpu.setup_error.is_some() {
                     String::new()
                 } else {
-                    crate::redact::redact_text(&cloud.state.tpu_prices.error())
-                        .lines()
-                        .next()
-                        .unwrap_or("")
-                        .to_string()
+                    error_note(&cloud.state.tpu_prices.error())
                 }
             } else {
-                crate::redact::redact_text(&vast_context.error())
-                    .lines()
-                    .next()
-                    .unwrap_or("")
-                    .to_string()
+                error_note(&vast_context.error())
             }
         });
         if self.state.tpu.setup_error.is_none() {
@@ -766,7 +767,7 @@ impl LaunchWizard {
                 .map(|gpu| {
                     (
                         Choice::Gpu(gpu.clone()),
-                        model_columns(gpu, &stats, Self::price_placeholder(stats_job.state())),
+                        model_columns(gpu, &stats, stats_job.state().placeholder()),
                     )
                 })
                 .collect();

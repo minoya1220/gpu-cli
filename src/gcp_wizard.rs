@@ -3,7 +3,7 @@
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use crate::gcp::{self, Settings, TpuArgs};
-use crate::picker::{AnyJob, Job, JobState, Next, Opt, Screen};
+use crate::picker::{AnyJob, Job, Next, Opt, Screen};
 use crate::pyjson::Dict;
 use crate::repos::{resolve_repo, Repo};
 
@@ -307,11 +307,7 @@ impl Types {
         self.rates.result().or_else(|| self.cached.clone())
     }
     fn suffix(&self) -> &'static str {
-        if self.rates.state() == JobState::Failed {
-            "-"
-        } else {
-            "…"
-        }
+        self.rates.state().placeholder()
     }
 }
 fn type_screen(
@@ -555,15 +551,7 @@ pub(crate) fn priced_zone_screen<R: 'static>(
                         ]
                     }
                     Some(Err(_)) => ["-".into(), String::new()],
-                    None => [
-                        if matches!(watch.state(), JobState::Idle | JobState::Running) {
-                            "…"
-                        } else {
-                            "-"
-                        }
-                        .into(),
-                        String::new(),
-                    ],
+                    None => [watch.state().placeholder().into(), String::new()],
                 }
             }),
             prices: Some(prices),

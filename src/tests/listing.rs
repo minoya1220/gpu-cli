@@ -15,9 +15,9 @@ fn one_table_aligns_both_providers_and_formats_prices_status_and_ids() {
     assert_eq!(
         out(&ctx),
         concat!(
-            "ID          Provider  Type      Status    Price     Uptime\n",
-            "30306428    vast      RTX 4090  created   $0.10/hr  5m\n",
-            "gpu-uwhcp7  gcp       v5e-1     deleting  $0.36/hr  7m\n",
+            "ID          Provider  Type      Status    Price      Uptime\n",
+            "30306428    vast      RTX 4090  created   $0.102/hr  5m\n",
+            "gpu-uwhcp7  gcp       v5e-1     deleting  $0.359/hr  7m\n",
         )
     );
     render_table(&ctx, &items, true).unwrap();

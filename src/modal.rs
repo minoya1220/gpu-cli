@@ -101,12 +101,7 @@ pub fn validate(flags: &RunFlags, seconds: i64) -> Result<()> {
     if let Some(name) = &flags.gpu {
         gpu(name, flags.num_gpus)?;
     }
-    if flags.max_price.is_some_and(|v| !v.is_finite() || v <= 0.0) {
-        return Err(Error::usage(
-            "--max-price must be finite and greater than zero.",
-        ));
-    }
-    Ok(())
+    crate::launch::check_max_price(flags.max_price)
 }
 
 struct Helper(tempfile::NamedTempFile);

@@ -15,7 +15,7 @@ use crate::offers::{
 };
 use crate::picker::Job;
 use crate::process::run;
-use crate::prompt::{choose, choose_gpu, confirm, Choices};
+use crate::prompt::{choose, choose_gpu, confirm, Choices, Pick};
 use crate::pyfmt::{fixed, py_str, truthy};
 use crate::pyjson::{self, Dict, Value};
 use crate::redact::redact_text;
@@ -105,6 +105,14 @@ impl UpArgs {
     }
 }
 
+/// `--max-price` is a finite, positive hourly price on every provider.
+pub(crate) fn check_max_price(max_price: Option<f64>) -> Result<()> {
+    if max_price.is_some_and(|p| !p.is_finite() || p <= 0.0) {
+        return Err(Error::usage("--max-price must be greater than 0"));
+    }
+    Ok(())
+}
+
 pub fn validate_launch_args(args: &UpArgs) -> Result<()> {
     if args.num_gpus < 1 {
         return Err(Error::usage("--num-gpus must be at least 1"));
@@ -112,9 +120,7 @@ pub fn validate_launch_args(args: &UpArgs) -> Result<()> {
     if args.disk.is_some_and(|d| d < 1) {
         return Err(Error::usage("--disk must be at least 1"));
     }
-    if args.max_price.is_some_and(|p| !p.is_finite() || p <= 0.0) {
-        return Err(Error::usage("--max-price must be greater than 0"));
-    }
+    check_max_price(args.max_price)?;
     if args.reliability.is_some_and(|r| !(0.0..=1.0).contains(&r)) {
         return Err(Error::usage("--reliability must be between 0 and 1"));
     }
@@ -195,7 +201,7 @@ pub fn prompt_for_picks(
                 ctx,
                 &Choices::labelled(choices, labels),
                 "Repository",
-                None,
+                &Pick::REPO,
                 None,
             )?;
             if repo == CLONE_URL {
@@ -220,7 +226,7 @@ pub fn prompt_for_picks(
             ctx,
             &Choices::strings(MODES.map(String::from).to_vec()),
             "Mode",
-            Some("mode"),
+            &Pick::MODE,
             None,
         )?,
     };
@@ -296,7 +302,7 @@ pub fn select_offer(ctx: &Ctx, offers: Vec<Dict>, args: &UpArgs) -> Result<Dict>
         labels,
         key: &|_: &Dict| None,
     };
-    choose(ctx, &choices, "Offer", None, None)
+    choose(ctx, &choices, "Offer", &Pick::OFFER, None)
 }
 
 pub(crate) fn created_id(response: &Dict) -> Option<String> {
@@ -433,8 +439,8 @@ fn confirmation(
                 format!(" for {}", resolve_repo(repo.as_arg(), &owner)?.1)
             };
             let title = format!(
-                "Launch {gpu} {mode}{workspace} at ${}/hr?",
-                fixed(offer_price(&offer)?, 2)
+                "Launch {gpu} {mode}{workspace} at {}?",
+                crate::table::hourly(offer_price(&offer)?)
             );
             Ok(crate::prompt::Confirmation {
                 title,

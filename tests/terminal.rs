@@ -912,7 +912,7 @@ fn test_vast_confirmation_left_restores_offer_and_only_yes_enter_creates() {
     );
     assert_eq!(
         term.title(),
-        "Launch RTX 4090 container for gpu-cli at $0.30/hr?"
+        "Launch RTX 4090 container for gpu-cli at $0.300/hr?"
     );
     assert_eq!(term.last_line(), "← back");
     assert_eq!(
@@ -1119,9 +1119,9 @@ fn test_ls_is_one_compact_aligned_table_in_a_real_terminal() {
     assert_eq!(
         term.lines(),
         [
-            "ID          Provider  Type      Status    Price     Uptime",
-            "30306428    vast      RTX 4090  created   $0.10/hr  5m",
-            "gpu-uwhcp7  gcp       v5e-1     deleting  $0.36/hr  7m",
+            "ID          Provider  Type      Status    Price      Uptime",
+            "30306428    vast      RTX 4090  created   $0.102/hr  5m",
+            "gpu-uwhcp7  gcp       v5e-1     deleting  $0.359/hr  7m",
         ]
     );
     assert_aligned(&term, "$");

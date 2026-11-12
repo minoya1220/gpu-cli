@@ -207,7 +207,7 @@ impl Prices {
     }
     pub fn quote(&self, tpu: &str, spot: bool) -> String {
         self.hourly(tpu, spot)
-            .map(|p| format!("${}/hr", crate::pyfmt::fixed(p, 2)))
+            .map(crate::table::hourly)
             .unwrap_or_else(|| {
                 format!(
                     "price unavailable ({})",
@@ -264,8 +264,7 @@ impl Prices {
     }
 }
 pub(crate) fn money(rate: Option<f64>) -> String {
-    rate.map(|p| format!("${}/hr", crate::pyfmt::fixed(p, 3)))
-        .unwrap_or_else(|| "-".into())
+    rate.map(crate::table::hourly).unwrap_or_else(|| "-".into())
 }
 fn unavailable(reason: &str) -> Error {
     Error::msg(reason.to_string())

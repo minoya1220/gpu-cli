@@ -9,7 +9,7 @@ use gpu::offers::{
     category_label, gpu_category, group_by_category, model_label, offer_label, offer_rows,
     valid_gpu_name, OfferSearch, Stats,
 };
-use gpu::prompt::{choose, choose_gpu, Choices};
+use gpu::prompt::{choose, choose_gpu, Choices, Pick};
 use gpu::pyfmt::{fixed, float_repr, general, parse_float, percent, py_float, py_str, shell_quote};
 use gpu::pyjson::{dumps, loads, Dict, Value};
 use gpu::redact::{redact, redact_text};
@@ -510,13 +510,16 @@ fn python_line_prompts() {
             .map(py_str)
             .collect();
         let prompt = s(&case, "prompt").to_string();
-        let step = opt_s(&case, "step").map(String::from);
+        let pick = Pick {
+            history: opt_s(&case, "step"),
+            flag: s(&case, "flag"),
+        };
         let (result, stdout) = run(case.get("history"), case.get("answers").unwrap(), &|ctx| {
             choose(
                 ctx,
                 &Choices::strings(options.clone()),
                 &prompt,
-                step.as_deref(),
+                &pick,
                 None,
             )
         });

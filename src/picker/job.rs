@@ -23,6 +23,18 @@ pub enum JobState {
     Failed,
 }
 
+impl JobState {
+    /// The cell shown for a value this job has not produced: "…" while it
+    /// may still arrive, "-" once it cannot.
+    pub fn placeholder(self) -> &'static str {
+        if matches!(self, JobState::Idle | JobState::Running) {
+            "…"
+        } else {
+            "-"
+        }
+    }
+}
+
 /// What a screen needs from a job, whatever its result type.
 pub trait AnyJob {
     fn state(&self) -> JobState;

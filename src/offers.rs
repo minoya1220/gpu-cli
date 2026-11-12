@@ -46,6 +46,15 @@ pub struct OfferSearch {
     vm_disk: String,
 }
 
+/// Offers exist, but none at or below `--max-price`.
+fn over_max_price() -> Error {
+    Error::status(
+        crate::error::ExitCode::OverMaxPrice,
+        "Offers exceed --max-price",
+    )
+    .next("raise --max-price or choose a cheaper --gpu model.")
+}
+
 impl OfferSearch {
     pub fn new(vast: Vast, args: &UpArgs, cfg: &Dict) -> Result<OfferSearch> {
         let choosing_offer = !args.yes && args.offer.is_none();
@@ -108,11 +117,7 @@ impl OfferSearch {
             let mut unpriced = self.clone();
             unpriced.max_price = None;
             if !unpriced.offers(mode, gpu)?.is_empty() {
-                return Err(Error::status(
-                    crate::error::ExitCode::OverMaxPrice,
-                    "Offers exceed --max-price",
-                )
-                .next("raise --max-price or choose a cheaper --gpu model."));
+                return Err(over_max_price());
             }
         }
         update_gpu_cache(&self.vast.ctx.env, &items, None);
@@ -125,11 +130,7 @@ impl OfferSearch {
                 }
             }
             if kept.is_empty() && had_offers && !self.vast.ctx.interactive() {
-                return Err(Error::status(
-                    crate::error::ExitCode::OverMaxPrice,
-                    "Offers exceed --max-price",
-                )
-                .next("raise --max-price or choose a cheaper --gpu model."));
+                return Err(over_max_price());
             }
             items = kept;
         }
@@ -248,7 +249,7 @@ pub fn offer_rows(offers: &[Dict]) -> Result<Vec<String>> {
         .iter()
         .map(|offer| {
             Ok([
-                format!("${}/hr", fixed(offer_price(offer)?, 3)),
+                crate::table::hourly(offer_price(offer)?),
                 format!("{:>6} reliable", percent(reliability(offer)?, 1)),
                 text_or(offer, "verification", "unknown"),
                 format!("id={}", py_str(field(offer, "id")?)),
@@ -276,7 +277,7 @@ pub(crate) fn model_columns(model: &str, stats: &Stats, pending: &str) -> Hardwa
     [
         model.into(),
         price
-            .map(|price| format!("${}/hr", fixed(price, 3)))
+            .map(crate::table::hourly)
             .unwrap_or_else(|| pending.into()),
         "Spot -".into(),
         stats
@@ -304,7 +305,7 @@ pub(crate) fn category_columns(
     [
         category.into(),
         cheapest
-            .map(|price| format!("from ${}/hr", fixed(price, 3)))
+            .map(|price| format!("from {}", crate::table::hourly(price)))
             .unwrap_or_else(|| pending.into()),
         "Spot -".into(),
         if values.is_empty() {
@@ -319,8 +320,8 @@ pub fn model_label(model: &str, stats: &Stats) -> String {
     match stats.get(model) {
         None => model.to_string(),
         Some((price, count)) => format!(
-            "{model}  ${}/hr ({})",
-            fixed(*price, 3),
+            "{model}  {} ({})",
+            crate::table::hourly(*price),
             plural(*count, "offer")
         ),
     }
@@ -339,9 +340,9 @@ pub fn category_label(category: &str, models: &[String], stats: &Stats) -> Strin
         }
     }
     format!(
-        "{category} ({}, from ${}/hr)",
+        "{category} ({}, from {})",
         plural(priced.len(), "model"),
-        fixed(cheapest, 3)
+        crate::table::hourly(cheapest)
     )
 }
 

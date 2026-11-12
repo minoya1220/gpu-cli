@@ -1,4 +1,7 @@
-//! Shared table alignment, labels and count nouns.
+//! Shared table alignment, labels, prices and count nouns.
+pub(crate) fn hourly(price: f64) -> String {
+    format!("${}/hr", crate::pyfmt::fixed(price, 3))
+}
 pub fn plural(count: usize, word: &str) -> String {
     format!("{count} {}", noun(count, word))
 }

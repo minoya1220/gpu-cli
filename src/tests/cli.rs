@@ -6,7 +6,7 @@ use crate::offers::{
     gpu_cache_path, gpu_category, known_gpu_models, read_gpu_cache, update_gpu_cache,
 };
 use crate::process::{run, Output};
-use crate::prompt::{choose, choose_gpu, Choices};
+use crate::prompt::{choose, choose_gpu, Choices, Pick};
 use crate::pyjson::Value;
 use crate::repos::Repo;
 use crate::startup::startup_script;
@@ -502,7 +502,7 @@ fn test_picker_selects_unique_text_match_without_second_enter() {
     let ctx = t.ctx().input(&["gpu-k"]).build();
     let choices = Choices::strings(vec!["gpu-kernels".into(), "other".into()]);
     assert_eq!(
-        choose(&ctx, &choices, "Repository", None, None).unwrap(),
+        choose(&ctx, &choices, "Repository", &Pick::REPO, None).unwrap(),
         "gpu-kernels"
     );
 }
@@ -550,7 +550,20 @@ fn test_picker_filters_and_paginates() {
     let ctx = t.ctx().input(&["n", "GPU 1", "1"]).build();
     let names: Vec<String> = (0..25).map(|i| format!("GPU {i}")).collect();
     let choices = Choices::labelled(names.clone(), names);
-    assert_eq!(choose(&ctx, &choices, "GPU", None, None).unwrap(), "GPU 1");
+    assert_eq!(
+        choose(
+            &ctx,
+            &choices,
+            "GPU",
+            &Pick {
+                history: None,
+                flag: "--gpu"
+            },
+            None
+        )
+        .unwrap(),
+        "GPU 1"
+    );
     let output = out(&ctx);
     assert!(output.contains("page 1/3") && output.contains("page 2/3"));
 }
@@ -563,7 +576,17 @@ fn test_picker_recents_use_frequency_weighted_recency_and_latest_default() {
     let ctx = t.ctx().input(&[""]).build();
     let choices = Choices::strings(vec!["a".into(), "b".into()]);
     assert_eq!(
-        choose(&ctx, &choices, "Repository", Some("repo"), None).unwrap(),
+        choose(
+            &ctx,
+            &choices,
+            "Repository",
+            &Pick {
+                history: Some("repo"),
+                flag: "--repo",
+            },
+            None
+        )
+        .unwrap(),
         "b"
     );
     let output = out(&ctx);

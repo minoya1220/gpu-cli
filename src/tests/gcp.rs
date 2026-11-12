@@ -507,7 +507,7 @@ fn tpu_listing_uses_cached_slice_prices_and_create_time_without_price_requests()
         assert_eq!(main(&ctx, &["ls", "--provider", "gcp"]), 0, "{}", err(&ctx));
         let output = out(&ctx);
         assert!(
-            output.contains(if spot { "$0.75/hr" } else { "$2.75/hr" }),
+            output.contains(if spot { "$0.750/hr" } else { "$2.750/hr" }),
             "{output}"
         );
         assert!(
@@ -1408,7 +1408,7 @@ fn launch_confirmation_quotes_cached_catalog_prices_for_both_capacity_modes() {
         assert_eq!(line, format!(
             "Launch v6e-1 {} in us-east5-b for {}, deletes at 2:00 AM? (storage and networking charges apply)",
             if spot { "Spot" } else { "on-demand" },
-            if spot { "$0.75/hr" } else { "$2.75/hr" }
+            if spot { "$0.750/hr" } else { "$2.750/hr" }
         ));
         assert!(!text.contains("cached") && !text.contains(';') && !text.contains("USD list"));
     }
@@ -1616,7 +1616,7 @@ fn interactive_capacity_retry_is_one_key_and_keeps_original_deadline() {
             );
             let clock = clock.clone();
             match drive(screen, move |keys| {
-                keys.wait(|s| s.labels.iter().any(|l| l.contains("us-east5-a  $0.75/hr")));
+                keys.wait(|s| s.labels.iter().any(|l| l.contains("us-east5-a  $0.750/hr")));
                 assert!(keys.snapshot().notice.contains("Deletes at 2:00 AM"));
                 assert!(!keys.labels().iter().any(|s| s.contains("in us-east5-b")));
                 clock.sleep(30.0);

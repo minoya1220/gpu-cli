@@ -223,7 +223,7 @@ impl Queue {
         Ok(())
     }
     pub(crate) fn pending(&self, ctx: &Ctx) -> Result<Vec<Dict>> {
-        crate::gcp_http::pages(
+        crate::gcp::http::pages(
             ctx,
             &self.project,
             &format!(

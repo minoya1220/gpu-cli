@@ -314,7 +314,7 @@ fn metadata_jobs_are_running_on_repository_and_reused_through_tpu_capacity() {
                 models: MODELS.map(String::from).to_vec(),
                 owner: "example".into(),
                 tpu: TpuOptions {
-                    transition: Some(crate::gcp_wizard::transition(
+                    transition: Some(crate::gcp::wizard::transition(
                         &ctx,
                         &crate::launch::UpArgs {
                             num_gpus: 1,
@@ -397,8 +397,8 @@ fn prefetch_without_google_setup_never_calls_cloud_even_after_opening_gpu() {
     let runner = crate::testing::FakeRunner::forbid();
     let ctx = env.ctx().runner(&runner).build();
     let cfg = Dict::new();
-    let prices = crate::gcp_prices::job(&ctx, &cfg);
-    let catalog = crate::gcp_catalog::types_job(&ctx, &cfg);
+    let prices = crate::gcp::prices::job(&ctx, &cfg);
+    let catalog = crate::gcp::catalog::types_job(&ctx, &cfg);
     let price_state = prices.observer();
     let catalog_state = catalog.observer();
     let flow = LaunchWizard::new(

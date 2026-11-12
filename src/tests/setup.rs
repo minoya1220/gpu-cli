@@ -768,12 +768,12 @@ fn setup_needs_no_zone_and_populates_types_zones_and_sku_cache() {
         .is_none());
     assert!(runner.calls().iter().any(|c| c.program() == "curl"));
     assert_eq!(
-        crate::gcp_facts::known_types(&ctx, "test-project", Some("us-east5-b")),
+        crate::gcp::facts::known_types(&ctx, "test-project", Some("us-east5-b")),
         ["v6e-1"]
     );
-    assert_eq!(crate::gcp_facts::skus(&ctx).len(), 1);
+    assert_eq!(crate::gcp::facts::skus(&ctx).len(), 1);
     assert_eq!(
-        crate::gcp::text(&crate::gcp_facts::skus(&ctx)[0], "id"),
+        crate::gcp::text(&crate::gcp::facts::skus(&ctx)[0], "id"),
         Some("test-sku")
     );
 }

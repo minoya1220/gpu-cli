@@ -11,11 +11,11 @@ fn cached_rates(
     ctx: &Ctx,
     cfg: &Dict,
     zone: Option<&str>,
-) -> Option<std::sync::Arc<crate::gcp_prices::Prices>> {
-    zone.and_then(|zone| crate::gcp_prices::cached(ctx, cfg, zone))
-        .or_else(|| crate::gcp_prices::cached_default(ctx, cfg))
+) -> Option<std::sync::Arc<crate::gcp::prices::Prices>> {
+    zone.and_then(|zone| crate::gcp::prices::cached(ctx, cfg, zone))
+        .or_else(|| crate::gcp::prices::cached_default(ctx, cfg))
 }
-fn estimates(price: std::sync::Arc<crate::gcp_prices::Prices>) -> String {
+fn estimates(price: std::sync::Arc<crate::gcp::prices::Prices>) -> String {
     format!(
         "Estimates: {}  USD list {}",
         price.region,
@@ -54,10 +54,10 @@ pub(crate) fn catalog_job(
     Job::new(move || {
         let load = || -> Result<Vec<String>> {
             if kind == "locations" {
-                return crate::gcp_catalog::zones(&worker, &project, tpu.as_deref())
+                return crate::gcp::catalog::zones(&worker, &project, tpu.as_deref())
                     .map(|zs| zs.into_iter().map(|z| z.name).collect());
             }
-            crate::gcp_catalog::cached_types(
+            crate::gcp::catalog::cached_types(
                 &worker,
                 &project,
                 zone.as_deref().ok_or_else(gcp::bad_reply)?,
@@ -194,9 +194,9 @@ fn next_with(
                 let seconds = crate::expiry::parse_duration(s)?;
                 if !i64::try_from(seconds)
                     .ok()
-                    .is_some_and(|seconds| crate::gcp_expiry::EXPIRY_SECONDS.contains(&seconds))
+                    .is_some_and(|seconds| crate::gcp::expiry::EXPIRY_SECONDS.contains(&seconds))
                 {
-                    return Err(crate::gcp_expiry::expiry_bound().text().into());
+                    return Err(crate::gcp::expiry::expiry_bound().text().into());
                 }
                 Ok(())
             })))
@@ -220,7 +220,7 @@ pub(crate) fn capacity_screen(
     let (rates, cached) = match data {
         Some(data) => (data.rates, data.cached),
         None => (
-            crate::gcp_prices::job_at(&ctx, &cfg, picks.zone.as_deref()),
+            crate::gcp::prices::job_at(&ctx, &cfg, picks.zone.as_deref()),
             cached_rates(&ctx, &cfg, picks.zone.as_deref()),
         ),
     };
@@ -235,12 +235,12 @@ pub(crate) fn capacity_screen(
             let cells = [
                 [
                     "On-demand".into(),
-                    crate::gcp_prices::money(price.as_ref().and_then(|p| p.hourly(&tpu, false))),
+                    crate::gcp::prices::money(price.as_ref().and_then(|p| p.hourly(&tpu, false))),
                     String::new(),
                 ],
                 [
                     "Spot".into(),
-                    crate::gcp_prices::money(price.as_ref().and_then(|p| p.hourly(&tpu, true))),
+                    crate::gcp::prices::money(price.as_ref().and_then(|p| p.hourly(&tpu, true))),
                     "(may be interrupted)".into(),
                 ],
             ];
@@ -284,8 +284,8 @@ pub(crate) fn capacity_screen(
 pub(crate) struct Types {
     pub(crate) initial: Vec<String>,
     pub(crate) catalog: Job<Vec<String>>,
-    pub(crate) rates: Job<std::sync::Arc<crate::gcp_prices::Prices>>,
-    pub(crate) cached: Option<std::sync::Arc<crate::gcp_prices::Prices>>,
+    pub(crate) rates: Job<std::sync::Arc<crate::gcp::prices::Prices>>,
+    pub(crate) cached: Option<std::sync::Arc<crate::gcp::prices::Prices>>,
 }
 impl Types {
     fn names(&self) -> Vec<String> {
@@ -295,7 +295,7 @@ impl Types {
             .map(|types| {
                 types
                     .into_iter()
-                    .map(crate::gcp_types::public)
+                    .map(crate::gcp::types::public)
                     .collect::<Vec<_>>()
             })
             .unwrap_or_else(|| self.initial.clone());
@@ -303,7 +303,7 @@ impl Types {
         names.dedup();
         names
     }
-    fn price(&self) -> Option<std::sync::Arc<crate::gcp_prices::Prices>> {
+    fn price(&self) -> Option<std::sync::Arc<crate::gcp::prices::Prices>> {
         self.rates.result().or_else(|| self.cached.clone())
     }
     fn suffix(&self) -> &'static str {
@@ -318,14 +318,14 @@ fn type_screen(
     data: Option<Types>,
 ) -> Screen<String, TpuSelection> {
     let data = data.unwrap_or_else(|| {
-        let initial = crate::gcp_facts::known_types(&ctx, &settings.project, None)
+        let initial = crate::gcp::facts::known_types(&ctx, &settings.project, None)
             .into_iter()
-            .map(crate::gcp_types::public)
+            .map(crate::gcp::types::public)
             .collect();
         Types {
             initial,
-            catalog: crate::gcp_catalog::types_job(&ctx, &cfg),
-            rates: crate::gcp_prices::job_at(&ctx, &cfg, picks.zone.as_deref()),
+            catalog: crate::gcp::catalog::types_job(&ctx, &cfg),
+            rates: crate::gcp::prices::job_at(&ctx, &cfg, picks.zone.as_deref()),
             cached: cached_rates(&ctx, &cfg, picks.zone.as_deref()),
         }
     });
@@ -337,8 +337,8 @@ fn type_screen(
         .unwrap_or_else(|| "TPU generation".into());
     let preferred = generation
         .as_deref()
-        .and_then(|g| crate::gcp_preferences::accelerator(&ctx, &settings.project, g))
-        .or_else(|| crate::gcp_preferences::generation(&ctx, &settings.project));
+        .and_then(|g| crate::gcp::preferences::accelerator(&ctx, &settings.project, g))
+        .or_else(|| crate::gcp::preferences::generation(&ctx, &settings.project));
     let rows = data.clone();
     let group = generation.clone();
     let highlight = data.clone();
@@ -352,15 +352,15 @@ fn type_screen(
             let price = rows.price();
             let values = group
                 .as_deref()
-                .map(|g| crate::gcp_types::members(&names, g))
-                .unwrap_or_else(|| crate::gcp_types::generations(&names));
+                .map(|g| crate::gcp::types::members(&names, g))
+                .unwrap_or_else(|| crate::gcp::types::generations(&names));
             let cells = values
                 .iter()
                 .map(|value| {
                     let types = if size_step {
                         vec![value.clone()]
                     } else {
-                        crate::gcp_types::members(&names, value)
+                        crate::gcp::types::members(&names, value)
                     };
                     let [demand, spot] = price
                         .as_ref()
@@ -375,7 +375,7 @@ fn type_screen(
                         });
                     [
                         if size_step {
-                            crate::gcp_types::label(value)
+                            crate::gcp::types::label(value)
                         } else {
                             value.clone()
                         },
@@ -430,8 +430,8 @@ fn type_screen(
         let names = highlight.names();
         let values = selected_group
             .as_deref()
-            .map(|g| crate::gcp_types::members(&names, g))
-            .unwrap_or_else(|| crate::gcp_types::generations(&names));
+            .map(|g| crate::gcp::types::members(&names, g))
+            .unwrap_or_else(|| crate::gcp::types::generations(&names));
         preferred
             .as_ref()
             .and_then(|p| values.iter().position(|v| v == p))
@@ -453,7 +453,7 @@ type ZoneRates = std::sync::Arc<
     std::sync::Mutex<
         std::collections::BTreeMap<
             String,
-            std::result::Result<std::sync::Arc<crate::gcp_prices::Prices>, String>,
+            std::result::Result<std::sync::Arc<crate::gcp::prices::Prices>, String>,
         >,
     >,
 >;
@@ -466,14 +466,14 @@ pub(crate) fn priced_zone_screen<R: 'static>(
     excluded: &std::collections::BTreeSet<String>,
     select: impl Fn(String) -> Next<String, R> + 'static,
 ) -> Screen<String, R> {
-    let mut initial = crate::gcp_catalog::known(ctx, &settings.project, Some(tpu));
+    let mut initial = crate::gcp::catalog::known(ctx, &settings.project, Some(tpu));
     initial.retain(|z| !excluded.contains(&z.name));
     let worker = ctx.clone();
     let project = settings.project.clone();
     let filter = tpu.to_string();
     let skip = excluded.clone();
     let zones = Job::new(move || {
-        crate::gcp_catalog::zones(&worker, &project, Some(&filter))
+        crate::gcp::catalog::zones(&worker, &project, Some(&filter))
             .map(|mut zs| {
                 zs.retain(|z| !skip.contains(&z.name));
                 zs
@@ -481,14 +481,14 @@ pub(crate) fn priced_zone_screen<R: 'static>(
             .map_err(|e| e.text().into())
     });
     let rates: ZoneRates = Default::default();
-    if let Some(p) = crate::gcp_prices::cached_default(ctx, cfg) {
+    if let Some(p) = crate::gcp::prices::cached_default(ctx, cfg) {
         rates.lock().unwrap().insert(p.region.clone(), Ok(p));
     }
     // Fetch nearby regions first and only once per region, not once per zone.
     let mut regions = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     for zone in &initial {
-        if let Some(region) = crate::gcp_geo::region(&zone.name) {
+        if let Some(region) = crate::gcp::geo::region(&zone.name) {
             if seen.insert(region.to_string()) {
                 regions.push((region.to_string(), zone.name.clone()));
             }
@@ -502,7 +502,7 @@ pub(crate) fn priced_zone_screen<R: 'static>(
         let mut error = None;
         let mut success = false;
         for (region, zone) in &regions {
-            let rate = crate::gcp_prices::load_for(&worker, &config, zone, Some((&kind, spot)))
+            let rate = crate::gcp::prices::load_for(&worker, &config, zone, Some((&kind, spot)))
                 .map(std::sync::Arc::new)
                 .map_err(|e| e.text().to_string());
             if rate.is_ok() {
@@ -524,7 +524,7 @@ pub(crate) fn priced_zone_screen<R: 'static>(
     });
     let watch = prices.clone();
     let kind = tpu.to_string();
-    crate::gcp_zones::present(
+    crate::gcp::zones::present(
         zones,
         initial,
         "TPU zone",
@@ -532,17 +532,17 @@ pub(crate) fn priced_zone_screen<R: 'static>(
             "{tpu} {}  USD list",
             if spot { "Spot" } else { "on-demand" }
         ),
-        crate::gcp_zones::Presentation {
-            preferred: crate::gcp_preferences::last(ctx, &settings.project)
+        crate::gcp::zones::Presentation {
+            preferred: crate::gcp::preferences::last(ctx, &settings.project)
                 .or_else(|| settings.zone.clone()),
             fields: std::rc::Rc::new(move |z| {
-                let rate = crate::gcp_geo::region(&z.name)
+                let rate = crate::gcp::geo::region(&z.name)
                     .and_then(|r| rates.lock().ok()?.get(r).cloned());
                 match rate {
                     Some(Ok(p)) => {
                         let amount = p.hourly(&kind, spot);
                         [
-                            crate::gcp_prices::money(amount),
+                            crate::gcp::prices::money(amount),
                             if amount.is_some() {
                                 p.cache_note()
                             } else {
@@ -625,7 +625,7 @@ pub(crate) fn transition(
 pub(crate) fn runtime_for(tpu: &str) -> Result<&'static str> {
     match tpu
         .split_once('-')
-        .map(|(generation, _)| crate::gcp_types::family(generation))
+        .map(|(generation, _)| crate::gcp::types::family(generation))
     {
         Some("v2" | "v3" | "v4") => Ok("tpu-ubuntu2204-base"),
         Some("v5e") => Ok("v2-alpha-tpuv5-lite"),
@@ -652,7 +652,7 @@ pub(crate) fn initial_selection(
             if ctx.interactive() {
                 None
             } else {
-                crate::gcp_preferences::last(ctx, &settings.project)
+                crate::gcp::preferences::last(ctx, &settings.project)
                     .or_else(|| settings.zone.clone())
             }
         }),
@@ -660,7 +660,7 @@ pub(crate) fn initial_selection(
             .tpu
             .as_ref()
             .filter(|s| !s.contains('-'))
-            .map(|g| crate::gcp_types::family(g).to_string()),
+            .map(|g| crate::gcp::types::family(g).to_string()),
         tpu: flags.tpu.clone().filter(|s| s.contains('-')),
         // Non-interactive launches default to on-demand.
         spot: flags.spot.or((!ctx.interactive()).then_some(false)),
@@ -684,7 +684,7 @@ pub(crate) fn complete(
     let tpu = selected.tpu.ok_or_else(missing)?;
     let spot = selected.spot.unwrap_or(false);
     // v5e's TPU API accelerator name predates its public product name.
-    let tpu = crate::gcp_types::canonical(&tpu);
+    let tpu = crate::gcp::types::canonical(&tpu);
     let runtime = match &flags.runtime {
         Some(runtime) => runtime.clone(),
         None => runtime_for(&tpu)?.to_string(),
@@ -745,9 +745,9 @@ fn launch_next(
     let next = next_with(ctx.clone(), settings.clone(), cfg.clone(), selected, None);
     match next {
         Next::Screen(mut screen) if type_selected => {
-            screen = screen.background(crate::gcp_catalog::types_job(ctx, cfg));
+            screen = screen.background(crate::gcp::catalog::types_job(ctx, cfg));
             if duration_only {
-                screen = screen.prices(crate::gcp_prices::job_at(ctx, cfg, zone.as_deref()));
+                screen = screen.prices(crate::gcp::prices::job_at(ctx, cfg, zone.as_deref()));
             }
             Next::Screen(screen)
         }

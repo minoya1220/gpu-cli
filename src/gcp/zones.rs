@@ -1,13 +1,13 @@
 //! Shared two-level zone picker. Callers supply geographically ordered zones;
 //! area order follows the nearest member, without a second geography table.
 use crate::{
-    gcp_catalog::Zone,
+    gcp::catalog::Zone,
     picker::{Job, Next, Opt, Screen},
 };
 use std::rc::Rc;
 
 pub fn area(zone: &str) -> String {
-    let prefix = crate::gcp_geo::region(zone)
+    let prefix = crate::gcp::geo::region(zone)
         .unwrap_or(zone)
         .trim_end_matches(|c: char| c.is_ascii_digit());
     // The requested South America umbrella covers every numbered/directional

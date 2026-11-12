@@ -192,7 +192,7 @@ impl Instance for crate::gcp::TpuId {
         Provider::Gcp
     }
     fn wait_ssh(&self, ctx: &Ctx, timeout: f64) -> Result<String> {
-        crate::gcp_ssh::ready_alias(ctx, self, timeout)
+        crate::gcp::ssh::ready_alias(ctx, self, timeout)
     }
     fn expire(
         &self,
@@ -201,16 +201,16 @@ impl Instance for crate::gcp::TpuId {
         action: &str,
         deadline: Option<Timestamp>,
     ) -> Result<()> {
-        crate::gcp_expiry::manage(ctx, cfg, self, action, deadline)
+        crate::gcp::expiry::manage(ctx, cfg, self, action, deadline)
     }
     fn edit(&self, ctx: &Ctx, editor: Option<&str>, nvim_config: Option<&Value>) -> Result<()> {
         ctx.require_gcloud()?;
         crate::editors::open(ctx, &self.cli(), editor, nvim_config, |editor| {
-            crate::gcp_ssh::editor_target(ctx, self, editor)
+            crate::gcp::ssh::editor_target(ctx, self, editor)
         })
     }
     fn ssh(&self, ctx: &Ctx, exec: bool) -> Result<()> {
-        crate::gcp_ssh::ssh(ctx, self, exec)
+        crate::gcp::ssh::ssh(ctx, self, exec)
     }
     fn stop(&self, ctx: &Ctx, cfg: &Dict) -> Result<()> {
         crate::gcp::lifecycle(ctx, self, cfg, false, false)

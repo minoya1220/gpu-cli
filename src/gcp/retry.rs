@@ -2,9 +2,9 @@
 //! All alternative/type/price reads for the retry menu run in a Job.
 use crate::{
     ctx::Ctx,
+    gcp::catalog::Zone,
+    gcp::wizard::TpuPicks,
     gcp::Settings,
-    gcp_catalog::Zone,
-    gcp_wizard::TpuPicks,
     picker::{Job, Next, Opt, Screen},
     pyjson::Dict,
 };
@@ -30,20 +30,20 @@ pub(crate) fn alternatives(
     count: usize,
 ) -> Vec<Zone> {
     let mut found = Vec::new();
-    for zone in crate::gcp_catalog::known(ctx, &settings.project, Some(&picks.tpu)) {
+    for zone in crate::gcp::catalog::known(ctx, &settings.project, Some(&picks.tpu)) {
         if excluded.contains(&zone.name) {
             continue;
         }
         if picks.deadline.as_second() <= ctx.clock.now().as_second() {
             break;
         }
-        let types = match crate::gcp_catalog::types(ctx, &settings.project, &zone.name) {
+        let types = match crate::gcp::catalog::types(ctx, &settings.project, &zone.name) {
             Ok(types) => types,
             // Do not fan out after a transport/auth failure, or present it as
             // proof that a zone lacks this type. Manual selection stays usable.
             Err(_) => break,
         };
-        if types.contains(&crate::gcp_types::canonical(&picks.tpu)) {
+        if types.contains(&crate::gcp::types::canonical(&picks.tpu)) {
             found.push(zone);
             if found.len() == count {
                 break;
@@ -93,7 +93,7 @@ pub(crate) fn screen(
             .into_iter()
             .next()
             .map(|zone| {
-                let (price, rate) = match crate::gcp_prices::load_for(
+                let (price, rate) = match crate::gcp::prices::load_for(
                     &worker,
                     &config,
                     &zone.name,
@@ -114,7 +114,7 @@ pub(crate) fn screen(
     });
     let approved = offer.clone();
     let result = offer.clone();
-    let tpu = crate::gcp_types::public(picks.tpu.clone());
+    let tpu = crate::gcp::types::public(picks.tpu.clone());
     let mode = if picks.spot { "Spot" } else { "on-demand" };
     let picker_config = cfg.clone();
     let picker_spot = picks.spot;
@@ -152,7 +152,7 @@ pub(crate) fn screen(
             if value != "@choose" {
                 return Next::Done(None);
             }
-            Next::Screen(crate::gcp_wizard::priced_zone_screen(
+            Next::Screen(crate::gcp::wizard::priced_zone_screen(
                 &parent,
                 &settings,
                 &picker_config,

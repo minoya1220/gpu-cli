@@ -338,10 +338,10 @@ impl Plan {
         .iter()
         .any(|q| text(q, "name") == Some(&self.resource())))
     }
-    fn queue(&self) -> Result<crate::gcp_expiry::Queue> {
+    fn queue(&self) -> Result<crate::gcp::expiry::Queue> {
         let mut cfg = Dict::new();
         cfg.insert("gcp", Value::Dict(self.config()));
-        crate::gcp_expiry::Queue::load(&gcp::Settings::load(&cfg)?)
+        crate::gcp::expiry::Queue::load(&gcp::Settings::load(&cfg)?)
     }
     fn config(&self) -> Dict {
         let mut setup = Dict::new();
@@ -653,8 +653,8 @@ fn setup_gcp(ctx: &Ctx, cfg: &Dict, flags: &SetupFlags) -> Result<()> {
     }
     plan.queue()?.check(ctx)?;
     ctx.println("Fetching TPU types, zones and SKU IDs...")?;
-    crate::gcp_catalog::refresh(ctx, &plan.project)?;
-    crate::gcp_facts::refresh_skus(ctx, &plan.project)?;
+    crate::gcp::catalog::refresh(ctx, &plan.project)?;
+    crate::gcp::facts::refresh_skus(ctx, &plan.project)?;
     plan.version = 1;
     crate::config::save_gcp(&ctx.env, Some(plan.config()))?;
     ctx.result("ready", Value::Bool(true));

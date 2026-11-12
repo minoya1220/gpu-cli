@@ -1,5 +1,18 @@
 //! Google Cloud TPU VM adapter. All external work crosses Runner; no SDK
 //! credential files, account keys, or tokens are copied to a VM.
+pub(crate) mod catalog;
+pub(crate) mod expiry;
+pub(crate) mod facts;
+pub(crate) mod geo;
+pub(crate) mod http;
+pub(crate) mod preferences;
+pub(crate) mod prices;
+pub(crate) mod retry;
+pub(crate) mod ssh;
+pub(crate) mod types;
+pub(crate) mod wizard;
+pub(crate) mod zones;
+
 use jiff::Timestamp;
 
 use crate::cli::UpFlags;
@@ -295,9 +308,9 @@ pub fn all_nodes(ctx: &Ctx, project: &str) -> Result<Vec<Dict>> {
     for _ in 0..30 {
         let url = format!(
             "https://tpu.googleapis.com/v2/projects/{project}/locations/-/nodes?pageSize=1000&pageToken={}",
-            crate::gcp_http::encode(&next)
+            http::encode(&next)
         );
-        let data = crate::gcp_http::get(ctx, project, &url)?;
+        let data = http::get(ctx, project, &url)?;
         if let Some(unreachable) = data.get("unreachable") {
             if !unreachable.as_list().is_some_and(|xs| xs.is_empty()) {
                 return Err(
@@ -339,7 +352,7 @@ pub(crate) fn vm_node(node: &Dict) -> bool {
 }
 
 pub fn list(ctx: &Ctx, settings: &Settings) -> Result<Vec<Dict>> {
-    let queue = crate::gcp_expiry::Queue::load(settings)?;
+    let queue = expiry::Queue::load(settings)?;
     // Independent reads share one OAuth token and run concurrently. An
     // incomplete node snapshot cannot authorize orphan deletion.
     let (nodes, tasks) = std::thread::scope(|scope| {
@@ -353,7 +366,7 @@ pub fn list(ctx: &Ctx, settings: &Settings) -> Result<Vec<Dict>> {
     queue.reconcile_inventory(ctx, &nodes, tasks?)?;
     // One local cache read for all regions. Listing must not start price or
     // catalog requests, regardless of the number of instances.
-    let prices = crate::gcp_prices::cached_project(ctx, &settings.project);
+    let prices = prices::cached_project(ctx, &settings.project);
     let now = ctx.clock.now();
     nodes
         .iter()
@@ -365,7 +378,7 @@ pub fn list(ctx: &Ctx, settings: &Settings) -> Result<Vec<Dict>> {
             item.insert("provider", Value::str("gcp"));
             item.insert(
                 "gpu_name",
-                Value::str(crate::gcp_types::public(
+                Value::str(types::public(
                     text(node, "acceleratorType").unwrap_or("TPU").into(),
                 )),
             );
@@ -387,7 +400,7 @@ pub fn list(ctx: &Ctx, settings: &Settings) -> Result<Vec<Dict>> {
                 }
             }
             let spot = is_spot(node);
-            if let Some(hourly) = crate::gcp_geo::region(&id.zone)
+            if let Some(hourly) = geo::region(&id.zone)
                 .and_then(|region| prices.get(region))
                 .and_then(|price| price.hourly(text(node, "acceleratorType").unwrap_or(""), spot))
             {
@@ -400,11 +413,11 @@ pub fn list(ctx: &Ctx, settings: &Settings) -> Result<Vec<Dict>> {
 
 /// Validate launch configuration locally, before leaving the hardware picker.
 /// This does not call gcloud or verify remote IAM/queue readiness.
-pub fn launch_setup(ctx: &Ctx, cfg: &Dict) -> Result<(Settings, crate::gcp_expiry::Queue)> {
+pub fn launch_setup(ctx: &Ctx, cfg: &Dict) -> Result<(Settings, expiry::Queue)> {
     let load = || {
         ctx.require_gcloud()?;
         let settings = Settings::load(cfg)?;
-        let queue = crate::gcp_expiry::Queue::load(&settings)?;
+        let queue = expiry::Queue::load(&settings)?;
         Ok((settings, queue))
     };
     load().map_err(|error: Error| {
@@ -507,14 +520,14 @@ fn reject_vast_flags(args: &crate::launch::UpArgs) -> Result<()> {
 
 #[derive(Clone)]
 pub(crate) struct Prepared {
-    pub(crate) picks: crate::gcp_wizard::TpuPicks,
+    pub(crate) picks: wizard::TpuPicks,
     title: String,
     price: String,
     rate: Option<f64>,
 }
 
-fn quote(ctx: &Ctx, cfg: &Dict, picks: &crate::gcp_wizard::TpuPicks) -> (String, Option<f64>) {
-    match crate::gcp_prices::load_for(ctx, cfg, &picks.zone, Some((&picks.tpu, picks.spot))) {
+fn quote(ctx: &Ctx, cfg: &Dict, picks: &wizard::TpuPicks) -> (String, Option<f64>) {
+    match prices::load_for(ctx, cfg, &picks.zone, Some((&picks.tpu, picks.spot))) {
         Ok(prices) => (
             prices.quote(&picks.tpu, picks.spot),
             prices.hourly(&picks.tpu, picks.spot),
@@ -523,22 +536,22 @@ fn quote(ctx: &Ctx, cfg: &Dict, picks: &crate::gcp_wizard::TpuPicks) -> (String,
     }
 }
 
-fn launch_title(ctx: &Ctx, picks: &crate::gcp_wizard::TpuPicks, price: &str) -> String {
+fn launch_title(ctx: &Ctx, picks: &wizard::TpuPicks, price: &str) -> String {
     format!(
         "Launch {} {} in {} for {price}, deletes at {}? (storage and networking charges apply)",
-        crate::gcp_types::public(picks.tpu.clone()),
+        types::public(picks.tpu.clone()),
         if picks.spot { "Spot" } else { "on-demand" },
         picks.zone,
         deadline_label(ctx, picks.deadline)
     )
 }
 
-fn prepare(ctx: &Ctx, cfg: &Dict, picks: crate::gcp_wizard::TpuPicks) -> Result<Prepared> {
+fn prepare(ctx: &Ctx, cfg: &Dict, picks: wizard::TpuPicks) -> Result<Prepared> {
     let (settings, queue) = launch_setup(ctx, cfg)?;
-    crate::gcp_expiry::validate_deadline(ctx, picks.deadline)?;
+    expiry::validate_deadline(ctx, picks.deadline)?;
     startup(&picks.repo, cfg)?;
     queue.reconcile(ctx)?;
-    crate::gcp_catalog::verify(ctx, &settings.project, &picks.zone, &picks.tpu)?;
+    catalog::verify(ctx, &settings.project, &picks.zone, &picks.tpu)?;
     let (price, rate) = quote(ctx, cfg, &picks);
     let title = launch_title(ctx, &picks, &price);
     Ok(Prepared {
@@ -552,7 +565,7 @@ fn prepare(ctx: &Ctx, cfg: &Dict, picks: crate::gcp_wizard::TpuPicks) -> Result<
 fn preparation_job(
     ctx: &Ctx,
     cfg: &Dict,
-    picks: crate::gcp_wizard::TpuPicks,
+    picks: wizard::TpuPicks,
 ) -> crate::picker::Job<crate::prompt::Confirmation<Prepared>> {
     let worker = ctx.clone();
     let cfg = cfg.clone();
@@ -568,7 +581,7 @@ fn preparation_job(
 pub(crate) fn confirmation<V: crate::picker::PickValue>(
     ctx: &Ctx,
     cfg: &Dict,
-    picks: crate::gcp_wizard::TpuPicks,
+    picks: wizard::TpuPicks,
 ) -> crate::picker::Screen<V, Prepared> {
     crate::prompt::confirmation_screen(preparation_job(ctx, cfg, picks))
 }
@@ -576,10 +589,10 @@ pub(crate) fn confirmation<V: crate::picker::PickValue>(
 fn retry_confirmation(
     ctx: &Ctx,
     cfg: &Dict,
-    picks: &crate::gcp_wizard::TpuPicks,
-    screen: crate::picker::Screen<String, Option<crate::gcp_retry::Choice>>,
+    picks: &wizard::TpuPicks,
+    screen: crate::picker::Screen<String, Option<retry::Choice>>,
     approved: std::rc::Rc<std::cell::RefCell<Option<Prepared>>>,
-) -> crate::picker::Screen<String, Option<crate::gcp_retry::Choice>> {
+) -> crate::picker::Screen<String, Option<retry::Choice>> {
     use crate::picker::Next;
     use std::rc::Rc;
     let worker = ctx.clone();
@@ -648,8 +661,8 @@ pub(crate) fn launch_with_retry(
     cfg: &Dict,
     deadline: Option<Timestamp>,
     retry: impl FnMut(
-        crate::picker::Screen<String, Option<crate::gcp_retry::Choice>>,
-    ) -> Result<Option<crate::gcp_retry::Choice>>,
+        crate::picker::Screen<String, Option<retry::Choice>>,
+    ) -> Result<Option<retry::Choice>>,
 ) -> Result<crate::launch::Launched> {
     launch_loop(ctx, flags, cfg, deadline, None, retry)
 }
@@ -661,18 +674,18 @@ fn launch_loop(
     deadline: Option<Timestamp>,
     mut prepared: Option<Prepared>,
     mut retry: impl FnMut(
-        crate::picker::Screen<String, Option<crate::gcp_retry::Choice>>,
-    ) -> Result<Option<crate::gcp_retry::Choice>>,
+        crate::picker::Screen<String, Option<retry::Choice>>,
+    ) -> Result<Option<retry::Choice>>,
 ) -> Result<crate::launch::Launched> {
     let (settings, queue) = launch_setup(ctx, cfg)?;
     if prepared.is_none() && ctx.interactive() && !flags.yes && !flags.dry_run {
-        prepared = Some(crate::gcp_wizard::choose_confirmed(
+        prepared = Some(wizard::choose_confirmed(
             ctx, flags, &settings, cfg, deadline,
         )?);
     }
     let mut picks = match &prepared {
         Some(prepared) => prepared.picks.clone(),
-        None => crate::gcp_wizard::choose(ctx, flags, &settings, cfg, deadline)?,
+        None => wizard::choose(ctx, flags, &settings, cfg, deadline)?,
     };
     let deadline = picks.deadline;
     let mut confirm = !flags.yes;
@@ -681,15 +694,15 @@ fn launch_loop(
     let mut attempted = std::collections::BTreeSet::new();
     loop {
         attempted.insert(picks.zone.clone());
-        crate::gcp_expiry::validate_deadline(ctx, deadline)?;
+        expiry::validate_deadline(ctx, deadline)?;
         let approved = prepared.take();
         if !flags.dry_run {
             if approved.is_none() {
                 queue.reconcile(ctx)?;
-                crate::gcp_catalog::verify(ctx, &settings.project, &picks.zone, &picks.tpu)?;
+                catalog::verify(ctx, &settings.project, &picks.zone, &picks.tpu)?;
             }
-            crate::gcp_preferences::remember(ctx, &settings.project, &picks.zone);
-            crate::gcp_preferences::remember_type(ctx, &settings.project, &picks.tpu);
+            preferences::remember(ctx, &settings.project, &picks.zone);
+            preferences::remember_type(ctx, &settings.project, &picks.tpu);
         }
         let id = TpuId {
             project: settings.project.clone(),
@@ -717,7 +730,7 @@ fn launch_loop(
             picks.directory
         ));
         if flags.dry_run {
-            let rate = crate::gcp_prices::cached(ctx, cfg, &picks.zone)
+            let rate = prices::cached(ctx, cfg, &picks.zone)
                 .and_then(|prices| prices.hourly(&picks.tpu, picks.spot));
             crate::guardrails::spending(ctx, cfg, rate, Some(deadline))?;
             crate::launch::planned_result(ctx, Provider::Gcp, None, rate, Some(deadline));
@@ -784,8 +797,7 @@ fn launch_loop(
                     if ctx.interactive() {
                         ctx.println(&failure)?;
                         let approved_retry = std::rc::Rc::new(std::cell::RefCell::new(None));
-                        let screen =
-                            crate::gcp_retry::screen(ctx, &settings, cfg, &picks, &attempted);
+                        let screen = retry::screen(ctx, &settings, cfg, &picks, &attempted);
                         let screen = if !flags.yes {
                             retry_confirmation(ctx, cfg, &picks, screen, approved_retry.clone())
                         } else {
@@ -803,8 +815,7 @@ fn launch_loop(
                         ctx.println("Cancelled.")?;
                         return Ok(crate::launch::Launched::default());
                     }
-                    let alternatives =
-                        crate::gcp_retry::alternatives(ctx, &settings, &picks, &attempted, 3);
+                    let alternatives = retry::alternatives(ctx, &settings, &picks, &attempted, 3);
                     let zones = alternatives
                         .iter()
                         .map(|z| z.name.as_str())
@@ -812,7 +823,7 @@ fn launch_loop(
                         .join(", ");
                     let next = alternatives
                         .first()
-                        .map(|z| crate::gcp_retry::command(&picks, &z.name))
+                        .map(|z| retry::command(&picks, &z.name))
                         .unwrap_or_else(|| "gpu up --provider gcp".into());
                     return Err(Error::status(
                         crate::error::ExitCode::NoCapacity,
@@ -921,18 +932,18 @@ fn startup(repo: &crate::repos::Repo, cfg: &Dict) -> Result<String> {
 
 /// Clean up local records of a TPU gpu recorded but that is already gone.
 fn forget_absent(ctx: &Ctx, id: &TpuId, cfg: &Dict) -> Result<()> {
-    let queue = crate::gcp_expiry::queue_for_node(cfg, id, &Dict::new()).ok();
+    let queue = expiry::queue_for_node(cfg, id, &Dict::new()).ok();
     let tasks = match &queue {
         Some(queue) => queue.has_tasks(ctx, id)?,
         None => false,
     };
-    if !tasks && !crate::gcp_ssh::has(ctx, id)? {
+    if !tasks && !ssh::has(ctx, id)? {
         return Err(Error::not_found(&id.cli()));
     }
     if let (Some(queue), true) = (&queue, tasks) {
         queue.cancel(ctx, id)?;
     }
-    crate::gcp_ssh::remove(ctx, id)?;
+    ssh::remove(ctx, id)?;
     ctx.result("state", Value::str("already_absent"));
     ctx.println(&format!("TPU {} is already absent.", id.cli()))
 }
@@ -960,7 +971,7 @@ pub fn lifecycle(ctx: &Ctx, id: &TpuId, cfg: &Dict, destroy: bool, yes: bool) ->
         "Waiting for Google Cloud to stop the TPU"
     })?;
     if destroy {
-        crate::gcp_expiry::reconcile(ctx, cfg)?;
+        expiry::reconcile(ctx, cfg)?;
     }
     if node.get("queuedResource").is_some_and(crate::pyfmt::truthy) {
         return Err(Error::msg(
@@ -1027,13 +1038,13 @@ pub fn lifecycle(ctx: &Ctx, id: &TpuId, cfg: &Dict, destroy: bool, yes: bool) ->
             Error::msg("TPU was deleted, but deletion-task cleanup is unverified")
                 .next(format!("gpu expire {} cancel", id.cli()))
         };
-        match crate::gcp_expiry::queue_for_node(cfg, id, &node) {
+        match expiry::queue_for_node(cfg, id, &node) {
             Ok(queue) => queue.cancel(ctx, id).map_err(|_| cleanup_error())?,
             Err(_) if recorded_queue => return Err(cleanup_error()),
             // Unmanaged nodes may have no gpu expiry config or recorded queue.
             Err(_) => {}
         }
-        crate::gcp_ssh::remove(ctx, id)?;
+        ssh::remove(ctx, id)?;
         drop(wait);
         ctx.result("state", Value::str("destroyed"));
         ctx.println(&format!("Destroyed TPU {} and its boot disk.", id.cli()))

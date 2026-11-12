@@ -4,7 +4,7 @@ use crate::{
     ctx::Ctx,
     error::{Error, Result},
     gcp,
-    gcp_types::chips,
+    gcp::types::chips,
     picker::Job,
     pyjson::{Dict, Value},
 };
@@ -43,10 +43,10 @@ impl Prices {
                 continue;
             };
             let identity = format!("{} {}", desc, gcp::text(cat, "resourceGroup").unwrap_or(""));
-            if crate::gcp_types::classify(&identity) != Some(gen) {
+            if crate::gcp::types::classify(&identity) != Some(gen) {
                 continue;
             }
-            if crate::gcp_facts::capacity(sku) != Some(spot) {
+            if crate::gcp::facts::capacity(sku) != Some(spot) {
                 continue;
             }
             if !sku
@@ -369,7 +369,7 @@ pub fn cached(ctx: &Ctx, cfg: &Dict, zone: &str) -> Option<std::sync::Arc<Prices
         return None;
     }
     let project = gcp::Settings::load(cfg).ok()?.project;
-    let region = crate::gcp_geo::region(zone)?.to_string();
+    let region = crate::gcp::geo::region(zone)?.to_string();
     let entries = entries(ctx, &project);
     let prices = prices(ctx, region, &entries, true, None);
     (!prices.skus.is_empty()).then(|| std::sync::Arc::new(prices))
@@ -445,18 +445,18 @@ fn normalize(meta: &Dict, data: Dict, at: Timestamp) -> Result<Dict> {
     Ok(sku)
 }
 fn metas(ctx: &Ctx, region: &str, spot: Option<bool>, gen: Option<&str>) -> Vec<Dict> {
-    crate::gcp_facts::skus(ctx)
+    crate::gcp::facts::skus(ctx)
         .into_iter()
         .filter(|m| {
             gcp::text(m, "id").is_some_and(gcp::component)
                 && has_region(m, "regions", region)
-                && crate::gcp_facts::capacity(m).is_some_and(|s| spot.is_none_or(|w| s == w))
+                && crate::gcp::facts::capacity(m).is_some_and(|s| spot.is_none_or(|w| s == w))
                 && gen.is_none_or(|g| gcp::text(m, "generation") == Some(g))
         })
         .collect()
 }
 fn relevant_skus(ctx: &Ctx, zone: &str) -> Vec<String> {
-    crate::gcp_geo::region(zone)
+    crate::gcp::geo::region(zone)
         .map(|region| metas(ctx, region, None, None))
         .unwrap_or_default()
         .iter()
@@ -469,7 +469,7 @@ pub fn load(ctx: &Ctx, cfg: &Dict, zone: &str) -> Result<Prices> {
 pub fn load_for(ctx: &Ctx, cfg: &Dict, zone: &str, wanted: Option<(&str, bool)>) -> Result<Prices> {
     ctx.require_gcloud()?;
     let project = gcp::Settings::load(cfg)?.project;
-    let region = crate::gcp_geo::region(zone)
+    let region = crate::gcp::geo::region(zone)
         .filter(|s| gcp::component(s))
         .ok_or_else(|| unavailable("Choose a TPU zone with gpu up."))?
         .to_string();
@@ -513,7 +513,7 @@ pub fn load_for(ctx: &Ctx, cfg: &Dict, zone: &str, wanted: Option<(&str, bool)>)
     let mut failure = None;
     for (meta, data) in missing
         .into_iter()
-        .zip(crate::gcp_http::many_results(ctx, &project, &urls)?)
+        .zip(crate::gcp::http::many_results(ctx, &project, &urls)?)
     {
         match data.and_then(|d| normalize(meta, d, now)) {
             Ok(sku) => {
@@ -578,7 +578,7 @@ pub(crate) fn job_at(ctx: &Ctx, cfg: &Dict, zone: Option<&str>) -> Job<std::sync
         let settings = gcp::Settings::load(&cfg).map_err(|e| e.text().to_string())?;
         let zone = explicit
             .clone()
-            .or_else(|| crate::gcp_preferences::preview(&worker, &settings))
+            .or_else(|| crate::gcp::preferences::preview(&worker, &settings))
             .ok_or("No known TPU pricing region.")?;
         let price = || {
             load(&worker, &cfg, &zone)
@@ -587,7 +587,7 @@ pub(crate) fn job_at(ctx: &Ctx, cfg: &Dict, zone: Option<&str>) -> Job<std::sync
         };
         let before = relevant_skus(&worker, &zone);
         let first = std::thread::scope(|s| {
-            s.spawn(|| crate::gcp_facts::refresh_skus_once(&worker, &settings.project));
+            s.spawn(|| crate::gcp::facts::refresh_skus_once(&worker, &settings.project));
             let first = (!before.is_empty()).then(price);
             if let Some(Ok(prices)) = &first {
                 publish(prices.clone());
@@ -603,5 +603,5 @@ pub(crate) fn job_at(ctx: &Ctx, cfg: &Dict, zone: Option<&str>) -> Job<std::sync
 
 pub(crate) fn cached_default(ctx: &Ctx, cfg: &Dict) -> Option<std::sync::Arc<Prices>> {
     let settings = gcp::Settings::load(cfg).ok()?;
-    cached(ctx, cfg, &crate::gcp_preferences::preview(ctx, &settings)?)
+    cached(ctx, cfg, &crate::gcp::preferences::preview(ctx, &settings)?)
 }

@@ -47,7 +47,7 @@ pub struct Picks {
     pub offer: Option<Dict>,
     pub tpu: Option<TpuChoice>,
     pub modal: Option<String>,
-    pub(crate) cloud: Option<crate::gcp_wizard::TpuSelection>,
+    pub(crate) cloud: Option<crate::gcp::wizard::TpuSelection>,
 }
 
 impl Picks {
@@ -148,7 +148,7 @@ struct State {
     choose_offer: bool,
     tpu: TpuOptions,
     /// `tpu.prices`, or a job that reports TPUs as not set up.
-    tpu_prices: Job<Arc<crate::gcp_prices::Prices>>,
+    tpu_prices: Job<Arc<crate::gcp::prices::Prices>>,
     prices: RefCell<HashMap<String, Job<Stats>>>,
     prefetch_attached: Cell<bool>,
     preferred_mode: String,
@@ -200,8 +200,8 @@ pub struct TpuOptions {
     pub setup_error: Option<String>,
     pub transition: Option<CloudTransition>,
     /// Prefetched from the first screen when present.
-    pub prices: Option<Job<Arc<crate::gcp_prices::Prices>>>,
-    pub cached_prices: Option<Arc<crate::gcp_prices::Prices>>,
+    pub prices: Option<Job<Arc<crate::gcp::prices::Prices>>>,
+    pub cached_prices: Option<Arc<crate::gcp::prices::Prices>>,
     pub types: Vec<String>,
     pub catalog: Option<Job<Vec<String>>>,
 }
@@ -521,13 +521,13 @@ impl LaunchWizard {
             .as_ref()
             .and_then(Job::result)
             .unwrap_or_else(|| self.state.tpu.types.clone());
-        types = types.into_iter().map(crate::gcp_types::public).collect();
+        types = types.into_iter().map(crate::gcp::types::public).collect();
         types.sort();
         types.dedup();
         types
     }
-    pub(crate) fn tpu_data(&self) -> crate::gcp_wizard::Types {
-        crate::gcp_wizard::Types {
+    pub(crate) fn tpu_data(&self) -> crate::gcp::wizard::Types {
+        crate::gcp::wizard::Types {
             initial: self.tpu_types(),
             catalog: self.state.tpu.catalog.clone().unwrap_or_else(|| {
                 let types = self.tpu_types();
@@ -537,7 +537,7 @@ impl LaunchWizard {
             cached: self.state.tpu.cached_prices.clone(),
         }
     }
-    fn tpu_prices(&self) -> Option<Arc<crate::gcp_prices::Prices>> {
+    fn tpu_prices(&self) -> Option<Arc<crate::gcp::prices::Prices>> {
         if self.state.tpu.setup_error.is_some() {
             None
         } else {
@@ -568,7 +568,7 @@ impl LaunchWizard {
                 let [demand, spot] = if let Some(p) = &prices {
                     let (members, minimum) = match &value {
                         Some(t) if t.contains('-') => (vec![t.clone()], false),
-                        Some(g) => (crate::gcp_types::members(&types, g), true),
+                        Some(g) => (crate::gcp::types::members(&types, g), true),
                         None => (types.clone(), true),
                     };
                     p.rate_columns(
@@ -666,7 +666,7 @@ impl LaunchWizard {
                 let values = if query.contains('-') {
                     types
                 } else {
-                    crate::gcp_types::generations(&types)
+                    crate::gcp::types::generations(&types)
                 };
                 rows.extend(search.tpu_rows(values));
                 rows.extend(search.modal_rows());

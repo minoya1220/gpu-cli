@@ -955,11 +955,11 @@ fn tpu_flag_routes_without_provider_and_catalog_jobs_use_real_keys() {
             inner.run(cmd)
         });
         let ctx = env.ctx().runner(&gated_runner).build();
-        let job = crate::gcp_wizard::catalog_job(&ctx, &settings, Some("us-east5-b"), kind, None);
+        let job = crate::gcp::wizard::catalog_job(&ctx, &settings, Some("us-east5-b"), kind, None);
         let observer = job.observer();
         let release = gate.clone();
         let result = drive(
-            crate::gcp_wizard::catalog_screen(job, title, crate::picker::Next::Done),
+            crate::gcp::wizard::catalog_screen(job, title, crate::picker::Next::Done),
             move |keys| {
                 keys.wait_for("the catalog job", || observer.state() == JobState::Running);
                 assert!(keys.labels().is_empty());
@@ -980,7 +980,7 @@ fn catalog_choices_share_a_stack_and_back_does_not_refetch() {
     use crate::picker::{testing::*, Next, Outcome};
     let (_env, ctx, runner, _state) = fixture();
     let settings = crate::gcp::Settings::load(&configuration()).unwrap();
-    let Next::Screen(first) = crate::gcp_wizard::next(ctx, settings, Default::default()) else {
+    let Next::Screen(first) = crate::gcp::wizard::next(ctx, settings, Default::default()) else {
         panic!("missing first screen")
     };
     let result = drive(first, move |keys| {
@@ -1018,10 +1018,10 @@ fn expiry_entry_has_duration_help_validation_and_back_to_capacity() {
     use crate::picker::{testing::*, Next, Outcome};
     let (_env, ctx, runner, _state) = fixture();
     let settings = crate::gcp::Settings::load(&configuration()).unwrap();
-    let Next::Screen(first) = crate::gcp_wizard::next(
+    let Next::Screen(first) = crate::gcp::wizard::next(
         ctx,
         settings,
-        crate::gcp_wizard::TpuSelection {
+        crate::gcp::wizard::TpuSelection {
             zone: Some("us-east5-b".into()),
             tpu: Some("v6e-1".into()),
             ..Default::default()
@@ -1264,18 +1264,18 @@ fn capacity_prices_reuse_the_size_job_without_blocking_input() {
         Ok(Arc::new(super::gcp_prices::prices()))
     });
     let settings = crate::gcp::Settings::load(&configuration()).unwrap();
-    let selected = crate::gcp_wizard::TpuSelection {
+    let selected = crate::gcp::wizard::TpuSelection {
         tpu: Some("v6e-4".into()),
         zone: Some("us-east5-b".into()),
         expiry_at: Some("2026-11-03T02:00:00Z".parse().unwrap()),
         ..Default::default()
     };
-    let screen = crate::gcp_wizard::capacity_screen(
+    let screen = crate::gcp::wizard::capacity_screen(
         ctx,
         settings,
         configuration(),
         selected.clone(),
-        Some(crate::gcp_wizard::Types {
+        Some(crate::gcp::wizard::Types {
             initial: Vec::new(),
             catalog: Job::new(|| panic!("capacity must not reload the type catalog")),
             rates: rates.clone(),
@@ -1311,7 +1311,7 @@ fn capacity_prices_reuse_the_size_job_without_blocking_input() {
     });
     assert_eq!(
         result,
-        Outcome::Done(crate::gcp_wizard::TpuSelection {
+        Outcome::Done(crate::gcp::wizard::TpuSelection {
             spot: Some(true),
             ..selected
         })
@@ -1326,18 +1326,18 @@ fn failed_or_missing_capacity_prices_still_allow_number_selection() {
     for failed in [false, true] {
         let (_env, ctx, runner, _) = fixture();
         let settings = crate::gcp::Settings::load(&configuration()).unwrap();
-        let selected = crate::gcp_wizard::TpuSelection {
+        let selected = crate::gcp::wizard::TpuSelection {
             tpu: Some("v5e-1".into()),
             zone: Some("us-east5-b".into()),
             expiry_at: Some("2026-11-03T02:00:00Z".parse().unwrap()),
             ..Default::default()
         };
-        let screen = crate::gcp_wizard::capacity_screen(
+        let screen = crate::gcp::wizard::capacity_screen(
             ctx,
             settings,
             configuration(),
             selected.clone(),
-            Some(crate::gcp_wizard::Types {
+            Some(crate::gcp::wizard::Types {
                 initial: Vec::new(),
                 catalog: Job::new(|| panic!("no catalog read expected")),
                 rates: Job::new(move || {
@@ -1364,7 +1364,7 @@ fn failed_or_missing_capacity_prices_still_allow_number_selection() {
         });
         assert_eq!(
             result,
-            Outcome::Done(crate::gcp_wizard::TpuSelection {
+            Outcome::Done(crate::gcp::wizard::TpuSelection {
                 spot: Some(true),
                 ..selected
             })
@@ -1462,7 +1462,7 @@ fn identifiers_and_ssh_stanzas_reject_injection() {
         "ssh -i 'key\nHost *' user@192.0.2.1",
         "sh -c evil",
     ] {
-        assert!(crate::gcp_ssh::stanza(&id, command).is_err());
+        assert!(crate::gcp::ssh::stanza(&id, command).is_err());
     }
 }
 
@@ -1532,14 +1532,14 @@ fn retry_flags() -> crate::gcp::TpuArgs {
     crate::gcp::TpuArgs::from_flags(&flags).unwrap()
 }
 fn restrict_retry_zones(ctx: &Ctx) {
-    let mut zones = crate::gcp_facts::known_zones(ctx, "test-project");
+    let mut zones = crate::gcp::facts::known_zones(ctx, "test-project");
     for zone in &mut zones {
         zone.types.clear();
         if zone.name == "us-east5-b" {
             zone.types.push("v6e-1".into());
         }
     }
-    zones.push(crate::gcp_catalog::Zone {
+    zones.push(crate::gcp::catalog::Zone {
         name: "us-east5-a".into(),
         types: vec!["v6e-1".into()],
     });
@@ -1678,7 +1678,7 @@ fn retry_can_return_to_grouped_zone_picker_without_authorizing_payment() {
     let (env, ctx, _runner, _state) = fixture();
     restrict_retry_zones(&ctx);
     super::gcp_prices::cache(&env);
-    let picks = crate::gcp_wizard::TpuPicks {
+    let picks = crate::gcp::wizard::TpuPicks {
         zone: "us-east5-b".into(),
         tpu: "v6e-1".into(),
         spot: true,
@@ -1690,7 +1690,7 @@ fn retry_can_return_to_grouped_zone_picker_without_authorizing_payment() {
     let settings = crate::gcp::Settings::load(&configuration()).unwrap();
     let skipped = ["us-east5-b".into()].into_iter().collect();
     let result = drive(
-        crate::gcp_retry::screen(&ctx, &settings, &configuration(), &picks, &skipped),
+        crate::gcp::retry::screen(&ctx, &settings, &configuration(), &picks, &skipped),
         |keys| {
             keys.wait(|s| s.labels.iter().any(|l| l.starts_with("Retry")));
             keys.press_until("2", on("TPU zone"));
@@ -1701,7 +1701,7 @@ fn retry_can_return_to_grouped_zone_picker_without_authorizing_payment() {
     );
     assert_eq!(
         result,
-        Outcome::Done(Some(crate::gcp_retry::Choice {
+        Outcome::Done(Some(crate::gcp::retry::Choice {
             zone: "us-east5-a".into(),
             approved: false,
             rate: None
@@ -1798,7 +1798,7 @@ fn changed_retry_estimate_requires_a_new_confirmation() {
         &cfg,
         Some("2026-11-03T02:00:00Z".parse().unwrap()),
         |_| {
-            Ok(Some(crate::gcp_retry::Choice {
+            Ok(Some(crate::gcp::retry::Choice {
                 zone: "us-east5-a".into(),
                 approved: true,
                 rate: Some(999.0),
@@ -1829,18 +1829,18 @@ fn remembered_zone_is_project_scoped_and_does_not_replace_config() {
     args.extend(["--zone", "us-east5-a"]);
     assert_eq!(main(&ctx, &args), 0, "{}", err(&ctx));
     assert_eq!(
-        crate::gcp_preferences::last(&ctx, "test-project"),
+        crate::gcp::preferences::last(&ctx, "test-project"),
         Some("us-east5-a".into())
     );
     assert_eq!(
-        crate::gcp_preferences::generation(&ctx, "test-project"),
+        crate::gcp::preferences::generation(&ctx, "test-project"),
         Some("v6e".into())
     );
     assert_eq!(
-        crate::gcp_preferences::accelerator(&ctx, "test-project", "v6e"),
+        crate::gcp::preferences::accelerator(&ctx, "test-project", "v6e"),
         Some("v6e-1".into())
     );
-    assert_eq!(crate::gcp_preferences::last(&ctx, "other-project"), None);
+    assert_eq!(crate::gcp::preferences::last(&ctx, "other-project"), None);
     let cfg = dict(&read(&env.config.join("gpu/config.json")));
     assert_eq!(
         crate::gcp::text(cfg.get("gcp").unwrap().as_dict().unwrap(), "zone"),
@@ -1865,10 +1865,10 @@ fn type_filter_counts_and_prices_exclude_unsupported_remembered_zone() {
     }
     cache.insert("zones", Value::List(zones));
     crate::cache::write_json(&ctx, "tpu-catalog-test-project.json", cache);
-    crate::gcp_preferences::remember(&ctx, "test-project", "us-central1-a");
+    crate::gcp::preferences::remember(&ctx, "test-project", "us-central1-a");
     let settings = crate::gcp::Settings::load(&configuration()).unwrap();
     let result = drive(
-        crate::gcp_wizard::priced_zone_screen(
+        crate::gcp::wizard::priced_zone_screen(
             &ctx,
             &settings,
             &configuration(),
@@ -1924,13 +1924,13 @@ fn full_type_cli_alias_is_offline_and_preserves_canonical_accelerator_name() {
 fn generation_and_size_preferences_are_scoped_and_highlight_without_reordering() {
     use crate::picker::{testing::*, Next, Outcome};
     let (_env, ctx, _runner, _state) = fixture();
-    crate::gcp_preferences::remember_type(&ctx, "test-project", "v5p-16");
+    crate::gcp::preferences::remember_type(&ctx, "test-project", "v5p-16");
     assert_eq!(
-        crate::gcp_preferences::generation(&ctx, "other-project"),
+        crate::gcp::preferences::generation(&ctx, "other-project"),
         None
     );
     let settings = crate::gcp::Settings::load(&configuration()).unwrap();
-    let Next::Screen(first) = crate::gcp_wizard::next(ctx, settings, Default::default()) else {
+    let Next::Screen(first) = crate::gcp::wizard::next(ctx, settings, Default::default()) else {
         panic!("generation")
     };
     let result = drive(first, |keys| {
@@ -1971,7 +1971,7 @@ fn mapped_cloud_completion_still_waits_for_cached_repository_validation() {
             }),
             owner: "owner".into(),
             tpu: crate::wizard::TpuOptions {
-                transition: Some(crate::gcp_wizard::transition(
+                transition: Some(crate::gcp::wizard::transition(
                     &ctx,
                     &crate::launch::UpArgs {
                         num_gpus: 1,
@@ -1980,7 +1980,7 @@ fn mapped_cloud_completion_still_waits_for_cached_repository_validation() {
                     &cfg,
                     Some("2026-11-03T02:00:00Z".parse().unwrap()),
                 )),
-                types: crate::gcp_facts::known_types(&ctx, "test-project", None),
+                types: crate::gcp::facts::known_types(&ctx, "test-project", None),
                 ..Default::default()
             },
             ..Default::default()

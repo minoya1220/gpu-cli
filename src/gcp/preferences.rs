@@ -15,7 +15,7 @@ pub(crate) fn preview(ctx: &Ctx, settings: &Settings) -> Option<String> {
     last(ctx, &settings.project)
         .or_else(|| settings.zone.clone())
         .or_else(|| {
-            crate::gcp_catalog::known(ctx, &settings.project, None)
+            crate::gcp::catalog::known(ctx, &settings.project, None)
                 .first()
                 .map(|z| z.name.clone())
         })
@@ -34,13 +34,13 @@ pub(crate) fn generation(ctx: &Ctx, project: &str) -> Option<String> {
 pub(crate) fn accelerator(ctx: &Ctx, project: &str, generation: &str) -> Option<String> {
     crate::history::recent_picks(&ctx.env, &format!("gcp_size:{project}:{generation}"))
         .into_iter()
-        .find(|t| crate::gcp_types::generation(t) == Some(generation))
+        .find(|t| crate::gcp::types::generation(t) == Some(generation))
 }
 pub(crate) fn remember_type(ctx: &Ctx, project: &str, tpu: &str) {
-    let Some(generation) = crate::gcp_types::generation(tpu) else {
+    let Some(generation) = crate::gcp::types::generation(tpu) else {
         return;
     };
-    let public = crate::gcp_types::public(tpu.into());
+    let public = crate::gcp::types::public(tpu.into());
     crate::history::record_picks_best_effort(
         ctx,
         &[

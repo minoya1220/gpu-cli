@@ -190,7 +190,7 @@ fn down_of_a_recorded_but_absent_tpu_cancels_expiry_and_removes_its_alias() {
                 env.home.join(".ssh/gpu_gcp_config"),
                 format!(
                     "Host {}\n  HostName example\nHost other\n  HostName other\n",
-                    crate::gcp_ssh::alias(&tpu)
+                    crate::gcp::ssh::alias(&tpu)
                 ),
             )
             .unwrap();
@@ -198,7 +198,7 @@ fn down_of_a_recorded_but_absent_tpu_cancels_expiry_and_removes_its_alias() {
         let destroyed = result(&ctx, &["down", ID, "--yes"]);
         assert_eq!(destroyed.get("state"), Some(&Value::str("already_absent")));
         assert!(state.lock().unwrap().tasks.is_empty(), "{record}");
-        assert!(!crate::gcp_ssh::has(&ctx, &tpu).unwrap(), "{record}");
+        assert!(!crate::gcp::ssh::has(&ctx, &tpu).unwrap(), "{record}");
         if record == "stanza" {
             assert!(
                 std::fs::read_to_string(env.home.join(".ssh/gpu_gcp_config"))
@@ -246,7 +246,7 @@ fn http_expired_auth_has_the_same_status_and_never_exposes_response_body() {
         _ => panic!("unexpected request"),
     });
     let ctx = ctx.with_runner(runner);
-    let error = crate::gcp_http::get(
+    let error = crate::gcp::http::get(
         &ctx,
         "test-project",
         "https://tpu.googleapis.com/v2/projects/test-project/locations/-/nodes",

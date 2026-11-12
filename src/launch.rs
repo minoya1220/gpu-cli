@@ -380,7 +380,7 @@ fn confirmation(
             Ok(flags) => flags,
             Err(e) => return Next::Notice(e.text().into()),
         };
-        let prepared = crate::gcp_wizard::complete(
+        let prepared = crate::gcp::wizard::complete(
             &flags,
             cfg,
             selection,
@@ -486,9 +486,9 @@ pub(crate) fn launch(
                 choose_offer: !args.yes && args.offer.is_none(),
                 owner: owner.clone(),
                 tpu: TpuOptions {
-                    prices: Some(crate::gcp_prices::job(ctx, cfg)),
-                    cached_prices: crate::gcp_prices::cached_default(ctx, cfg),
-                    types: crate::gcp_facts::known_types(
+                    prices: Some(crate::gcp::prices::job(ctx, cfg)),
+                    cached_prices: crate::gcp::prices::cached_default(ctx, cfg),
+                    types: crate::gcp::facts::known_types(
                         ctx,
                         cfg.get("gcp")
                             .and_then(crate::pyjson::Value::as_dict)
@@ -496,8 +496,8 @@ pub(crate) fn launch(
                             .unwrap_or(""),
                         None,
                     ),
-                    catalog: Some(crate::gcp_catalog::types_job(ctx, cfg)),
-                    transition: Some(crate::gcp_wizard::transition(ctx, args, cfg, deadline)),
+                    catalog: Some(crate::gcp::catalog::types_job(ctx, cfg)),
+                    transition: Some(crate::gcp::wizard::transition(ctx, args, cfg, deadline)),
                     setup_error: crate::gcp::launch_setup(ctx, cfg)
                         .err()
                         .map(|e| e.text().to_string()),

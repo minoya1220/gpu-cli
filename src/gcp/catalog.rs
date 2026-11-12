@@ -2,7 +2,7 @@ use crate::cache;
 use crate::{
     ctx::Ctx,
     error::{Error, Result},
-    gcp, gcp_http,
+    gcp,
     pyjson::{Dict, Value},
 };
 #[derive(Clone, Debug)]
@@ -33,7 +33,7 @@ fn base(project: &str, zone: &str) -> Result<String> {
     ))
 }
 pub fn types(ctx: &Ctx, project: &str, zone: &str) -> Result<Vec<String>> {
-    let rows = gcp_http::pages(
+    let rows = crate::gcp::http::pages(
         ctx,
         project,
         &base(project, zone)?,
@@ -85,7 +85,7 @@ pub fn refresh(ctx: &Ctx, project: &str) -> Result<Vec<Zone>> {
     if !gcp::component(project) {
         return Err(invalid());
     }
-    let locations = gcp_http::pages(
+    let locations = crate::gcp::http::pages(
         ctx,
         project,
         &format!("https://tpu.googleapis.com/v1/projects/{project}/locations"),
@@ -106,10 +106,10 @@ pub fn refresh(ctx: &Ctx, project: &str) -> Result<Vec<Zone>> {
         .iter()
         .map(|z| base(project, z).map(|url| format!("{url}?pageSize=1000")))
         .collect::<Result<Vec<_>>>()?;
-    let responses = gcp_http::many(ctx, project, &urls)?;
+    let responses = crate::gcp::http::many(ctx, project, &urls)?;
     let mut zones = Vec::new();
     for (name, response) in names.into_iter().zip(responses) {
-        let rows = gcp_http::pages_from(
+        let rows = crate::gcp::http::pages_from(
             ctx,
             project,
             &base(project, &name)?,
@@ -145,12 +145,12 @@ pub fn refresh(ctx: &Ctx, project: &str) -> Result<Vec<Zone>> {
     Ok(zones)
 }
 pub fn known(ctx: &Ctx, project: &str, tpu: Option<&str>) -> Vec<Zone> {
-    select_zones(ctx, crate::gcp_facts::known_zones(ctx, project), tpu)
+    select_zones(ctx, crate::gcp::facts::known_zones(ctx, project), tpu)
 }
 fn select_zones(ctx: &Ctx, mut zones: Vec<Zone>, tpu: Option<&str>) -> Vec<Zone> {
-    let wanted = tpu.map(crate::gcp_types::canonical);
+    let wanted = tpu.map(crate::gcp::types::canonical);
     zones.retain(|z| !z.types.is_empty() && wanted.as_ref().is_none_or(|t| z.types.contains(t)));
-    crate::gcp_geo::order(&ctx.env, &mut zones, |z| &z.name);
+    crate::gcp::geo::order(&ctx.env, &mut zones, |z| &z.name);
     zones
 }
 
@@ -188,7 +188,7 @@ pub fn zones(ctx: &Ctx, project: &str, tpu: Option<&str>) -> Result<Vec<Zone>> {
 }
 
 pub fn verify(ctx: &Ctx, project: &str, zone: &str, tpu: &str) -> Result<()> {
-    if types(ctx, project, zone)?.contains(&crate::gcp_types::canonical(tpu)) {
+    if types(ctx, project, zone)?.contains(&crate::gcp::types::canonical(tpu)) {
         return Ok(());
     }
     // A stale discovery entry must not recommend the just-rejected zone.

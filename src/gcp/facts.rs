@@ -5,8 +5,7 @@ use crate::{
     ctx::Ctx,
     error::{Error, Result},
     gcp,
-    gcp_catalog::Zone,
-    gcp_http,
+    gcp::catalog::Zone,
     pyjson::{Dict, Value},
 };
 pub(crate) const SKU_CACHE: &str = "tpu-sku-facts.json";
@@ -19,10 +18,10 @@ fn rows(d: &Dict, key: &str) -> Vec<Dict> {
 }
 pub fn known_zones(ctx: &Ctx, project: &str) -> Vec<Zone> {
     if gcp::component(project) {
-        if let Some(cache) = cache::read_json(ctx, &crate::gcp_catalog::file(project), i64::MAX) {
+        if let Some(cache) = cache::read_json(ctx, &crate::gcp::catalog::file(project), i64::MAX) {
             return rows(&cache, "zones")
                 .iter()
-                .filter_map(crate::gcp_catalog::parse_zone)
+                .filter_map(crate::gcp::catalog::parse_zone)
                 .collect();
         }
     }
@@ -46,7 +45,7 @@ pub fn skus(ctx: &Ctx) -> Vec<Dict> {
 pub fn sku_generation(meta: &Dict) -> Option<&'static str> {
     let desc = gcp::text(meta, "description")?;
     let category = meta.get("category")?.as_dict()?;
-    crate::gcp_types::classify(&format!(
+    crate::gcp::types::classify(&format!(
         "{desc} {}",
         gcp::text(category, "resourceGroup").unwrap_or("")
     ))
@@ -128,7 +127,7 @@ pub fn refresh_skus_once(ctx: &Ctx, project: &str) {
 }
 fn fetch_skus(ctx: &Ctx, project: &str) -> Result<()> {
     ctx.require_gcloud()?;
-    let listed = gcp_http::pages(
+    let listed = crate::gcp::http::pages(
         ctx,
         project,
         "https://cloudbilling.googleapis.com/v1/services",
@@ -150,9 +149,10 @@ fn fetch_skus(ctx: &Ctx, project: &str) -> Result<()> {
         let name = gcp::text(&service, "name")
             .filter(|s| s.strip_prefix("services/").is_some_and(gcp::component))
             .ok_or_else(gcp::bad_reply)?;
-        let fields =
-            gcp_http::encode("skus(skuId,description,category,serviceRegions),nextPageToken");
-        for sku in gcp_http::pages(
+        let fields = crate::gcp::http::encode(
+            "skus(skuId,description,category,serviceRegions),nextPageToken",
+        );
+        for sku in crate::gcp::http::pages(
             ctx,
             project,
             &format!("https://cloudbilling.googleapis.com/v1/{name}/skus?fields={fields}"),

@@ -137,7 +137,7 @@ pub(crate) fn render_table(ctx: &Ctx, items: &[Dict], long: bool) -> Result<()> 
                 id,
                 provider.key().into(),
                 if provider == Provider::Gcp {
-                    crate::gcp_types::public(kind)
+                    crate::gcp::types::public(kind)
                 } else {
                     kind
                 },

@@ -153,6 +153,7 @@ fn helper_typed_failures_and_timeouts_are_redacted() {
     for (kind, code) in [
         ("MissingToken", 12),
         ("AuthError", 13),
+        ("InvalidError", 2),
         ("ResourceExhaustedError", 10),
         ("SchedulingTimeout", 10),
         ("NotFoundError", 16),

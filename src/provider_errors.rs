@@ -7,6 +7,10 @@ pub(crate) fn modal(kind: &str, detail: &str) -> Error {
     let code = match kind {
         "MissingToken" => ExitCode::NotSetup,
         "AuthError" => ExitCode::AuthExpired,
+        // A rejected GPU/image request or account billing prerequisite is not
+        // expired authentication or scarce capacity. Keep the helper's fixed,
+        // non-secret guidance and classify this as a usage/request rejection.
+        "InvalidError" => return Error::Usage(detail),
         "ResourceExhaustedError" | "SchedulingTimeout" => ExitCode::NoCapacity,
         "NotFoundError" => ExitCode::NotFound,
         "InstanceLost" => ExitCode::InstanceLost,

@@ -13,6 +13,7 @@ __version__ = "1.6.3"
 class AuthError(Exception): pass
 class ResourceExhaustedError(Exception): pass
 class ImageBuildError(Exception): pass
+class InvalidError(Exception): pass
 class NotFoundError(Exception): pass
 class Billing:
     def rates(self):
@@ -23,12 +24,24 @@ class Workspace:
     @staticmethod
     def from_context(): return SimpleNamespace(name="offline", billing=Billing())
 class Image:
+    def __init__(self): self.has_uv = False
     @staticmethod
     def from_registry(name): return Image()
     @staticmethod
     def debian_slim(**kw): return Image()
     def pip_install(self, *args):
-        assert args == ("uv==0.10.4",)
+        raise AssertionError("bootstrap must work without Python/pip")
+    def dockerfile_commands(self, *commands):
+        # Consume the emitted image recipe, not helper source. Model the COPY
+        # of pinned, standalone executables without requiring a Python layer.
+        import shlex
+        assert len(commands) == 1
+        instruction, source, *paths = shlex.split(commands[0])
+        assert instruction.upper() == "COPY"
+        assert source == "--from=ghcr.io/astral-sh/uv:0.10.4"
+        assert set(paths[:-1]) == {"/uv", "/uvx"}
+        assert paths[-1].rstrip("/") == "/usr/local/bin"
+        self.has_uv = True
         return self
 class App:
     pass
@@ -57,6 +70,7 @@ class Sandbox:
     def __init__(self): self.exec = AsyncCall(Process())
     @staticmethod
     async def allocate(*args, **kw):
+        assert kw["image"].has_uv
         assert kw["cpu"] == (4, 4)
         assert kw["memory"] == (16384, 16384)
         assert kw["timeout"] == 1800
@@ -114,7 +128,7 @@ class HelperTest(unittest.TestCase):
         self.assertEqual(json.loads(self.call("rates").stdout)["gpu_hour_cost_t4"], "0.59")
 
     def test_errors_are_typed_and_never_echo_secrets(self):
-        for kind in ["AuthError", "ResourceExhaustedError", "ImageBuildError"]:
+        for kind in ["AuthError", "ResourceExhaustedError", "ImageBuildError", "InvalidError"]:
             out = self.call("rates", FAIL_KIND=kind)
             self.assertEqual(out.returncode, 1)
             self.assertEqual(json.loads(out.stdout)["error"]["kind"], kind)
@@ -135,6 +149,25 @@ class HelperTest(unittest.TestCase):
         out = self.call("create", data=json.dumps(spec).encode())
         self.assertEqual(out.returncode, 1)
         self.assertNotIn(b"private-canary", out.stdout + out.stderr)
+
+    def test_pythonless_registry_bootstrap_and_create_diagnostics(self):
+        spec = {"gpu": "T4", "image": "nvidia/cuda:12.8.1-devel-ubuntu24.04",
+                "cpu": 4, "memory": 16384, "timeout": 1800,
+                "tags": {"run_id": "test"}, "command": ["true"]}
+        data = json.dumps(spec).encode()
+        out = self.call("create", data=data)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertEqual(json.loads(out.stdout)["id"], "sb-test")
+        for kind, hint in [("InvalidError", "account/billing"),
+                           ("ImageBuildError", "build logs in the Modal dashboard")]:
+            out = self.call("create", data=data, FAIL_KIND=kind)
+            self.assertEqual(out.returncode, 1)
+            error = json.loads(out.stdout)["error"]
+            self.assertEqual(error["kind"], kind)
+            self.assertIn(hint, error["message"])
+            self.assertNotIn(b"private-canary", out.stdout + out.stderr)
+            self.assertNotIn("helper failed", error["message"])
+            self.assertLess(len(error["message"]), 256)
 
     def test_byte_exact_exec_and_remote_exit(self):
         out = self.call("exec", "sb-test", "--", "cat", data=b"\x00\xff\r\n")

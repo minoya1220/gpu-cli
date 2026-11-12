@@ -227,6 +227,12 @@ fn lost_create_reply_reconciles_only_its_run_tag() {
         (Ok(Output::ok("broken reply")), 1),
         (
             Ok(Output::ok(
+                r#"{"error":{"kind":"InvalidError","message":"Check Modal account/billing settings and the GPU/image request."}}"#,
+            )),
+            2,
+        ),
+        (
+            Ok(Output::ok(
                 r#"{"error":{"kind":"SchedulingTimeout","message":"capacity"}}"#,
             )),
             10,

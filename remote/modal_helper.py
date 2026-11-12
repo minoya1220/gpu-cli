@@ -28,7 +28,11 @@ async def create(modal, spec, timeout):
     async def allocate():
         image = (modal.Image.from_registry(spec["image"]) if spec.get("image")
                  else modal.Image.debian_slim(python_version="3.13"))
-        image = image.pip_install("uv==0.10.4")
+        # COPY uses Modal's Dockerfile builder directly: custom registry images
+        # need not contain Python or pip just to install the runtime bootstrap.
+        image = image.dockerfile_commands(
+            "COPY --from=ghcr.io/astral-sh/uv:0.10.4 /uv /uvx /usr/local/bin/"
+        )
         app = await modal.App.lookup.aio("gpu-cli", create_if_missing=True)
         return await modal.Sandbox.create.aio(
             *spec["command"], image=image, gpu=spec["gpu"],
@@ -156,7 +160,8 @@ def failure(exc):
         "ResourceExhaustedError": "Modal has insufficient capacity. Try another GPU or retry later.",
         "SchedulingTimeout": "Modal scheduling exceeded --timeout. Try another GPU or a longer --timeout.",
         "NotFoundError": "Modal sandbox was not found.",
-        "ImageBuildError": "Modal image build failed. Check the image and dependency setup.",
+        "ImageBuildError": "Modal image build failed. Inspect the build logs in the Modal dashboard; check the registry image and bootstrap steps.",
+        "InvalidError": "Modal rejected the request. Check Modal account/billing settings (including a payment method), the GPU type and image.",
         "VersionError": "Modal client version is incompatible. Update gpu.",
         "ValueError": "Invalid Modal helper request.",
     }

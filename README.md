@@ -126,8 +126,17 @@ egress are not included; this is not an invoice ceiling. No region is requested.
 `--offer`, `--disk`, `--reliability` and `--unverified` are refused. Expiry must be
 longer than 10 minutes and at most **24 hours**. Sandbox disk is not configurable
 (no `--disk`; Modal's per-container quota is 512 GiB). The default image is Modal's
-Debian slim with Python 3.13 (or pass `--image`). Forwarded `--env` values are
+Debian slim with Python 3.13 (or pass `--image`). Both default and registry images
+copy standalone uv/uvx binaries from `ghcr.io/astral-sh/uv:0.10.4`; the bootstrap
+does not require Python/pip in a custom image. Forwarded `--env` values are
 excluded from the request and process arguments: dry-run JSON contains names only.
+
+Modal request/account rejections (`InvalidError`) use exit **2** (`usage`), not
+an auth or capacity error: check the GPU/image request and Modal account/billing
+settings, including a payment method. Image-build failures use exit **1**; inspect
+the build logs in the Modal dashboard. These errors use fixed, non-secret hints
+rather than forwarding raw SDK exceptions or build logs, which may expose request
+content or registry credentials.
 
 The shared run flow uploads the approved snapshot over exec stdin, runs setup
 and the command using the same detached supervisor as Vast, streams logs, and

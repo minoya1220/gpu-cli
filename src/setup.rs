@@ -3,13 +3,19 @@
 
 use crate::cli::SetupFlags;
 use crate::ctx::Ctx;
-use crate::error::{Error, Result};
+use crate::error::{Error, ExitCode, Result};
 use crate::gcp::{self, component, text};
 use crate::picker::{pick, Job, Next, Opt, Screen};
 use crate::pyjson::{Dict, Value};
 
-pub const GCP_NOT_SETUP: &str =
-    "Google Cloud is not set up. No gcloud command ran.\nNext: gpu setup";
+pub(crate) fn gcp_not_setup(code: Option<ExitCode>) -> Error {
+    let text = "Google Cloud is not set up. No gcloud command ran";
+    match code {
+        Some(code) => Error::status(code, text),
+        None => Error::msg(text),
+    }
+    .next_line("gpu setup")
+}
 const QUEUE: &str = "gpu-expiry";
 // Compute supplies the default compute identity and SSH infrastructure.
 const APIS: [&str; 4] = [
@@ -88,12 +94,14 @@ pub fn run(ctx: &Ctx, cfg: &Dict, flags: &SetupFlags) -> Result<()> {
         }),
     );
     if flags.zone.is_some() {
-        return Err(Error::msg(
-            "Setup needs no TPU zone. Choose it at launch. Next: gpu setup --provider gcp",
-        ));
+        return Err(Error::msg("Setup needs no TPU zone. Choose it at launch")
+            .next("gpu setup --provider gcp"));
     }
     if flags.remove && (flags.zone.is_some() || flags.location.is_some()) {
-        return Err(Error::msg("Removal uses the setup record. Omit --zone and --location. Next: gpu setup --provider gcp --remove --help"));
+        return Err(
+            Error::msg("Removal uses the setup record. Omit --zone and --location")
+                .next("gpu setup --provider gcp --remove --help"),
+        );
     }
     if flags.provider.as_deref() != Some("gcp")
         && (flags.project.is_some()
@@ -103,9 +111,8 @@ pub fn run(ctx: &Ctx, cfg: &Dict, flags: &SetupFlags) -> Result<()> {
             || flags.remove
             || flags.location.is_some())
     {
-        return Err(Error::msg(
-            "Select Google Cloud for these setup flags. Next: gpu setup --provider gcp --help",
-        ));
+        return Err(Error::msg("Select Google Cloud for these setup flags")
+            .next("gpu setup --provider gcp --help"));
     }
     let provider = match &flags.provider {
         Some(p) => p.clone(),
@@ -146,8 +153,9 @@ pub fn run(ctx: &Ctx, cfg: &Dict, flags: &SetupFlags) -> Result<()> {
             Error::Status(_, _) => error,
             _ => Error::status(
                 crate::error::ExitCode::NotSetup,
-                "Set up Vast.ai authentication. Next: vastai login",
-            ),
+                "Set up Vast.ai authentication",
+            )
+            .next("vastai login"),
         })?;
         ctx.result("ready", Value::Bool(true));
         return ctx.println("Vast.ai  ✓ set up\nNext: gpu up");
@@ -180,17 +188,19 @@ pub fn run(ctx: &Ctx, cfg: &Dict, flags: &SetupFlags) -> Result<()> {
     } else {
         setup_gcp(&cloud, cfg, flags)
     };
-    result.map_err(|e| {
-        let next = if e.text().contains("Next:") {
-            ""
-        } else {
-            "\nNext: gpu setup"
-        };
-        let message = format!("{}{next}", e.text());
-        match e {
-            Error::Status(code, _) => Error::status(code, message),
-            _ => Error::msg(message),
+    result.map_err(|error| {
+        if matches!(
+            error,
+            Error::Cancelled(_) | Error::Interrupted(_) | Error::Remote(_)
+        ) {
+            return error;
         }
+        let error = match error.next_step() {
+            Some(_) => error,
+            None => error.next_line("gpu setup"),
+        };
+        let text = error.text().to_string();
+        error.with_text(text)
     })
 }
 
@@ -204,7 +214,7 @@ fn cloud_json(ctx: &Ctx, args: &[&str]) -> Result<Value> {
 fn choose_project(ctx: &Ctx, explicit: Option<&str>) -> Result<Dict> {
     if let Some(project) = explicit {
         if !component(project) {
-            return Err(Error::msg("Invalid project ID. Next: gpu setup"));
+            return Err(Error::msg("Invalid project ID").next("gpu setup"));
         }
         return gcp::objects(cloud_json(
             ctx,
@@ -213,13 +223,12 @@ fn choose_project(ctx: &Ctx, explicit: Option<&str>) -> Result<Dict> {
         .into_iter()
         .find(|p| text(p, "projectId") == Some(project))
         .ok_or_else(|| {
-            Error::msg("Selected project is not in your active project list. Next: gpu setup")
+            Error::msg("Selected project is not in your active project list").next("gpu setup")
         });
     }
     if !ctx.interactive() {
-        return Err(Error::msg(
-            "Choose an existing project with --project. Next: gpu setup --provider gcp --help",
-        ));
+        return Err(Error::msg("Choose an existing project with --project")
+            .next("gpu setup --provider gcp --help"));
     }
     let worker = ctx.clone();
     let job = Job::new(move || {
@@ -676,10 +685,8 @@ fn ensure_unused(ctx: &Ctx, plan: &Plan, enabled: &[String]) -> Result<bool> {
                     .and_then(Value::as_dict)
                     .is_some_and(|d| text(d, "gpu-expiry-queue").is_some());
             if owned {
-                return Err(Error::msg(format!(
-                    "Destroy this TPU before removing setup. Next: gpu down {}",
-                    id.cli()
-                )));
+                return Err(Error::msg("Destroy this TPU before removing setup")
+                    .next(format!("gpu down {}", id.cli())));
             }
         }
     }
@@ -696,7 +703,10 @@ fn ensure_unused(ctx: &Ctx, plan: &Plan, enabled: &[String]) -> Result<bool> {
             ],
         )?)?;
         if !tasks.is_empty() {
-            return Err(Error::msg("Pending tasks block removal. Use gpu down or gpu expire ID cancel. Next: gpu ls --provider gcp"));
+            return Err(Error::msg(
+                "Pending tasks block removal. Use gpu down or gpu expire ID cancel",
+            )
+            .next("gpu ls --provider gcp"));
         }
     }
     Ok(exists)

@@ -521,31 +521,49 @@ pub fn manage_expiry(
     let cmd = Cmd::new(&command)
         .stdin(Input::Text(transport_payload()))
         .timeout(Some(45.0));
-    let result =
-        match ctx.run(&cmd) {
-            Ok(result) => result,
-            Err(RunError::TimedOut) => return Err(Error::msg(
-                format!("Expiry SSH timed out; arming/cancellation is unverified. Run gpu expire {instance_id} show."),
-            )),
-            Err(other) => return Err(Error::msg(other.python_text("ssh"))),
-        };
+    let result = match ctx.run(&cmd) {
+        Ok(result) => result,
+        Err(RunError::TimedOut) => {
+            let next = format!("gpu expire {instance_id} show");
+            return Err(Error::msg(format!(
+                "Expiry SSH timed out; arming/cancellation is unverified. Run {next}."
+            ))
+            .recovers_with(next));
+        }
+        Err(other) => return Err(Error::msg(other.describe("ssh"))),
+    };
     // Never echo SSH stderr or arbitrary remote text: it may contain secrets.
     let reply = pyjson::loads(&result.stdout).unwrap_or(Value::Dict(Dict::new()));
+    let show = format!("gpu expire {instance_id} show");
     let message = |code: &str| {
         match code {
-        "credentials" => "Instance-scoped CONTAINER_ID/CONTAINER_API_KEY missing or mismatched; expiry NOT armed.".to_string(),
-        "past" => format!("Deadline passed before SSH was ready; expiry NOT armed. Run gpu expire {instance_id} 2h."),
-        "verification" => format!("Timer startup verification failed; new expiry NOT armed (previous deadline unchanged). Run gpu expire {instance_id} show."),
-        _ => format!("Remote expiry operation failed; check bash, curl, flock and writable ~/.local/state/gpu-expire; run gpu expire {instance_id} show."),
+        "credentials" => Error::msg(
+            "Instance-scoped CONTAINER_ID/CONTAINER_API_KEY missing or mismatched; expiry NOT armed.",
+        ),
+        "past" => {
+            let rearm = format!("gpu expire {instance_id} 2h");
+            Error::msg(format!(
+                "Deadline passed before SSH was ready; expiry NOT armed. Run {rearm}."
+            ))
+            .recovers_with(rearm)
+        }
+        "verification" => Error::msg(format!(
+            "Timer startup verification failed; new expiry NOT armed (previous deadline unchanged). Run {show}."
+        ))
+        .recovers_with(&show),
+        _ => Error::msg(format!(
+            "Remote expiry operation failed; check bash, curl, flock and writable ~/.local/state/gpu-expire; run {show}."
+        ))
+        .recovers_with(&show),
     }
     };
     let error = reply.get("error").filter(|e| crate::pyfmt::truthy(e));
     let Value::Dict(reply) = reply.clone() else {
-        return Err(Error::msg(message("remote")));
+        return Err(message("remote"));
     };
     if result.code != 0 || error.is_some() {
         let code = error.and_then(Value::as_str).unwrap_or("remote");
-        return Err(Error::msg(message(code)));
+        return Err(message(code));
     }
     let status = reply.get("status").and_then(Value::as_str).unwrap_or("");
     if !matches!(
@@ -553,11 +571,12 @@ pub fn manage_expiry(
         "armed" | "retrying" | "inactive" | "none" | "cancelled" | "destroy-request-accepted"
     ) {
         return Err(Error::msg(format!(
-            "Invalid expiry response; completion unverified. Run gpu expire {instance_id} show."
-        )));
+            "Invalid expiry response; completion unverified. Run {show}."
+        ))
+        .recovers_with(show));
     }
     if action == "arm" && status != "armed" {
-        return Err(Error::msg(message("verification")));
+        return Err(message("verification"));
     }
     Ok(reply)
 }
@@ -600,10 +619,12 @@ pub fn expiry_summary(ctx: &Ctx, instance_id: &str, reply: &Dict) -> Result<Stri
         .get("deadline")
         .ok_or_else(|| Error::key("deadline"))?;
     let seconds = py_float(deadline).map_err(|_| {
+        let show = format!("gpu expire {instance_id} show");
         Error::msg(format!(
-            "Expiry deadline must be a number, got {}. Run gpu expire {instance_id} show.",
+            "Expiry deadline must be a number, got {}. Run {show}.",
             deadline.kind()
         ))
+        .recovers_with(show)
     })?;
     let micros = (seconds * 1e6).round_ties_even();
     let deadline = Timestamp::from_microsecond(micros as i64)

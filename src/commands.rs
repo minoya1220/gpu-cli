@@ -11,12 +11,13 @@ use crate::history::{recent_picks, record_picks_best_effort as record_picks};
 use crate::instances::{repo_name, select_instance};
 use crate::offers::offer_dicts;
 use crate::picker::pick;
-use crate::process::{run, RunError};
+use crate::process::RunError;
 use crate::prompt::confirm;
 use crate::pyfmt::{general, py_str, truthy};
 use crate::pyjson::{self, Dict, Value};
 use crate::redact::{redact, redact_text};
 use crate::ssh_config::{has_host, remove_host, update_host, HostError};
+use crate::vast::run;
 use crate::vast::{find_instance, list_instances};
 
 pub fn ls(ctx: &Ctx, json: bool) -> Result<()> {
@@ -41,9 +42,9 @@ pub fn render_instances(ctx: &Ctx, instances: &Value) -> Result<()> {
 pub fn selected_id(ctx: &Ctx, id: Option<&str>, command: &str) -> Result<Option<String>> {
     match id {
         Some(id) => Ok(Some(id.to_string())),
-        None if !ctx.interactive() => Err(crate::output::usage(format!(
-            "Missing instance ID. Next: gpu {command} ID"
-        ))),
+        None if !ctx.interactive() => {
+            Err(Error::usage("Missing instance ID").next(format!("gpu {command} ID")))
+        }
         None => select_instance(ctx, &list_instances(ctx, None)?, command),
     }
 }
@@ -154,8 +155,9 @@ pub(crate) fn wait_for_ssh_with_hint(
             if state == "destroyed" || (stopping && ["stopped", "exited"].contains(&state.as_str()))
             {
                 return Err(Error::msg(format!(
-                    "Instance {instance_id} is {state}; SSH cannot become ready. Next: gpu ls"
-                )));
+                    "Instance {instance_id} is {state}; SSH cannot become ready"
+                ))
+                .next("gpu ls"));
             }
         }
         if instance.get("actual_status") == Some(&Value::str("running")) {
@@ -190,7 +192,7 @@ pub(crate) fn wait_for_ssh_with_hint(
                             Err(RunError::TimedOut) => {
                                 reason = "SSH probe timed out".into();
                             }
-                            Err(other) => return Err(Error::msg(other.python_text("ssh"))),
+                            Err(other) => return Err(Error::msg(other.describe("ssh"))),
                         }
                     }
                 }
@@ -215,7 +217,7 @@ pub fn edit_instance(
         Some(editor) => editor,
         None => {
             if !ctx.interactive() {
-                return Err(crate::output::usage(
+                return Err(Error::usage(
                     format!("No previous editor; specify --editor cursor|code|zed|nvim. Example: gpu edit {instance_id} --editor code"),
                 ));
             }
@@ -267,9 +269,10 @@ pub fn expire_instance(
     );
     ctx.println(&expiry_summary(ctx, instance_id, &result)?)?;
     if result.get("status") == Some(&Value::str("inactive")) {
-        return Err(Error::msg(format!(
-            "Timer is NOT running; re-arm with gpu expire {instance_id} 2h."
-        )));
+        let rearm = format!("gpu expire {instance_id} 2h");
+        return Err(
+            Error::msg(format!("Timer is NOT running; re-arm with {rearm}.")).recovers_with(rearm),
+        );
     }
     Ok(alias)
 }
@@ -324,10 +327,7 @@ pub fn lifecycle(ctx: &Ctx, instance_id: &str, destroy: bool, yes: bool) -> Resu
             "Instance {instance_id}: {action} failed; completion not verified: {}",
             err.text()
         );
-        return Err(match err {
-            Error::Status(code, _) => Error::status(code, message),
-            _ => Error::msg(message),
-        });
+        return Err(err.with_text(message));
     }
     ctx.progress(&format!(
         "Waiting for instance {instance_id} to {action}..."

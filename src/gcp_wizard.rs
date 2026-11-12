@@ -24,7 +24,8 @@ fn estimates(price: std::sync::Arc<crate::gcp_prices::Prices>) -> String {
     )
 }
 fn missing_flags() -> Error {
-    Error::msg("Specify --tpu, --zone and --repo or --no-repo (zone may come from config). Next: gpu up --provider gcp --help")
+    Error::msg("Specify --tpu, --zone and --repo or --no-repo (zone may come from config)")
+        .next("gpu up --provider gcp --help")
 }
 
 #[derive(Clone)]
@@ -192,7 +193,7 @@ fn next_with(
                     .ok()
                     .is_some_and(|seconds| crate::gcp_expiry::EXPIRY_SECONDS.contains(&seconds))
                 {
-                    return Err(crate::gcp_expiry::EXPIRY_BOUND.into());
+                    return Err(crate::gcp_expiry::expiry_bound().text().into());
                 }
                 Ok(())
             })))
@@ -626,12 +627,20 @@ pub(crate) fn transition(
 /// https://cloud.google.com/tpu/docs/runtimes#pytorch_and_jax
 /// Never use a saved runtime: a later type selection can change generations.
 pub(crate) fn runtime_for(tpu: &str) -> Result<&'static str> {
-    match tpu.split_once('-').map(|(generation, _)| crate::gcp_types::family(generation)) {
+    match tpu
+        .split_once('-')
+        .map(|(generation, _)| crate::gcp_types::family(generation))
+    {
         Some("v2" | "v3" | "v4") => Ok("tpu-ubuntu2204-base"),
         Some("v5e") => Ok("v2-alpha-tpuv5-lite"),
         Some("v5p") => Ok("v2-alpha-tpuv5"),
         Some("v6e") => Ok("v2-alpha-tpuv6e"),
-        _ => Err(Error::msg(format!("Unknown runtime for {tpu}; supply --runtime. Next: gpu up --tpu {} --runtime <image> --expire 2h", crate::pyfmt::shell_quote(tpu)))),
+        _ => Err(
+            Error::msg(format!("Unknown runtime for {tpu}; supply --runtime")).next(format!(
+                "gpu up --tpu {} --runtime <image> --expire 2h",
+                crate::pyfmt::shell_quote(tpu)
+            )),
+        ),
     }
 }
 
@@ -675,9 +684,8 @@ pub(crate) fn complete(
 ) -> Result<Picks> {
     let missing = missing_flags;
     let deadline = selected.expiry_at.ok_or_else(|| {
-        Error::msg(
-            "TPU launches require a destruction deadline. Next: gpu up --provider gcp --expire 2h",
-        )
+        Error::msg("TPU launches require a destruction deadline")
+            .next("gpu up --provider gcp --expire 2h")
     })?;
     let zone = selected.zone.ok_or_else(missing)?;
     let tpu = selected.tpu.ok_or_else(missing)?;
@@ -694,9 +702,9 @@ pub(crate) fn complete(
                 .all(|b| b.is_ascii_alphanumeric() || b"-._".contains(&b))
     }) || !gcp::component(&zone)
     {
-        return Err(Error::msg(
-            "Invalid TPU type, zone or runtime. Next: gpu up --provider gcp --help",
-        ));
+        return Err(
+            Error::msg("Invalid TPU type, zone or runtime").next("gpu up --provider gcp --help")
+        );
     }
     let owner = crate::pyfmt::py_str(crate::config::get(cfg, "owner")?);
     let (_, name) = resolve_repo(repo.as_arg(), &owner)?;

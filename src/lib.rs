@@ -78,8 +78,8 @@ pub fn main_with(argv: &[String], ctx: &Ctx) -> i32 {
         } => {
             if !to_stdout && cli::wants_json(argv) {
                 let command = cli::parsed_command_name(argv);
-                let error = Err(Error::Usage(
-                    text.lines().next().unwrap_or("Invalid arguments").into(),
+                let error = Err(Error::usage(
+                    text.lines().next().unwrap_or("Invalid arguments"),
                 ));
                 let ctx = ctx.for_command(true);
                 if let Some(usage) = text.lines().find(|line| line.starts_with("Usage:")) {
@@ -163,7 +163,7 @@ fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
     let mut expire_plan = None;
     if let Command::Expire { expiry_args } = &command {
         let (id, when) = expiry::parse_expire_arguments(expiry_args)
-            .map_err(|e| Error::Usage(cli::usage_error("expire", &e)))?;
+            .map_err(|e| Error::usage(cli::usage_error("expire", &e)))?;
         let action = if when == "show" || when == "cancel" {
             when.clone()
         } else {
@@ -173,7 +173,7 @@ fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
             let zone = expiry::local_zone(&ctx.env);
             Some(
                 expiry::parse_when(&when, ctx.clock.now(), &zone)
-                    .map_err(|e| Error::Usage(cli::usage_error("expire", &e)))?,
+                    .map_err(|e| Error::usage(cli::usage_error("expire", &e)))?,
             )
         } else {
             None
@@ -185,7 +185,7 @@ fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
         if let Some(duration) = flags.expire.as_deref().filter(|e| !e.is_empty()) {
             up_deadline = Some(
                 expiry::parse_deadline_duration(duration, ctx.clock.now())
-                    .map_err(|e| Error::Usage(cli::usage_error("up", &e)))?,
+                    .map_err(|e| Error::usage(cli::usage_error("up", &e)))?,
             );
         }
     }
@@ -193,7 +193,7 @@ fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
         && (matches!(&command, Command::Ssh { exec: true, .. })
             || matches!(&command, Command::Edit { editor: Some(editor), .. } if editor == "nvim"))
     {
-        return Err(output::usage("Interactive SSH/editor sessions cannot use --json. Use gpu exec ID -- COMMAND for terminal-free execution."));
+        return Err(Error::usage("Interactive SSH/editor sessions cannot use --json. Use gpu exec ID -- COMMAND for terminal-free execution."));
     }
     guardrails::nonterminal(ctx, &command, &cfg)?;
     if let Command::Up(flags) = &command {
@@ -256,9 +256,8 @@ fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
                 return remote::after_up(ctx, wait && !flags.dry_run, timeout, wait_setup);
             }
             if tpu_flags {
-                return Err(Error::msg(
-                    "TPU flags do not apply to Vast. Next: gpu up --provider gcp --help",
-                ));
+                return Err(Error::msg("TPU flags do not apply to Vast")
+                    .next("gpu up --provider gcp --help"));
             }
             let dry_run = flags.dry_run;
             launch::launch(ctx, &up_args(flags), &cfg, up_deadline)?;

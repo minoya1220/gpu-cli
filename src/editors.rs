@@ -146,7 +146,7 @@ fn checked(ctx: &Ctx, cmd: Cmd) -> Result<()> {
     let program = cmd.program().to_string();
     let output = ctx
         .run(&cmd)
-        .map_err(|e| Error::msg(e.python_text(&program)))?;
+        .map_err(|e| Error::msg(e.describe(&program)))?;
     if output.code != 0 {
         return Err(Error::msg(format!(
             "{program} failed while preparing or running Neovim (exit {})",
@@ -180,7 +180,7 @@ pub fn launch_editor(
     config: Option<&str>,
 ) -> Result<()> {
     if ctx.json() && editor == "nvim" {
-        return Err(crate::output::usage(
+        return Err(Error::usage(
             "Neovim needs a terminal; use --editor code or gpu exec ID -- COMMAND with --json.",
         ));
     }
@@ -205,7 +205,7 @@ pub fn launch_editor(
         // Wait for the CLI handoff, not the editor window; a failed handoff must not enter history.
         let output = ctx
             .run(&Cmd::new(&argv))
-            .map_err(|e| Error::msg(e.python_text(editor)))?;
+            .map_err(|e| Error::msg(e.describe(editor)))?;
         if output.code != 0 {
             let label = editor_label(editor).unwrap_or(editor);
             return Err(Error::msg(format!(

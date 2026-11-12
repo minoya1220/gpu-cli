@@ -1,6 +1,6 @@
 //! Invocation-scoped structured results. Never derive machine data from prose.
 use crate::ctx::Ctx;
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::pyjson::{self, Dict, Value};
 use crate::sync::MutexExt;
 
@@ -43,8 +43,4 @@ pub(crate) fn finish(ctx: &Ctx, command: &str, outcome: &Result<()>) -> Result<(
         .println(&pyjson::dumps(&envelope(ctx, command, outcome), None))?;
     ctx.mark_output_written();
     Ok(())
-}
-
-pub(crate) fn usage(text: impl Into<String>) -> Error {
-    Error::Usage(text.into())
 }

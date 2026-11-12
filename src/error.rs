@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod tests;
 use std::io;
 use std::path::Path;
 
@@ -78,41 +80,182 @@ pub(crate) fn help_codes(run: bool) -> String {
         .join("; ")
 }
 
+/// Error text plus the facts callers act on, so no caller parses prose.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Message {
+    text: String,
+    /// Byte length of the text before an appended next step.
+    summary: usize,
+    /// The command this error recommends running next.
+    next: Option<String>,
+    /// The provider refused the request outright, so nothing was created.
+    rejected: bool,
+}
+
+impl Message {
+    pub fn as_str(&self) -> &str {
+        &self.text
+    }
+}
+
+impl From<String> for Message {
+    fn from(text: String) -> Self {
+        Self {
+            summary: text.len(),
+            text,
+            next: None,
+            rejected: false,
+        }
+    }
+}
+
+impl From<&str> for Message {
+    fn from(text: &str) -> Self {
+        text.to_string().into()
+    }
+}
+
+impl std::ops::Deref for Message {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.text
+    }
+}
+
+impl std::fmt::Display for Message {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.text)
+    }
+}
+
 /// How a command ends other than success.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Error {
     /// A handled error: `gpu: <redacted message>` on stderr, exit 1.
-    Msg(String),
+    Msg(Message),
     /// A provider read can be retried without changing paid resources.
-    ProviderUnavailable(String),
+    ProviderUnavailable(Message),
     /// A subprocess deadline elapsed; mutations may have completed remotely.
-    Timeout(String),
+    Timeout(Message),
     Interrupted(i32),
-    Status(ExitCode, String),
+    Status(ExitCode, Message),
     /// An SSH/scp process completed; do not replace its diagnostics or exit code.
     Remote(i32),
     /// The user quit; `Cancelled.` on stdout and this exit status.
     Cancelled(i32),
     /// Actionable missing-input text or clap-rendered usage; stderr, exit 2.
-    Usage(String),
+    Usage(Message),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl Error {
     pub fn msg(text: impl Into<String>) -> Error {
-        Error::Msg(text.into())
+        Error::Msg(text.into().into())
     }
 
     pub fn status(code: ExitCode, text: impl Into<String>) -> Error {
-        Error::Status(code, text.into())
+        Error::Status(code, text.into().into())
+    }
+
+    pub fn usage(text: impl Into<String>) -> Error {
+        Error::Usage(text.into().into())
+    }
+
+    pub fn unavailable(text: impl Into<String>) -> Error {
+        Error::ProviderUnavailable(text.into().into())
+    }
+
+    pub fn timeout(text: impl Into<String>) -> Error {
+        Error::Timeout(text.into().into())
+    }
+
+    fn message_mut(&mut self) -> Option<&mut Message> {
+        match self {
+            Error::Msg(message)
+            | Error::Usage(message)
+            | Error::Status(_, message)
+            | Error::ProviderUnavailable(message)
+            | Error::Timeout(message) => Some(message),
+            Error::Interrupted(_) | Error::Cancelled(_) | Error::Remote(_) => None,
+        }
+    }
+
+    fn message(&self) -> Option<&Message> {
+        match self {
+            Error::Msg(message)
+            | Error::Usage(message)
+            | Error::Status(_, message)
+            | Error::ProviderUnavailable(message)
+            | Error::Timeout(message) => Some(message),
+            Error::Interrupted(_) | Error::Cancelled(_) | Error::Remote(_) => None,
+        }
+    }
+
+    fn append_next(mut self, separator: &str, command: String) -> Error {
+        if let Some(message) = self.message_mut() {
+            message.text = format!("{}{separator}{command}", &message.text[..message.summary]);
+            message.next = Some(command);
+        }
+        self
+    }
+
+    /// Append `. Next: COMMAND` and record COMMAND as the recovery step.
+    pub fn next(self, command: impl Into<String>) -> Error {
+        self.append_next(". Next: ", command.into())
+    }
+
+    /// Append `\nNext: COMMAND` and record COMMAND as the recovery step.
+    pub fn next_line(self, command: impl Into<String>) -> Error {
+        self.append_next("\nNext: ", command.into())
+    }
+
+    /// Record the recovery command that the message text already names.
+    pub fn recovers_with(mut self, command: impl Into<String>) -> Error {
+        if let Some(message) = self.message_mut() {
+            message.next = Some(command.into());
+        }
+        self
+    }
+
+    /// Mark a definitive provider refusal: the request created nothing.
+    pub fn rejected(mut self) -> Error {
+        if let Some(message) = self.message_mut() {
+            message.rejected = true;
+        }
+        self
+    }
+
+    /// Replace the text with fresh context, keeping a stable exit status;
+    /// every other kind becomes a handled error.
+    pub fn with_text(self, text: impl Into<String>) -> Error {
+        match self {
+            Error::Status(code, _) => Error::status(code, text),
+            _ => Error::msg(text),
+        }
+    }
+
+    /// The text without its appended next step.
+    pub fn summary(&self) -> &str {
+        self.message()
+            .map_or("", |message| &message.text[..message.summary])
+    }
+
+    /// The command this error recommends running next.
+    pub fn next_step(&self) -> Option<&str> {
+        self.message().and_then(|message| message.next.as_deref())
+    }
+
+    pub fn is_rejection(&self) -> bool {
+        self.message().is_some_and(|message| message.rejected)
     }
 
     pub fn not_found(id: &str) -> Error {
         Self::status(
             ExitCode::NotFound,
-            format!("Instance {id} not found in the account. Next: gpu ls"),
+            format!("Instance {id} not found in the account"),
         )
+        .next("gpu ls")
     }
 
     pub fn exit_code(&self) -> i32 {
@@ -120,8 +263,8 @@ impl Error {
             Self::Msg(_) | Self::ProviderUnavailable(_) | Self::Timeout(_) => 1,
             Self::Interrupted(code) => *code,
             Self::Usage(_) => 2,
-            Self::Cancelled(code) | Self::Remote(code) => *code,
             Self::Status(code, _) => *code as i32,
+            Self::Cancelled(code) | Self::Remote(code) => *code,
         }
     }
 
@@ -130,11 +273,11 @@ impl Error {
             Self::Status(code, _) => code.name(),
             Self::Usage(_) => "usage",
             Self::Cancelled(_) => "cancelled",
+            Self::Interrupted(_) => "interrupted",
+            Self::Timeout(_) => "timeout",
+            Self::ProviderUnavailable(_) => "provider_unavailable",
             Self::Remote(_) => "remote_exit",
             Self::Msg(_) => "error",
-            Self::ProviderUnavailable(_) => "provider_unavailable",
-            Self::Timeout(_) => "timeout",
-            Self::Interrupted(_) => "interrupted",
         }
     }
 
@@ -143,40 +286,35 @@ impl Error {
     }
 
     pub fn key(key: &str) -> Error {
-        Error::Msg(format!("Required field missing: {}.", repr_str(key)))
+        Error::msg(format!("Required field missing: {}.", repr_str(key)))
     }
 
     /// Message text for handled errors (empty for the other kinds).
     pub fn text(&self) -> &str {
         match self {
-            Error::Msg(text)
-            | Error::Usage(text)
-            | Error::Status(_, text)
-            | Error::ProviderUnavailable(text)
-            | Error::Timeout(text) => text,
             Error::Interrupted(_) => {
                 "Command interrupted; inspect the partial result and gpu ls before retrying."
             }
-            Error::Cancelled(_) | Error::Remote(_) => "",
+            error => error.message().map_or("", Message::as_str),
         }
     }
 }
 
 impl From<String> for Error {
     fn from(text: String) -> Self {
-        Error::Msg(text)
+        Error::msg(text)
     }
 }
 
 impl From<&str> for Error {
     fn from(text: &str) -> Self {
-        Error::Msg(text.to_string())
+        Error::msg(text)
     }
 }
 
 impl From<io::Error> for Error {
     fn from(err: io::Error) -> Self {
-        Error::Msg(os_message(&err, None))
+        Error::msg(os_message(&err, None))
     }
 }
 
@@ -197,5 +335,5 @@ pub fn os_message(err: &io::Error, path: Option<&Path>) -> String {
 }
 
 pub fn os_error(err: &io::Error, path: &Path) -> Error {
-    Error::Msg(os_message(err, Some(path)))
+    Error::msg(os_message(err, Some(path)))
 }

@@ -53,19 +53,19 @@ impl UpArgs {
 
 pub fn validate_launch_args(args: &UpArgs) -> Result<()> {
     if args.num_gpus < 1 {
-        return Err(Error::Usage("--num-gpus must be at least 1".into()));
+        return Err(Error::usage("--num-gpus must be at least 1"));
     }
     if args.disk.is_some_and(|d| d < 1) {
-        return Err(Error::Usage("--disk must be at least 1".into()));
+        return Err(Error::usage("--disk must be at least 1"));
     }
     if args.max_price.is_some_and(|p| !p.is_finite() || p <= 0.0) {
-        return Err(Error::Usage("--max-price must be greater than 0".into()));
+        return Err(Error::usage("--max-price must be greater than 0"));
     }
     if args.reliability.is_some_and(|r| !(0.0..=1.0).contains(&r)) {
-        return Err(Error::Usage("--reliability must be between 0 and 1".into()));
+        return Err(Error::usage("--reliability must be between 0 and 1"));
     }
     if args.offer.is_some_and(|o| o < 1) {
-        return Err(Error::Usage("--offer must be a positive ID".into()));
+        return Err(Error::usage("--offer must be a positive ID"));
     }
     Ok(())
 }
@@ -77,7 +77,7 @@ pub fn github_repos(ctx: &Ctx, owner: &str) -> Result<Vec<String>> {
         &[
             "gh", "repo", "list", owner, "--json", "name", "--limit", "1000",
         ],
-        None,
+        Some(60.0),
     )?;
     github_names(&output)
 }
@@ -210,7 +210,7 @@ fn github_repos_for_prompt(ctx: &Ctx, owner: &str) -> Result<Vec<String>> {
         &[
             "gh", "repo", "list", owner, "--json", "name", "--limit", "1000",
         ],
-        None,
+        Some(60.0),
     ) {
         Ok(output) => github_names(&output),
         Err(err) => {
@@ -546,9 +546,9 @@ pub fn launch(ctx: &Ctx, args: &UpArgs, cfg: &Dict, deadline: Option<Timestamp>)
         }
     }
     if deadline.is_some_and(|at| at <= ctx.clock.now()) {
-        return Err(Error::msg(
-            "Expiry deadline passed; no instance created. Next: gpu up --expire 2h",
-        ));
+        return Err(
+            Error::msg("Expiry deadline passed; no instance created").next("gpu up --expire 2h")
+        );
     }
     ctx.result("created", Value::Null);
     // From here on an instance may exist, so Ctrl-C must say what remains.
@@ -580,8 +580,9 @@ pub fn launch(ctx: &Ctx, args: &UpArgs, cfg: &Dict, deadline: Option<Timestamp>)
     let announced = ctx.println(&summary);
     if ctx.json() && instance_id.is_none() {
         return Err(Error::msg(
-            "Create accepted but no instance ID returned; completion unverified. Next: gpu ls",
-        ));
+            "Create accepted but no instance ID returned; completion unverified",
+        )
+        .next("gpu ls"));
     }
     if args.expire().is_some() {
         let Some(instance_id) = &instance_id else {
@@ -593,7 +594,10 @@ pub fn launch(ctx: &Ctx, args: &UpArgs, cfg: &Dict, deadline: Option<Timestamp>)
         match expire_instance(ctx, instance_id, "arm", deadline) {
             Err(error) => {
                 let text = error.text();
-                let next = if text.contains(&format!("gpu expire {instance_id} ")) {
+                let names_expire = error
+                    .next_step()
+                    .is_some_and(|step| step.starts_with(&format!("gpu expire {instance_id} ")));
+                let next = if names_expire {
                     format!("Or stop billing: gpu down {instance_id}.")
                 } else {
                     format!("Run gpu expire {instance_id} show or gpu down {instance_id}.")
@@ -602,10 +606,7 @@ pub fn launch(ctx: &Ctx, args: &UpArgs, cfg: &Dict, deadline: Option<Timestamp>)
                     "Instance {instance_id} created but expiry NOT verified; billing continues.{}\n{text}\n{next}",
                     guard.unwrap_or_default()
                 );
-                return Err(match error {
-                    Error::Status(code, _) => Error::status(code, message),
-                    _ => Error::msg(message),
-                });
+                return Err(error.with_text(message));
             }
             Ok(alias) => {
                 ctx.result("ssh_alias", Value::str(alias));

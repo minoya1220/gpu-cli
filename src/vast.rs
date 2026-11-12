@@ -7,12 +7,59 @@ use crate::config::{self, CONTAINER_ENV};
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use crate::offers::{offer_number, price_field};
-use crate::process::{run, run_output};
+use crate::process::{Cmd, Output, RunError};
 use crate::pyfmt::{float_repr, py_str};
 use crate::pyjson::{self, Dict, Value};
 use crate::redact::redact_text;
 use crate::repos::{resolve_repo, Repo};
 use crate::startup::startup_script;
+
+/// Deadline for a Vast CLI call that names none.
+const CLI_TIMEOUT: f64 = 60.0;
+/// Vast subcommands that change nothing, so their failures are retryable.
+const READS: [&str; 3] = ["show", "search", "ssh-url"];
+
+/// Run `vastai ...` (`argv` starts with `vastai`), translating Vast's known
+/// failure signatures before the generic command report.
+pub(crate) fn run_output<S: AsRef<str>>(
+    ctx: &Ctx,
+    argv: &[S],
+    timeout: Option<f64>,
+) -> Result<Output> {
+    let cmd = Cmd::new(argv).timeout(Some(timeout.unwrap_or(CLI_TIMEOUT)));
+    match ctx.run(&cmd) {
+        Err(RunError::NotFound) => Err(Error::status(
+            crate::error::ExitCode::NotSetup,
+            "Install the Vast CLI, then check authentication",
+        )
+        .next("gpu setup --provider vast")),
+        Ok(output) if output.code != 0 => {
+            let detail = crate::process::failure_detail(&output);
+            if let Some(error) = crate::provider_errors::vast(&detail) {
+                return Err(error);
+            }
+            let message = if detail.is_empty() {
+                "Command failed: vastai".to_string()
+            } else {
+                detail
+            };
+            let read = argv
+                .get(1)
+                .is_some_and(|command| READS.contains(&command.as_ref()));
+            Err(if read {
+                Error::unavailable(message)
+            } else {
+                Error::msg(message)
+            })
+        }
+        result => crate::process::checked("vastai", result),
+    }
+}
+
+/// `run_output`, keeping only the trimmed stdout.
+pub(crate) fn run<S: AsRef<str>>(ctx: &Ctx, argv: &[S], timeout: Option<f64>) -> Result<String> {
+    run_output(ctx, argv, timeout).map(|output| output.stdout.trim().to_string())
+}
 
 /// The choices a create request depends on.
 pub struct RequestArgs<'a> {
@@ -71,7 +118,7 @@ impl Vast {
     pub fn create(&self, request: &[Value]) -> Result<Option<Dict>> {
         let output = run_output(&self.ctx, &argv(request)?, Some(120.0)).map_err(|error| {
             if matches!(error, Error::Timeout(_)) {
-                Error::Timeout("Vast create timed out; completion unverified. An instance may be billing. Check: gpu ls before retrying.".into())
+                Error::timeout("Vast create timed out; completion unverified. An instance may be billing. Check: gpu ls before retrying.")
             } else { error }
         })?;
         let stdout = output.stdout.trim();
@@ -200,11 +247,8 @@ pub fn list_instances(ctx: &Ctx, timeout: Option<f64>) -> Result<Vec<Dict>> {
         &["vastai", "show", "instances", "--raw"],
         timeout,
     )?)?;
-    let unreadable = || {
-        Error::ProviderUnavailable(
-            "Vast returned an unreadable instance list. Retry: gpu ls".into(),
-        )
-    };
+    let unreadable =
+        || Error::unavailable("Vast returned an unreadable instance list. Retry: gpu ls");
     if !matches!(value, Value::List(_)) {
         return Err(unreadable());
     }
@@ -222,7 +266,7 @@ pub fn list_instances(ctx: &Ctx, timeout: Option<f64>) -> Result<Vec<Dict>> {
 pub(crate) fn parse_reply(output: &str) -> Result<Value> {
     let value = pyjson::loads(output).map_err(|_| {
         crate::provider_errors::vast(output).unwrap_or_else(|| {
-            Error::ProviderUnavailable("Vast returned no readable data; the provider may be temporarily unavailable. Retry: gpu ls".into())
+            Error::unavailable("Vast returned no readable data; the provider may be temporarily unavailable. Retry: gpu ls")
         })
     })?;
     if let Some(dict) = value.as_dict() {
@@ -234,8 +278,8 @@ pub(crate) fn parse_reply(output: &str) -> Result<Value> {
                     }
                 }
             }
-            return Err(Error::ProviderUnavailable(
-                "Vast returned an unsuccessful reply. Retry: gpu ls".into(),
+            return Err(Error::unavailable(
+                "Vast returned an unsuccessful reply. Retry: gpu ls",
             ));
         }
     }

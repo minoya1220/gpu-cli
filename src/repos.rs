@@ -122,7 +122,7 @@ pub fn resolve_repo(repo: &str, owner: &str) -> Result<(String, String)> {
             return Err(reject());
         }
         if !repo.contains('/') && owner.is_empty() {
-            return Err(Error::Usage("No GitHub owner configured. Use --repo OWNER/NAME or set owner in gpu/config.json (gh api user can infer it).".into()));
+            return Err(Error::usage("No GitHub owner configured. Use --repo OWNER/NAME or set owner in gpu/config.json (gh api user can infer it)."));
         }
         let path = if repo.contains('/') {
             repo.to_string()

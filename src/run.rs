@@ -55,7 +55,7 @@ pub(crate) fn step_result(
         }
         Err(error) => Err(Error::msg(format!(
             "{message} {}",
-            ctx.safe_diagnostic(&error.python_text("ssh"))
+            ctx.safe_diagnostic(&error.describe("ssh"))
         ))),
     }
 }
@@ -282,15 +282,14 @@ fn setup(flags: &RunFlags, cwd: &Path) -> String {
 fn duration(text: &str, now: Timestamp) -> Result<i64> {
     crate::expiry::parse_deadline_duration(text, now)
         .map(|at| at.as_second() - now.as_second())
-        .map_err(Error::Usage)
+        .map_err(Error::usage)
 }
 
 fn run_duration(text: &str, now: Timestamp) -> Result<i64> {
     let seconds = duration(text, now)?;
     if seconds <= DOWNLOAD_RESERVE {
-        return Err(Error::Usage(
-            "gpu run needs --expire longer than 10m to reserve time for downloading results."
-                .into(),
+        return Err(Error::usage(
+            "gpu run needs --expire longer than 10m to reserve time for downloading results.",
         ));
     }
     Ok(seconds)
@@ -391,12 +390,12 @@ fn choose(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, args: &UpArgs) -> Result<Sele
             ));
         }
         if picks.tpu.is_some() {
-            return Err(Error::Usage("gpu run supports Vast GPUs only.".into()));
+            return Err(Error::usage("gpu run supports Vast GPUs only."));
         }
         if let Some(offer) = picks.offer {
             return Ok(Selection::Vast(offer));
         }
-        let search = search.ok_or_else(|| Error::Usage("Modal requires --gpu MODEL.".into()))?;
+        let search = search.ok_or_else(|| Error::usage("Modal requires --gpu MODEL."))?;
         return crate::launch::select_offer(
             ctx,
             search.offers("container", picks.gpu.as_deref())?,
@@ -432,8 +431,8 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
             prompted_expire.trim()
         }
         None => {
-            return Err(Error::Usage(
-                "gpu run requires --expire DURATION or default_expire in config.json.".into(),
+            return Err(Error::usage(
+                "gpu run requires --expire DURATION or default_expire in config.json.",
             ));
         }
     };
@@ -441,34 +440,30 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
     if flags.provider.as_deref() == Some("modal") {
         crate::modal::validate(flags, seconds)?;
     } else if flags.cpu.is_some() || flags.memory.is_some() {
-        return Err(Error::Usage(
-            "--cpu and --memory require --provider modal.".into(),
-        ));
+        return Err(Error::usage("--cpu and --memory require --provider modal."));
     }
     let deadline = Timestamp::from_second(now.as_second() + seconds)
-        .map_err(|_| Error::Usage("Expiry out of range.".into()))?;
+        .map_err(|_| Error::usage("Expiry out of range."))?;
     let linger = if flags.linger == "0" {
         0
     } else {
         duration(&flags.linger, now)?
     };
     if !run_files::relative(Path::new(&flags.outputs)) {
-        return Err(Error::Usage(
-            "--outputs must be a relative directory without . or .. components.".into(),
+        return Err(Error::usage(
+            "--outputs must be a relative directory without . or .. components.",
         ));
     }
     if !ctx.interactive() && flags.gpu.is_none() {
-        return Err(Error::Usage(
-            "Non-terminal gpu run requires --gpu MODEL.".into(),
-        ));
+        return Err(Error::usage("Non-terminal gpu run requires --gpu MODEL."));
     }
     if !ctx.interactive() && !flags.yes && !flags.dry_run {
-        return Err(Error::Usage(
-            "Non-terminal gpu run requires --yes; use --dry-run to inspect without renting.".into(),
+        return Err(Error::usage(
+            "Non-terminal gpu run requires --yes; use --dry-run to inspect without renting.",
         ));
     }
     if flags.image.as_deref().is_some_and(str::is_empty) {
-        return Err(Error::Usage("--image must not be empty.".into()));
+        return Err(Error::usage("--image must not be empty."));
     }
     let mut env = String::new();
     for key in &flags.env {
@@ -478,16 +473,16 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
                 .enumerate()
                 .all(|(i, b)| b == b'_' || b.is_ascii_alphabetic() || (i > 0 && b.is_ascii_digit()))
         {
-            return Err(Error::Usage(format!(
+            return Err(Error::usage(format!(
                 "Invalid --env name: {key}. Pass a variable NAME, not NAME=value."
             )));
         }
         let value = ctx
             .env
             .get(key)
-            .ok_or_else(|| Error::Usage(format!("Local variable {key} is not set.")))?;
+            .ok_or_else(|| Error::usage(format!("Local variable {key} is not set.")))?;
         if value.contains('\0') {
-            return Err(Error::Usage(format!(
+            return Err(Error::usage(format!(
                 "Local variable {key} contains a NUL."
             )));
         }
@@ -495,7 +490,7 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
         env.push_str(&format!("export {key}={}\n", shell_quote(value)));
     }
     let args = args(flags);
-    crate::launch::validate_launch_args(&args).map_err(|e| Error::Usage(e.text().into()))?;
+    crate::launch::validate_launch_args(&args).map_err(|e| Error::usage(e.text()))?;
     let upload = run_files::prepare(ctx, cwd, run_files::max_bytes(&flags.max_upload)?)?;
     let secrets: Vec<_> = upload
         .files
@@ -509,7 +504,7 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
             .collect::<Vec<_>>()
             .join(", ");
         if !flags.allow_secrets {
-            return Err(Error::Usage(format!("Refusing secret-looking upload files: {names}. Ignore them in .gitignore or explicitly pass --allow-secrets.")));
+            return Err(Error::usage(format!("Refusing secret-looking upload files: {names}. Ignore them in .gitignore or explicitly pass --allow-secrets.")));
         }
         ctx.eprintln(&format!(
             "WARNING: uploading secret-looking files allowed by --allow-secrets: {names}."
@@ -527,9 +522,7 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
     if flags.provider.as_deref() != Some("modal")
         && !matches!(cfg.get("container_image"), Some(Value::Str(image)) if !image.is_empty())
     {
-        return Err(Error::Usage(
-            "container_image must be a non-empty string.".into(),
-        ));
+        return Err(Error::usage("container_image must be a non-empty string."));
     }
     phase(ctx, "launch");
     ctx.result(
@@ -630,8 +623,8 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
         return Err(Error::Cancelled(130));
     }
     if ctx.clock.now().as_second() >= deadline.as_second() - DOWNLOAD_RESERVE {
-        return Err(Error::Usage(
-            "Not enough time remains before expiry; choose a longer --expire.".into(),
+        return Err(Error::usage(
+            "Not enough time remains before expiry; choose a longer --expire.",
         ));
     }
     // Prove the destination is writable before spending anything. Keep a unique
@@ -857,7 +850,7 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
         ctx.result("destroyed", Value::Bool(true));
         ctx.set_interrupt_notice(None);
         if let Err(Error::Status(ExitCode::WaitTimeout, message)) = &mut outcome {
-            *message = format!("Instance {id} was destroyed. {message}");
+            *message = format!("Instance {id} was destroyed. {message}").into();
         }
         if ctx.interrupts() > 0 {
             outcome = Err(Error::Cancelled(130));
@@ -1141,7 +1134,7 @@ fn destroy(ctx: &Ctx, id: &str) -> Result<()> {
         // inventory must never suppress the paid-resource cleanup request.
         let mut verified = Ok(());
         for _ in 0..DESTROY_ATTEMPTS {
-            let sent = crate::process::run(
+            let sent = crate::vast::run(
                 ctx,
                 &["vastai", "destroy", "instance", id, "--yes"],
                 Some(30.0),
@@ -1168,5 +1161,11 @@ fn destroy(ctx: &Ctx, id: &str) -> Result<()> {
     };
     let outcome = cleanup();
     let _ = crate::ssh_config::remove_host(&ctx.env, id);
-    outcome.map_err(|_| Error::status(ExitCode::CleanupUnverified, format!("Instance {id}: destruction unverified; billing may continue. Next: gpu down {id} --yes")))
+    outcome.map_err(|_| {
+        Error::status(
+            ExitCode::CleanupUnverified,
+            format!("Instance {id}: destruction unverified; billing may continue"),
+        )
+        .next(format!("gpu down {id} --yes"))
+    })
 }

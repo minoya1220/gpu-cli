@@ -108,8 +108,11 @@ impl OfferSearch {
             let mut unpriced = self.clone();
             unpriced.max_price = None;
             if !unpriced.offers(mode, gpu)?.is_empty() {
-                return Err(Error::status(crate::error::ExitCode::OverMaxPrice,
-                    "Offers exceed --max-price. Next: raise --max-price or choose a cheaper --gpu model."));
+                return Err(Error::status(
+                    crate::error::ExitCode::OverMaxPrice,
+                    "Offers exceed --max-price",
+                )
+                .next("raise --max-price or choose a cheaper --gpu model."));
             }
         }
         update_gpu_cache(&self.vast.ctx.env, &items, None);
@@ -122,8 +125,11 @@ impl OfferSearch {
                 }
             }
             if kept.is_empty() && had_offers && !self.vast.ctx.interactive() {
-                return Err(Error::status(crate::error::ExitCode::OverMaxPrice,
-                    "Offers exceed --max-price. Next: raise --max-price or choose a cheaper --gpu model."));
+                return Err(Error::status(
+                    crate::error::ExitCode::OverMaxPrice,
+                    "Offers exceed --max-price",
+                )
+                .next("raise --max-price or choose a cheaper --gpu model."));
             }
             items = kept;
         }

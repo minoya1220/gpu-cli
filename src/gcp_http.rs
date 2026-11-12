@@ -12,9 +12,7 @@ pub fn encode(text: &str) -> String {
     crate::url::encode(text, b"-._~")
 }
 fn error(reason: &str) -> Error {
-    Error::msg(format!(
-        "Google catalog unavailable ({reason}). Next: gpu setup"
-    ))
+    Error::msg(format!("Google catalog unavailable ({reason})")).next("gpu setup")
 }
 pub fn token(ctx: &Ctx, project: &str) -> Result<String> {
     ctx.require_gcloud()?;
@@ -47,8 +45,9 @@ pub fn token(ctx: &Ctx, project: &str) -> Result<String> {
     {
         return Err(Error::status(
             crate::error::ExitCode::AuthExpired,
-            "Google Cloud authentication failed or expired. Next: gcloud auth login",
-        ));
+            "Google Cloud authentication failed or expired",
+        )
+        .next("gcloud auth login"));
     }
     tokens.insert(project.into(), token.into());
     Ok(token.into())
@@ -69,8 +68,9 @@ fn body(ctx: &Ctx, project: &str, raw: &str, status: u16) -> Result<Dict> {
         }
         return Err(Error::status(
             crate::error::ExitCode::AuthExpired,
-            "Google Cloud authentication expired. Next: gcloud auth login",
-        ));
+            "Google Cloud authentication expired",
+        )
+        .next("gcloud auth login"));
     }
     if !(200..300).contains(&status) {
         let reason = if raw.contains("SERVICE_DISABLED") {

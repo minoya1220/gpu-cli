@@ -23,7 +23,7 @@ impl InstanceId {
         // Preserve Vast's legacy ID handling, but never send another provider's
         // qualified identifier to Vast.
         if id.contains(':') {
-            return Err(Error::msg("Unknown provider in instance ID. Next: gpu ls"));
+            return Err(Error::msg("Unknown provider in instance ID").next("gpu ls"));
         }
         Ok(Self::Vast(id.into()))
     }
@@ -81,8 +81,9 @@ pub fn selected_id(
         if !crate::setup::gcp_ready(cfg) {
             return Err(Error::status(
                 crate::error::ExitCode::NotFound,
-                format!("No instance ID like '{id}'. Vast IDs are numeric. Next: gpu ls"),
-            ));
+                format!("No instance ID like '{id}'. Vast IDs are numeric"),
+            )
+            .next("gpu ls"));
         }
         ctx.require_gcloud()?;
         let settings = crate::gcp::Settings::load(cfg)?;
@@ -102,20 +103,17 @@ pub fn selected_id(
             }
             [] => Err(Error::status(
                 crate::error::ExitCode::NotFound,
-                format!(
-                    "TPU {id} was not found in {}. Next: gpu ls --provider gcp",
-                    settings.project
-                ),
-            )),
-            _ => Err(Error::msg(format!(
-                "TPU ID {id} is ambiguous. Use a full ID. Next: gpu ls --provider gcp --long"
-            ))),
+                format!("TPU {id} was not found in {}", settings.project),
+            )
+            .next("gpu ls --provider gcp")),
+            _ => Err(
+                Error::msg(format!("TPU ID {id} is ambiguous. Use a full ID"))
+                    .next("gpu ls --provider gcp --long"),
+            ),
         };
     }
     if !ctx.interactive() {
-        return Err(crate::output::usage(format!(
-            "Missing instance ID. Next: gpu {action} ID"
-        )));
+        return Err(Error::usage("Missing instance ID").next(format!("gpu {action} ID")));
     }
     if !crate::setup::gcp_ready(cfg) && !crate::modal::configured(ctx) {
         return crate::commands::selected_id(ctx, None, action);
@@ -131,7 +129,7 @@ pub fn selected_id(
                 .join(" and ")
         ))?;
         if items.is_empty() {
-            return Err(Error::msg("Instance listing is incomplete. Next: gpu ls"));
+            return Err(Error::msg("Instance listing is incomplete").next("gpu ls"));
         }
     }
     crate::instances::select_instance(ctx, &items, action)
@@ -155,7 +153,7 @@ pub fn ls(
     {
         return crate::commands::ls(ctx, json);
     }
-    let (items, failed) = inventory(ctx, cfg, only)?;
+    let (items, mut failed) = inventory(ctx, cfg, only)?;
     if json {
         let value = crate::redact::redact(&Value::List(
             items.iter().cloned().map(Value::Dict).collect(),
@@ -188,10 +186,11 @@ pub fn ls(
             failed.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>().join(" and "),
             failed[0].1.text(),
         );
-        return Err(match &failed[0].1 {
-            Error::Status(code, _) => Error::status(*code, message),
-            error if error.retryable() => Error::ProviderUnavailable(message),
-            _ => Error::msg(message),
+        let error = failed.swap_remove(0).1;
+        return Err(if error.retryable() {
+            Error::unavailable(message)
+        } else {
+            error.with_text(message)
         });
     }
     Ok(())

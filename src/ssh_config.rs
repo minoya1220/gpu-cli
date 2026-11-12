@@ -113,7 +113,7 @@ impl From<Error> for HostError {
 impl From<HostError> for Error {
     fn from(err: HostError) -> Self {
         match err {
-            HostError::NotReady(text) => Error::Msg(text),
+            HostError::NotReady(text) => Error::msg(text),
             HostError::Failed(err) => err,
         }
     }

@@ -697,7 +697,7 @@ fn test_run_redacts_secrets_from_failed_command_output() {
         ))
     });
     let ctx = t.ctx().runner(&runner).build();
-    let err = run(&ctx, &["vastai", "create", "instance", "7"], None).unwrap_err();
+    let err = crate::vast::run(&ctx, &["vastai", "create", "instance", "7"], None).unwrap_err();
     assert!(!err.text().contains(FAKE_INSTANCE_KEY));
     assert!(err.text().contains("id 7"));
 }

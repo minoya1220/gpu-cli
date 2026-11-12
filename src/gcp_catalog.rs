@@ -11,7 +11,7 @@ pub struct Zone {
     pub types: Vec<String>,
 }
 fn invalid() -> Error {
-    Error::msg("Google returned an incomplete TPU catalog. Next: gpu up --provider gcp")
+    Error::msg("Google returned an incomplete TPU catalog").next("gpu up --provider gcp")
 }
 fn type_names(rows: &[Dict]) -> Result<Vec<String>> {
     rows.iter()
@@ -220,13 +220,14 @@ pub fn verify(ctx: &Ctx, project: &str, zone: &str, tpu: &str) -> Result<()> {
         })
         .unwrap_or_else(|| "gpu up --provider gcp".into());
     Err(Error::msg(format!(
-        "{tpu} unavailable in {zone}. No TPU or task created.\nTry: {}.\nNext: {next}",
+        "{tpu} unavailable in {zone}. No TPU or task created.\nTry: {}.",
         if offered.is_empty() {
             "another type"
         } else {
             &offered
         }
-    )))
+    ))
+    .next_line(next))
 }
 
 #[cfg(test)]

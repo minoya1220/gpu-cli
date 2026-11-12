@@ -68,7 +68,10 @@ pub fn stanza(id: &TpuId, command: &str) -> Result<String> {
                     .iter()
                     .any(|s| s.eq_ignore_ascii_case(key))
                     {
-                        return Err(Error::msg(format!("Unsupported SSH option; use a direct connection. Next: gpu ssh {} --exec", id.cli())));
+                        return Err(
+                            Error::msg("Unsupported SSH option; use a direct connection")
+                                .next(format!("gpu ssh {} --exec", id.cli())),
+                        );
                     }
                     let value = quote(val)?;
                     if !key.eq_ignore_ascii_case("ConnectTimeout") {
@@ -203,7 +206,7 @@ fn probe(ctx: &Ctx, args: &[String], next: &str, timeout: f64) -> Result<bool> {
         {
             Ok(false)
         }
-        _ => gcp::checked(result, next).map(|_| true),
+        _ => crate::provider_errors::gcp(result, next).map(|_| true),
     }
 }
 
@@ -223,8 +226,9 @@ pub fn ready_alias(ctx: &Ctx, id: &TpuId, timeout: f64) -> Result<String> {
         if remaining <= 0.0 {
             return Err(Error::status(
                 crate::error::ExitCode::WaitTimeout,
-                format!("Timed out resolving SSH for {}. Next: {next}", id.cli()),
-            ));
+                format!("Timed out resolving SSH for {}", id.cli()),
+            )
+            .next(next));
         }
         match gcp::run_timeout(ctx, &dry, &next, remaining.min(15.0))
             .and_then(|command| stanza(id, &command))
@@ -249,11 +253,12 @@ fn wait_for_ssh(ctx: &Ctx, id: &TpuId, next: &str, timeout: f64) -> Result<Dict>
         Error::status(
             crate::error::ExitCode::WaitTimeout,
             format!(
-                "Timed out waiting for TPU {} and SSH after {}s ({reason}); expiry is unchanged. Next: {next}",
+                "Timed out waiting for TPU {} and SSH after {}s ({reason}); expiry is unchanged",
                 id.cli(),
                 crate::pyfmt::general(timeout)
             ),
         )
+        .next(next)
     };
     ctx.progress(&format!(
         "Waiting for TPU {} and SSH (up to {}s)...",
@@ -334,10 +339,10 @@ fn wait_for_ssh(ctx: &Ctx, id: &TpuId, next: &str, timeout: f64) -> Result<Dict>
             }
             "CREATING" | "STARTING" | "RESTARTING" | "REIMAGING" | "REPAIRING" => {}
             _ => {
-                return Err(Error::msg(format!(
-                    "TPU {} is {state}; cannot answer SSH. Next: gpu ls --provider gcp",
-                    id.cli()
-                )))
+                return Err(
+                    Error::msg(format!("TPU {} is {state}; cannot answer SSH", id.cli()))
+                        .next("gpu ls --provider gcp"),
+                )
             }
         }
         let remaining = poll.remaining();
@@ -381,10 +386,8 @@ pub fn edit(
         Some(e) => e,
         None if ctx.interactive() => crate::picker::pick(ctx, crate::editors::editor_screen())?,
         None => {
-            return Err(crate::output::usage(format!(
-                "Choose an editor. Next: gpu edit {} --editor code",
-                id.cli()
-            )))
+            return Err(Error::usage("Choose an editor")
+                .next(format!("gpu edit {} --editor code", id.cli())))
         }
     };
     crate::editors::check_editor(&ctx.env, &editor)?;

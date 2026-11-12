@@ -52,13 +52,13 @@ pub fn gpu(name: &str, count: i64) -> Result<(&'static str, &'static str)> {
         .iter()
         .find(|(name, _, _)| *name == normalized)
         .ok_or_else(|| {
-            Error::Usage(format!(
+            Error::usage(format!(
                 "Unknown Modal GPU {name:?}. Valid GPUs: {}.",
                 GPUS.iter().map(|g| g.0).collect::<Vec<_>>().join(", ")
             ))
         })?;
     if count < 1 || count > maximum {
-        return Err(Error::Usage(format!(
+        return Err(Error::usage(format!(
             "Modal {name} supports --num-gpus 1..={maximum}."
         )));
     }
@@ -76,7 +76,7 @@ pub fn resources(flags: &RunFlags) -> Result<(f64, f64)> {
         || memory * 1024.0 > i32::MAX as f64
         || (memory * 1024.0).fract() != 0.0
     {
-        return Err(Error::Usage("Modal --cpu and --memory must be finite and positive; memory must be a whole number of MiB (specified in GiB).".into()));
+        return Err(Error::usage("Modal --cpu and --memory must be finite and positive; memory must be a whole number of MiB (specified in GiB)."));
     }
     Ok((cpu, memory))
 }
@@ -89,21 +89,21 @@ pub fn validate(flags: &RunFlags, seconds: i64) -> Result<()> {
         (flags.unverified, "--unverified"),
     ] {
         if present {
-            return Err(Error::Usage(format!(
+            return Err(Error::usage(format!(
                 "{flag} is not supported with --provider modal."
             )));
         }
     }
     if seconds > 86400 {
-        return Err(Error::Usage("Modal --expire must be at most 24h.".into()));
+        return Err(Error::usage("Modal --expire must be at most 24h."));
     }
     resources(flags)?;
     if let Some(name) = &flags.gpu {
         gpu(name, flags.num_gpus)?;
     }
     if flags.max_price.is_some_and(|v| !v.is_finite() || v <= 0.0) {
-        return Err(Error::Usage(
-            "--max-price must be finite and greater than zero.".into(),
+        return Err(Error::usage(
+            "--max-price must be finite and greater than zero.",
         ));
     }
     Ok(())
@@ -150,15 +150,14 @@ impl Helper {
             ctx.run(cmd)
         })
         .map_err(|error| match error {
-            RunError::NotFound => Error::status(
-                ExitCode::NotSetup,
-                "Install uv. Next: gpu setup --provider modal",
-            ),
+            RunError::NotFound => {
+                Error::status(ExitCode::NotSetup, "Install uv").next("gpu setup --provider modal")
+            }
             RunError::TimedOut => Error::status(
                 ExitCode::CommandTimeout,
                 "Modal helper timed out. Retry gpu setup --provider modal.",
             ),
-            _ => Error::msg(ctx.safe_diagnostic(&error.python_text("uv"))),
+            _ => Error::msg(ctx.safe_diagnostic(&error.describe("uv"))),
         })?;
         let diagnostic = ctx.safe_diagnostic(&output.stderr).trim().to_string();
         let failed = |message: &str| {
@@ -304,7 +303,7 @@ impl RunBackend for ModalBackend {
             flags
                 .gpu
                 .as_deref()
-                .ok_or_else(|| Error::Usage("Modal requires --gpu MODEL.".into()))?,
+                .ok_or_else(|| Error::usage("Modal requires --gpu MODEL."))?,
             flags.num_gpus,
         )?;
         let (cpu, memory) = resources(flags)?;
@@ -397,9 +396,7 @@ impl RunBackend for ModalBackend {
             .ok_or_else(|| Error::msg("Invalid Modal create spec."))?;
         let remaining = deadline.as_second() - ctx.clock.now().as_second();
         if remaining <= 600 {
-            return Err(Error::Usage(
-                "Not enough time remains before expiry.".into(),
-            ));
+            return Err(Error::usage("Not enough time remains before expiry."));
         }
         spec.insert("timeout", Value::Int(remaining));
         let mut tags = spec
@@ -484,10 +481,8 @@ impl RunBackend for ModalBackend {
                 ))
             }
             Err(RunError::NotFound) => {
-                return Err(Error::status(
-                    ExitCode::NotSetup,
-                    "Install uv. Next: gpu setup --provider modal",
-                ))
+                return Err(Error::status(ExitCode::NotSetup, "Install uv")
+                    .next("gpu setup --provider modal"))
             }
             Ok(output) if output.code == 255 => {
                 if let Some(error) = pyjson::loads(&output.stderr)
@@ -559,9 +554,7 @@ pub fn sandbox_id(id: &str) -> Result<&str> {
                     .bytes()
                     .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
         })
-        .ok_or_else(|| {
-            Error::Usage("Invalid Modal sandbox ID. Next: gpu ls --provider modal".into())
-        })
+        .ok_or_else(|| Error::usage("Invalid Modal sandbox ID").next("gpu ls --provider modal"))
 }
 
 fn confirmed(reply: Result<(Value, String)>) -> bool {
@@ -575,8 +568,9 @@ fn cleanup_error(id: &str) -> Error {
     };
     Error::status(
         ExitCode::CleanupUnverified,
-        format!("Sandbox {id}: termination unverified; billing may continue. Next: {command}"),
+        format!("Sandbox {id}: termination unverified; billing may continue"),
     )
+    .next(command)
 }
 pub fn status(ctx: &Ctx, id: &str) -> Result<Value> {
     let raw = sandbox_id(id)?;
@@ -678,7 +672,5 @@ pub fn list(ctx: &Ctx) -> Result<Vec<Dict>> {
 }
 
 pub fn unsupported() -> Error {
-    Error::Usage(
-        "Modal supports gpu run, gpu ls and gpu down only. Next: gpu ls --provider modal".into(),
-    )
+    Error::usage("Modal supports gpu run, gpu ls and gpu down only").next("gpu ls --provider modal")
 }

@@ -1,5 +1,55 @@
 //! Translate known provider failure signatures once, without exposing secrets.
-use crate::error::{Error, ExitCode};
+#[cfg(test)]
+mod tests;
+use crate::error::{Error, ExitCode, Result};
+use crate::process::{Output, RunError};
+
+/// Translate a gcloud result. Never relay its output: diagnostics can
+/// contain credentials or URLs. `next` is the recovery command to suggest.
+pub(crate) fn gcp(result: std::result::Result<Output, RunError>, next: &str) -> Result<String> {
+    let output = match result {
+        Ok(output) if output.code == 0 => return Ok(output.stdout.trim().into()),
+        Ok(output) => output,
+        Err(RunError::Denied(message)) => return Err(Error::status(ExitCode::NotSetup, message)),
+        Err(RunError::NotFound) => {
+            return Err(
+                Error::status(ExitCode::NotSetup, "Install the Google Cloud CLI")
+                    .next("gpu setup --provider gcp"),
+            )
+        }
+        Err(RunError::TimedOut) => {
+            return Err(Error::timeout("Google Cloud timed out. Completion unverified").next(next))
+        }
+        Err(_) => return Err(Error::msg("Could not run Google Cloud CLI").next(next)),
+    };
+    let detail = format!("{} {}", output.stdout, output.stderr).to_ascii_lowercase();
+    let has = |words: &[&str]| words.iter().any(|word| detail.contains(word));
+    let error = if has(&["quota"]) {
+        Error::msg("Google Cloud quota is exhausted").rejected()
+    } else if has(&["capacity", "resource_exhausted", "no more"]) {
+        Error::status(ExitCode::NoCapacity, "No TPU capacity in this zone").rejected()
+    } else if has(&["permission", "forbidden"]) {
+        Error::msg("Google Cloud denied access. Check project IAM and enabled APIs").rejected()
+    } else if has(&[
+        "login",
+        "unauthenticated",
+        "invalid_grant",
+        "credential",
+        "reauth",
+    ]) {
+        return Err(
+            Error::status(ExitCode::AuthExpired, "Sign in to Google Cloud")
+                .next("gcloud auth login"),
+        );
+    } else if has(&["not_found", "not found"]) {
+        Error::status(ExitCode::NotFound, "Google Cloud resource was not found").rejected()
+    } else {
+        Error::unavailable(
+            "Google Cloud request failed; provider may be temporarily unavailable. Completion unverified",
+        )
+    };
+    Err(error.next(next))
+}
 
 /// Modal's private helper reports exception kinds, not human message signatures.
 pub(crate) fn modal(kind: &str, detail: &str) -> Error {
@@ -10,7 +60,7 @@ pub(crate) fn modal(kind: &str, detail: &str) -> Error {
         // A rejected GPU/image request or account billing prerequisite is not
         // expired authentication or scarce capacity. Keep the helper's fixed,
         // non-secret guidance and classify this as a usage/request rejection.
-        "InvalidError" => return Error::Usage(detail),
+        "InvalidError" => return Error::usage(detail),
         "ResourceExhaustedError" | "SchedulingTimeout" => ExitCode::NoCapacity,
         "NotFoundError" => ExitCode::NotFound,
         "InstanceLost" => ExitCode::InstanceLost,
@@ -38,14 +88,11 @@ pub(crate) fn vast(detail: &str) -> Option<Error> {
     let lower = detail.to_ascii_lowercase();
     let detail = crate::redact::redact_text(detail.trim());
     let with_detail = |code, summary: &str, next: &str| {
-        Some(Error::status(
-            code,
-            if detail.is_empty() {
-                format!("{summary}. Next: {next}")
-            } else {
-                format!("{summary}: {detail}\nNext: {next}")
-            },
-        ))
+        Some(if detail.is_empty() {
+            Error::status(code, summary).next(next)
+        } else {
+            Error::status(code, format!("{summary}: {detail}")).next_line(next)
+        })
     };
     if [
         "no capacity",

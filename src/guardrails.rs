@@ -4,7 +4,6 @@ use jiff::Timestamp;
 use crate::cli::{Command, UpFlags};
 use crate::ctx::Ctx;
 use crate::error::{Error, ExitCode, Result};
-use crate::output::usage;
 use crate::pyjson::{Dict, Value};
 
 pub(crate) fn defaults(flags: &mut UpFlags, cfg: &Dict) -> Result<()> {
@@ -13,7 +12,7 @@ pub(crate) fn defaults(flags: &mut UpFlags, cfg: &Dict) -> Result<()> {
             None | Some(Value::Null) => {}
             Some(Value::Str(s)) if !s.is_empty() => flags.expire = Some(s.clone()),
             _ => {
-                return Err(usage(
+                return Err(Error::usage(
                     "Set default_expire to a duration string, e.g. \"2h\".",
                 ))
             }
@@ -73,20 +72,27 @@ pub(crate) fn nonterminal(ctx: &Ctx, command: &Command, cfg: &Dict) -> Result<()
                 } else {
                     "gpu up --gpu MODEL --mode container --no-repo --expire 2h --yes"
                 };
-                return Err(usage(format!("{}\nExample: {example}", missing.join("\n"))));
+                return Err(Error::usage(format!(
+                    "{}\nExample: {example}",
+                    missing.join("\n")
+                )));
             }
         }
         Command::Down { yes: false, .. } => {
-            return Err(usage(
-                "Non-terminal destruction requires --yes. Next: gpu down ID --yes",
-            ))
+            return Err(
+                Error::usage("Non-terminal destruction requires --yes").next("gpu down ID --yes")
+            )
         }
         Command::Setup(flags) if flags.provider.as_deref() == Some("gcp") => {
             if !flags.remove && flags.project.is_none() {
-                return Err(usage("Choose a project: pass --project PROJECT. Next: gpu setup --provider gcp --help"));
+                return Err(Error::usage("Choose a project: pass --project PROJECT")
+                    .next("gpu setup --provider gcp --help"));
             }
             if !flags.dry_run && flags.confirm_project.is_none() {
-                return Err(usage("Non-terminal setup requires --confirm-project PROJECT. Next: gpu setup --provider gcp --help"));
+                return Err(
+                    Error::usage("Non-terminal setup requires --confirm-project PROJECT")
+                        .next("gpu setup --provider gcp --help"),
+                );
             }
         }
         _ => {}
@@ -108,10 +114,16 @@ pub(crate) fn spending(
     let cap = match cap {
         Value::Float(v) => *v,
         Value::Int(v) => *v as f64,
-        _ => return Err(usage("max_session_spend must be a positive dollar amount.")),
+        _ => {
+            return Err(Error::usage(
+                "max_session_spend must be a positive dollar amount.",
+            ))
+        }
     };
     if !cap.is_finite() || cap <= 0.0 {
-        return Err(usage("max_session_spend must be a positive dollar amount."));
+        return Err(Error::usage(
+            "max_session_spend must be a positive dollar amount.",
+        ));
     }
     let error = || {
         Error::status(ExitCode::SpendLimit, "Cannot satisfy max_session_spend. Pass --expire, choose cheaper hardware/a shorter duration, or change \

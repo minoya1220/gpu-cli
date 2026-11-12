@@ -103,13 +103,7 @@ pub(crate) fn screen(
                         p.quote(&selected.tpu, selected.spot),
                         p.hourly(&selected.tpu, selected.spot),
                     ),
-                    Err(e) => (
-                        format!(
-                            "price unavailable ({})",
-                            e.text().split(". Next:").next().unwrap_or("read failed")
-                        ),
-                        None,
-                    ),
+                    Err(e) => (format!("price unavailable ({})", e.summary()), None),
                 };
                 Offer {
                     zone: zone.name,

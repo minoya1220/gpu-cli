@@ -494,10 +494,9 @@ impl Ctx {
         {
             Ok(())
         } else {
-            Err(Error::status(
+            Err(crate::setup::gcp_not_setup(Some(
                 crate::error::ExitCode::NotSetup,
-                crate::setup::GCP_NOT_SETUP,
-            ))
+            )))
         }
     }
 
@@ -542,7 +541,7 @@ impl Ctx {
 
     pub fn exec(&self, argv: &[String]) -> String {
         if let Err(error) = self.authorize(argv.first().map(String::as_str).unwrap_or("")) {
-            return error.python_text("gcloud");
+            return error.describe("gcloud");
         }
         self.runner.exec(argv)
     }
@@ -582,7 +581,7 @@ impl Ctx {
     /// `input(prompt)`; end of input becomes `Err(on_eof)`.
     pub fn input_or(&self, prompt: &str, on_eof: Error) -> Result<String> {
         if !self.interactive() {
-            return Err(crate::output::usage(
+            return Err(Error::usage(
                 "Cannot prompt without a terminal; pass the missing command flag (see --help).",
             ));
         }

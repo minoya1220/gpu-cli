@@ -808,3 +808,19 @@ fn provider_status_picker_real_keys_never_probes_gcloud() {
     assert_eq!(result, crate::picker::Outcome::Done("gcp".to_string()));
     assert!(runner.argvs().iter().all(|a| a[0] == "vastai"));
 }
+
+#[test]
+fn quitting_the_confirmation_is_a_cancellation_not_a_setup_failure() {
+    let (env, _ctx, runner, _state) = fixture();
+    let ctx = env
+        .ctx()
+        .runner(&runner)
+        .interactive(true)
+        .pickers(&["\x03"])
+        .build();
+    let code = main(&ctx, &APPLY[..5]);
+    assert_ne!(code, 1, "{}", err(&ctx));
+    assert!(out(&ctx).contains("Cancelled."), "{}", out(&ctx));
+    assert!(!err(&ctx).contains("Next: gpu setup"), "{}", err(&ctx));
+    assert!(mutations(&runner).is_empty());
+}

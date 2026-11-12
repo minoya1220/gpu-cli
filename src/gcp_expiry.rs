@@ -15,14 +15,17 @@ pub struct Queue {
 }
 
 pub(crate) const EXPIRY_SECONDS: std::ops::RangeInclusive<i64> = 60..=29 * 86400;
-pub(crate) const EXPIRY_BOUND: &str = "Expiry must be 1 minute–29 days away; selection/boot uses that time. Next: gpu up --provider gcp --expire 2h";
+pub(crate) fn expiry_bound() -> Error {
+    Error::msg("Expiry must be 1 minute–29 days away; selection/boot uses that time")
+        .next("gpu up --provider gcp --expire 2h")
+}
 
 pub fn validate_deadline(ctx: &Ctx, at: Timestamp) -> Result<()> {
     let seconds = at.as_second() - ctx.clock.now().as_second();
     // Tasks permits 30 days ahead with 31-day retention from creation. Leave
     // two days for retries and a minute for submitting the create request.
     if !EXPIRY_SECONDS.contains(&seconds) {
-        return Err(Error::msg(EXPIRY_BOUND));
+        return Err(expiry_bound());
     }
     Ok(())
 }
@@ -31,18 +34,33 @@ impl Queue {
         let d = settings
             .expiry
             .as_ref()
-            .ok_or_else(|| Error::msg("Expiry queue not configured. Next: gpu setup"))?;
+            .ok_or_else(|| Error::msg("Expiry queue not configured").next("gpu setup"))?;
         let get = |key| {
-            text(d, key).filter(|s| component(s)).map(String::from).ok_or_else(|| Error::msg(format!("Set gcp.expiry.{key} in gpu/config.json. Next: gpu up --provider gcp --help")))
+            text(d, key)
+                .filter(|s| component(s))
+                .map(String::from)
+                .ok_or_else(|| {
+                    Error::msg(format!("Set gcp.expiry.{key} in gpu/config.json"))
+                        .next("gpu up --provider gcp --help")
+                })
         };
-        let service_account = text(d, "service_account").filter(|s| {
-            let default_compute = s.strip_suffix("-compute@developer.gserviceaccount.com")
-                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
-            (default_compute || s.ends_with(&format!("@{}.iam.gserviceaccount.com", settings.project)))
-                && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"-@.".contains(&b))
-        })
-            .ok_or_else(|| Error::msg("Set gcp.expiry.service_account to a service account in the queue's project. Next: gpu up --provider gcp \
-                --help"))?.into();
+        let service_account = text(d, "service_account")
+            .filter(|s| {
+                let default_compute = s
+                    .strip_suffix("-compute@developer.gserviceaccount.com")
+                    .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+                (default_compute
+                    || s.ends_with(&format!("@{}.iam.gserviceaccount.com", settings.project)))
+                    && s.bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"-@.".contains(&b))
+            })
+            .ok_or_else(|| {
+                Error::msg(
+                    "Set gcp.expiry.service_account to a service account in the queue's project",
+                )
+                .next("gpu up --provider gcp --help")
+            })?
+            .into();
         Ok(Self {
             project: settings.project.clone(),
             location: get("location")?,
@@ -95,8 +113,7 @@ impl Queue {
             || !short_backoff
             || d.get("httpTarget").is_some()
         {
-            return Err(Error::msg(format!("Expiry queue must be RUNNING with unlimited retries, max backoff <=60s and no HTTP target override. \
-                Next: gcloud tasks queues describe {} --project={} --location={}", self.name, self.project, self.location)));
+            return Err(Error::msg("Expiry queue must be RUNNING with unlimited retries, max backoff <=60s and no HTTP target override").next(format!("gcloud tasks queues describe {} --project={} --location={}", self.name, self.project, self.location)));
         }
         Ok(())
     }
@@ -120,13 +137,16 @@ impl Queue {
     }
     pub fn arm(&self, ctx: &Ctx, id: &TpuId, deadline: Timestamp) -> Result<()> {
         if deadline.as_second() <= ctx.clock.now().as_second() {
-            return Err(Error::msg(format!(
-                "Expiry deadline passed; no new deletion task created. Next: gpu expire {} 2h",
-                id.cli()
-            )));
+            return Err(
+                Error::msg("Expiry deadline passed; no new deletion task created")
+                    .next(format!("gpu expire {} 2h", id.cli())),
+            );
         }
         if self.service_account.is_empty() {
-            return Err(Error::msg("Configure the expiry service account for this project before re-arming. Next: gpu ls --provider gcp"));
+            return Err(Error::msg(
+                "Configure the expiry service account for this project before re-arming",
+            )
+            .next("gpu ls --provider gcp"));
         }
         let next = format!("gpu expire {} show", id.cli());
         let args = self.create_args(ctx, id, deadline)?;
@@ -155,9 +175,10 @@ impl Queue {
             || text(oauth, "serviceAccountEmail") != Some(&self.service_account)
             || when.map(|t| t.as_second()) != Some(deadline.as_second())
         {
-            return Err(Error::msg(format!(
-                "TPU deletion task could not be verified; expiry is unverified. Next: {next}"
-            )));
+            return Err(Error::msg(
+                "TPU deletion task could not be verified; expiry is unverified",
+            )
+            .next(next));
         }
         Ok(())
     }
@@ -281,10 +302,8 @@ impl Queue {
     pub fn cancel(&self, ctx: &Ctx, id: &TpuId) -> Result<()> {
         self.delete_tasks(ctx, id, &self.tasks(ctx, id)?)?;
         if !self.tasks(ctx, id)?.is_empty() {
-            return Err(Error::msg(format!(
-                "Expiry cancellation is unverified. Next: gpu expire {} show",
-                id.cli()
-            )));
+            return Err(Error::msg("Expiry cancellation is unverified")
+                .next(format!("gpu expire {} show", id.cli())));
         }
         Ok(())
     }
@@ -319,9 +338,8 @@ pub fn queue_for_node(cfg: &Dict, id: &TpuId, node: &Dict) -> Result<Queue> {
     }
     let queue = configured?;
     if queue.project != id.project {
-        return Err(Error::msg(
-            "Expiry config belongs to a different project. Next: gpu ls --provider gcp",
-        ));
+        return Err(Error::msg("Expiry config belongs to a different project")
+            .next("gpu ls --provider gcp"));
     }
     Ok(queue)
 }
@@ -346,7 +364,7 @@ pub fn manage(
     // Metadata pins the queue even if local defaults have subsequently changed.
     let node = node.unwrap_or_default();
     if node.get("queuedResource").is_some_and(crate::pyfmt::truthy) {
-        return Err(Error::msg("Queued-resource expiry is not supported; deleting only the node would leak its request. Next: gpu ls --provider gcp"));
+        return Err(Error::msg("Queued-resource expiry is not supported; deleting only the node would leak its request").next("gpu ls --provider gcp"));
     }
     let queue = queue_for_node(cfg, id, &node)?;
     // A known orphan expiry task may still be inspected/cancelled after its
@@ -370,7 +388,10 @@ pub fn manage(
     let old = queue.tasks(ctx, id)?;
     if action == "show" {
         if old.is_empty() {
-            return Err(Error::msg("No pending task; expiry unarmed or already dispatched. Next: gpu ls --provider gcp"));
+            return Err(
+                Error::msg("No pending task; expiry unarmed or already dispatched")
+                    .next("gpu ls --provider gcp"),
+            );
         }
         ctx.result(
             "expiry",
@@ -405,8 +426,7 @@ pub fn manage(
             ),
         ])),
     );
-    queue.delete_tasks(ctx, id, &old).map_err(|_| Error::msg(format!("New expiry is armed but old tasks remain; an earlier deadline may still destroy this TPU. Next: gpu \
-        expire {} show", id.cli())))?;
+    queue.delete_tasks(ctx, id, &old).map_err(|_| Error::msg("New expiry is armed but old tasks remain; an earlier deadline may still destroy this TPU").next(format!("gpu expire {} show", id.cli())))?;
     ctx.println(&format!(
         "Delete {} at {deadline}; works offline.\nNext: gpu expire {} show",
         id.cli(),

@@ -55,7 +55,7 @@ pub(crate) fn after_up(ctx: &Ctx, should_wait: bool, timeout: f64, wait_setup: b
                 _ => None,
             })
             .ok_or_else(|| {
-                Error::msg("No created instance ID returned; cannot wait. Next: gpu ls")
+                Error::msg("No created instance ID returned; cannot wait").next("gpu ls")
             })?;
         wait_with_setup(ctx, &id, timeout, wait_setup)?;
     }
@@ -109,8 +109,11 @@ fn workspace_setup(ctx: &Ctx, alias: &str, timeout: f64, required: bool) -> Resu
         poll.pause();
     }
     if required {
-        Err(Error::status(crate::error::ExitCode::WaitTimeout, "Timed out waiting for workspace setup; instance is still running. Next: gpu wait ID --wait-setup \
-            --timeout 120"))
+        Err(Error::status(
+            crate::error::ExitCode::WaitTimeout,
+            "Timed out waiting for workspace setup; instance is still running",
+        )
+        .next("gpu wait ID --wait-setup --timeout 120"))
     } else {
         Ok(())
     }
@@ -124,7 +127,7 @@ fn completed(ctx: &Ctx, argv: &[String]) -> Result<()> {
         .map_err(|e| match e {
             crate::process::RunError::TimedOut => Error::status(crate::error::ExitCode::CommandTimeout,
                 "Remote command/transfer timed out; the remote command may still be running. Check: gpu ls"),
-            other => Error::msg(other.python_text(&argv[0])),
+            other => Error::msg(other.describe(&argv[0])),
         })?;
     let code = if output.code < 0 {
         128 - output.code
@@ -171,7 +174,7 @@ pub fn validate_copy(source: &str, destination: &str) -> Result<()> {
             s.is_empty() || s.chars().any(char::is_control) || (!remote(s) && s.contains(':'))
         })
     {
-        return Err(crate::output::usage("Copy needs exactly one remote path prefixed with :/. Example: gpu cp ID ./file :/workspace/file"));
+        return Err(Error::usage("Copy needs exactly one remote path prefixed with :/. Example: gpu cp ID ./file :/workspace/file"));
     }
     Ok(())
 }

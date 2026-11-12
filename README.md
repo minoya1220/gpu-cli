@@ -156,8 +156,9 @@ automatically replayed. There are no persistent volumes or reconnect/attach in
 this version. Use Vast for workloads needing its non-interruptible host policy.
 
 The hard timeout is sent with create (`--expire`, max 24h). An entrypoint keeper
-also exits if no job starts within a five-minute grace after container startup,
-at the absolute deadline, or after the supervisor's end-of-job hook plus
+also exits if no job starts within a five-minute grace after container startup
+or after the last observed source-upload progress (images with GNU tar), at the
+absolute deadline, or after the supervisor's end-of-job hook plus
 `--linger`. An attached caller keeps the original download ceiling; if the caller
 disappears, the supervisor notices within 30s of job completion and runs the hook.
 `--linger` preserves unattended results only until that bound, not past expiry;

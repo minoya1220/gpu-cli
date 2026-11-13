@@ -3,9 +3,6 @@
 # `cargo test` through tests/remote_worker.rs, or directly with bash. No test
 # reaches the network: `curl` is always a local stub.
 
-# Tests are dispatched dynamically inside run_test's isolated subshell;
-# state overrides and mock functions are intentionally consumed there.
-# shellcheck disable=SC2030,SC2031,SC2329
 set -u
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT=$HERE/expiry_remote.sh
@@ -43,27 +40,30 @@ equals() {
 
 # Each test runs in a subshell with the script loaded as a library, a fresh
 # state directory and HOME, and its own stub directory first on PATH.
+isolate_test() {
+    local name=$1 dir=$2
+    export HOME=$dir/home
+    mkdir -p "$HOME" "$dir/bin"
+    export PATH=$dir/bin:$PATH
+    unset CONTAINER_ID CONTAINER_API_KEY
+    GPU_EXPIRE_LIBRARY=1
+    # shellcheck source=expiry_remote.sh
+    . "$SCRIPT"
+    ROOT=$dir/state
+    WORKER_HOME=$HOME
+    WORKER_PATH=$dir/bin:/usr/bin:/bin
+    PROC1_ENVIRON=$dir/proc1-environ
+    ETC_ENVIRONMENT=$dir/etc-environment
+    mkdir -p "$ROOT"
+    chmod 700 "$ROOT"
+    TEST_DIR=$dir
+    "$name"
+}
+
 run_test() {
     local name=$1 dir
     dir=$(mktemp -d "$SCRATCH/$name.XXXX")
-    if (
-        export HOME=$dir/home
-        mkdir -p "$HOME" "$dir/bin"
-        export PATH=$dir/bin:$PATH
-        unset CONTAINER_ID CONTAINER_API_KEY
-        GPU_EXPIRE_LIBRARY=1
-        # shellcheck source=expiry_remote.sh
-        . "$SCRIPT"
-        ROOT=$dir/state
-        WORKER_HOME=$HOME
-        WORKER_PATH=$dir/bin:/usr/bin:/bin
-        PROC1_ENVIRON=$dir/proc1-environ
-        ETC_ENVIRONMENT=$dir/etc-environment
-        mkdir -p "$ROOT"
-        chmod 700 "$ROOT"
-        TEST_DIR=$dir
-        "$name"
-    ); then
+    if (isolate_test "$name" "$dir"); then
         echo "ok   $name"
         passed=$((passed + 1))
     else
@@ -74,8 +74,11 @@ run_test() {
 
 # Timer fixture: scoped credentials and a live worker.
 fake_timer() {
+    # shellcheck disable=SC2329
     credentials() { KEY=scoped-key; }
+    # shellcheck disable=SC2329
     running() { return 0; }
+    # shellcheck disable=SC2329
     start_worker() { printf 456; }
     GPU_EXPIRE_SOURCE='# fake runner'
 }
@@ -100,6 +103,7 @@ test_arm_show_replace_cancel() {
     equals "$(arm $((deadline + 3600)))" "{\"status\": \"armed\", \"deadline\": $((deadline + 3600))}"
     new=$(state_field token)
     check "token replaced" [ "$new" != "$old" ]
+    # shellcheck disable=SC2329
     destroy() { touch "$ROOT/destroyed"; return 1; }
     equals "$(tick "$old" 123 scoped-key $((deadline + 9999)))" exit
     equals "$(control cancel 123)" '{"status": "cancelled"}'
@@ -115,6 +119,7 @@ test_tick_only_destroys_at_deadline_and_retries() {
     token=$(state_field token)
     deadline=$(state_field deadline)
     # A failed request, a refused one, then an accepted one.
+    # shellcheck disable=SC2329
     destroy() {
         echo "$*" >>"$ROOT/destroy-calls"
         case $(wc -l <"$ROOT/destroy-calls") in
@@ -139,6 +144,7 @@ test_failed_rearm_preserves_existing_deadline() {
     arm >/dev/null
     local original
     original=$(cat "$ROOT/state")
+    # shellcheck disable=SC2329
     start_worker() { return 1; }
     equals "$(arm)" '{"error": "verification"}'
     equals "$(cat "$ROOT/state")" "$original"
@@ -156,7 +162,9 @@ test_post_arm_verification_failure_rolls_back() {
             fi
             local original=''
             [ -e "$ROOT/state" ] && original=$(cat "$ROOT/state")
+            # shellcheck disable=SC2329
             running() { return 1; }
+            # shellcheck disable=SC2329
             kill() { echo "$*" >>"$TEST_DIR/killed"; }
             equals "$(arm)" '{"error": "verification"}'
             check "an unverified PID is never signalled" [ ! -e "$TEST_DIR/killed" ]
@@ -175,6 +183,7 @@ test_cancel_serializes_with_inflight_destroy() {
     local token deadline cancel_pid
     token=$(state_field token)
     deadline=$(state_field deadline)
+    # shellcheck disable=SC2329
     destroy() {
         touch "$ROOT/started"
         while [ ! -e "$ROOT/release" ]; do sleep 0.01; done
@@ -199,6 +208,7 @@ test_cancel_serializes_with_inflight_destroy() {
 test_show_detects_dead_worker() {
     fake_timer
     arm >/dev/null
+    # shellcheck disable=SC2329
     running() { return 1; }
     case $(control show 123) in
         '{"status": "inactive", '*) ;;
@@ -241,6 +251,7 @@ test_worker_is_detached_and_startup_verified() {
     # Variables belong to the generated stub, not the test's shell.
     # shellcheck disable=SC2016
     printf 'printf "ready %%s\\n" "$PPID" >"$2/ready.$3"\n' >"$ROOT/runner.sh"
+    # shellcheck disable=SC2329
     kill() { echo "$*" >>"$TEST_DIR/killed"; }
     refute "identity verification" start_worker generation 123 scoped-key
     check "the other process is never signalled" [ ! -e "$TEST_DIR/killed" ]
@@ -255,20 +266,22 @@ test_process_identity_check() {
     kill "$pid"
 }
 
+check_scoped_credentials_from() {
+    case $1 in
+        container) export CONTAINER_ID=123 CONTAINER_API_KEY=scoped ;;
+        vm) printf 'CONTAINER_ID="123"\nCONTAINER_API_KEY="scoped"\n' >"$ETC_ENVIRONMENT" ;;
+        vm-comments) printf '# Vast\nCONTAINER_ID=123 # vast\nCONTAINER_API_KEY="scoped"#x\n' >"$ETC_ENVIRONMENT" ;;
+        pid1) printf 'CONTAINER_ID=123\0CONTAINER_API_KEY=scoped\0' >"$PROC1_ENVIRON" ;;
+    esac
+    credentials 123
+    equals "$KEY" scoped
+    equals "$( (credentials 456) )" '{"error": "credentials"}'
+}
+
 test_scoped_credentials_sources() {
     export VAST_API_KEY=personal-key-must-never-be-used
     for environment in container vm vm-comments pid1; do
-        (
-            case $environment in
-                container) export CONTAINER_ID=123 CONTAINER_API_KEY=scoped ;;
-                vm) printf 'CONTAINER_ID="123"\nCONTAINER_API_KEY="scoped"\n' >"$ETC_ENVIRONMENT" ;;
-                vm-comments) printf '# Vast\nCONTAINER_ID=123 # vast\nCONTAINER_API_KEY="scoped"#x\n' >"$ETC_ENVIRONMENT" ;;
-                pid1) printf 'CONTAINER_ID=123\0CONTAINER_API_KEY=scoped\0' >"$PROC1_ENVIRON" ;;
-            esac
-            credentials 123
-            equals "$KEY" scoped
-            equals "$( (credentials 456) )" '{"error": "credentials"}'
-        ) || exit 1
+        (check_scoped_credentials_from "$environment") || exit 1
         rm -f "$ETC_ENVIRONMENT" "$PROC1_ENVIRON"
     done
 }
@@ -370,16 +383,18 @@ test_arm_and_destroy_end_to_end() {
 
 GUARD=$HERE/expiry_guard.sh
 
+load_guard() {
+    GPU_EXPIRE_LIBRARY=1
+    # shellcheck source=expiry_guard.sh
+    . "$GUARD"
+    PROC1_ENVIRON=$TEST_DIR/proc1-environ
+    ETC_ENVIRONMENT=$TEST_DIR/etc-environment
+    "$@"
+}
+
 # The guard's functions in a subshell, as `bash guard.sh` would define them.
 guard_lib() {
-    (
-        GPU_EXPIRE_LIBRARY=1
-        # shellcheck source=expiry_guard.sh
-        . "$GUARD"
-        PROC1_ENVIRON=$TEST_DIR/proc1-environ
-        ETC_ENVIRONMENT=$TEST_DIR/etc-environment
-        "$@"
-    )
+    (load_guard "$@")
 }
 
 # The guard with its endpoint at a closed local port and its environment

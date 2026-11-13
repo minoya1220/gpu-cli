@@ -264,22 +264,24 @@ worker() {
     done
 }
 
+# Replaces the current (sub)shell with the worker, giving it only the scoped
+# credentials, never ambient keys.
+exec_worker() {
+    local token=$1 instance_id=$2 key=$3 name
+    for name in $(compgen -e); do
+        unset "$name" 2>/dev/null
+    done
+    export HOME=$WORKER_HOME PATH=$WORKER_PATH
+    export CONTAINER_ID=$instance_id CONTAINER_API_KEY=$key
+    exec setsid bash "$ROOT/runner.sh" worker "$ROOT" "$token" "$instance_id" \
+        </dev/null >/dev/null 2>&1 9>&-
+}
+
 # Starts the detached worker and prints its PID once it reports ready.
 start_worker() {
     local token=$1 instance_id=$2 key=$3 ready="$ROOT/ready.$1" line='' tries=0 pid
     rm -f "$ready"
-    (
-        # Give the detached worker only the scoped credentials, never ambient keys.
-        for name in $(compgen -e); do
-            unset "$name" 2>/dev/null
-        done
-        # HOME is intentionally overridden only inside this worker subshell.
-        # shellcheck disable=SC2030
-        export HOME=$WORKER_HOME PATH=$WORKER_PATH
-        export CONTAINER_ID=$instance_id CONTAINER_API_KEY=$key
-        exec setsid bash "$ROOT/runner.sh" worker "$ROOT" "$token" "$instance_id" \
-            </dev/null >/dev/null 2>&1 9>&-
-    ) &
+    (exec_worker "$token" "$instance_id" "$key") &
     while [ "$tries" -lt "$READY_TRIES" ]; do
         if [ -s "$ready" ]; then
             read -r line <"$ready"
@@ -362,8 +364,6 @@ control() {
 
 main() {
     exec </dev/null
-    # Read the caller's HOME, not the isolated worker subshell's override.
-    # shellcheck disable=SC2031
     WORKER_HOME=${HOME:-/root}
     if [ "${1:-}" = worker ]; then
         [ $# -eq 4 ] || exit 1

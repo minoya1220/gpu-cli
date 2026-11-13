@@ -66,8 +66,10 @@ class Volume:
         if not os.getenv('STUCK_VOLUME'):
             (Path(os.environ['STATE']) / name).unlink(missing_ok=allow_missing)
     def iterdir(self, path, recursive):
+        assert path == '/outputs'
         self.load()
-        return [SimpleNamespace(path=os.getenv('VOLUME_PATH', 'checkpoint.bin'), type=1)]
+        if os.getenv('NO_OUTPUTS'): raise NotFoundError('private-canary')
+        return [SimpleNamespace(path=os.getenv('VOLUME_PATH', 'outputs/checkpoint.bin'), type=1)]
     def listdir(self, path):
         assert path == '/'
         self.load()
@@ -132,7 +134,7 @@ class Sandbox:
         assert "secrets" not in kw and "env" not in kw
         assert kw["tags"]["gpu-cli"] == "true"
         if kw['volumes']:
-            volume = kw['volumes']['/gpu-outputs']
+            volume = kw['volumes']['/gpu-volume']
             assert volume.load() is volume
             assert volume.version == 2
             assert kw['tags']['volume'] == volume.name
@@ -277,10 +279,10 @@ class HelperTest(unittest.TestCase):
         self.assertEqual(out.returncode, 0, out.stderr)
         with tarfile.open(fileobj=io.BytesIO(out.stdout)) as archive:
             self.assertEqual(archive.extractfile('results/checkpoints/checkpoint.bin').read(), b'checkpoint\x00\xff')
-        out = self.call('volume-get', name, 'outputs', VOLUME_PATH='/.gpu-cli-claimed')
+        out = self.call('volume-get', name, 'outputs', NO_OUTPUTS='1')
         with tarfile.open(fileobj=io.BytesIO(out.stdout)) as archive:
             self.assertEqual(archive.getnames(), ['outputs'])
-        out = self.call('volume-get', name, 'outputs', VOLUME_PATH='../escape')
+        out = self.call('volume-get', name, 'outputs', VOLUME_PATH='outputs/../escape')
         self.assertEqual(out.returncode, 255)
         self.assertEqual(json.loads(out.stderr)['error']['kind'], 'ValueError')
         out = self.call('volume-delete', name, STUCK_VOLUME='1')

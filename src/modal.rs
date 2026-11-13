@@ -18,8 +18,8 @@ use crate::run::{RunBackend, RunPlan};
 pub const HELPER: &str = include_str!("../remote/modal_helper.py");
 pub const KEEPER: &str = include_str!("../remote/modal_keeper.sh");
 const KEEPER_ROOT: &str = "/tmp/gpu-modal-keeper";
-const OUTPUT_MOUNT: &str = "/gpu-outputs";
-const OUTPUTS_HOOK: &str = "#!/bin/bash\n# On a VolumeFS v2 mount, syncfs commits. Without sync, writes commit only when\n# the Sandbox terminates gracefully, which preemption may skip.\nif command -v sync >/dev/null 2>&1; then\n    sync -f /gpu-outputs 2>/dev/null || sync /gpu-outputs 2>/dev/null || echo 'WARNING: output Volume flush failed; only prior commits may survive preemption.' >&2\nelse\n    echo 'WARNING: sync unavailable; outputs commit only when the Sandbox ends, so preemption may lose them.' >&2\nfi\n";
+const VOLUME_MOUNT: &str = "/gpu-volume";
+const OUTPUTS_HOOK: &str = "#!/bin/bash\n# On a VolumeFS v2 mount, syncfs commits. Without sync, writes commit only when\n# the Sandbox terminates gracefully, which preemption may skip.\nif command -v sync >/dev/null 2>&1; then\n    sync -f /gpu-volume 2>/dev/null || sync /gpu-volume 2>/dev/null || echo 'WARNING: output Volume flush failed; only prior commits may survive preemption.' >&2\nelse\n    echo 'WARNING: sync unavailable; outputs commit only when the Sandbox ends, so preemption may lose them.' >&2\nfi\n";
 
 fn client_version() -> &'static str {
     HELPER
@@ -545,7 +545,7 @@ impl RunBackend for ModalBackend {
     fn start_prelude(&self, jobdir: &str, outputs: &str) -> String {
         // All job writes (including relative outputs/) go straight to the
         // Volume, not to ephemeral disk copied only when the job finishes.
-        let prepare = prepare_outputs(jobdir, outputs, OUTPUT_MOUNT, &self.volume);
+        let prepare = prepare_outputs(jobdir, outputs, VOLUME_MOUNT, &self.volume);
         format!(
             "{prepare}\nmkdir -p {KEEPER_ROOT}\ntrap '[ \"$?\" != 0 ] || touch {KEEPER_ROOT}/started' EXIT\n"
         )
@@ -553,12 +553,8 @@ impl RunBackend for ModalBackend {
     fn outputs_hook(&self) -> &str {
         OUTPUTS_HOOK
     }
-    fn archive_args(&self, outputs: &str) -> String {
-        format!(
-            "--exclude={} -- {}",
-            crate::pyfmt::shell_quote(&format!("{outputs}/./{CLAIM_MARKER}")),
-            crate::pyfmt::shell_quote(&format!("{outputs}/."))
-        )
+    fn archive_operand(&self, outputs: &str) -> String {
+        format!("{outputs}/.")
     }
     fn output_archive(&self, outputs: &str, timeout: f64) -> Option<Cmd> {
         let mut cmd = self.helper.as_ref()?.command("volume-get");
@@ -584,14 +580,16 @@ impl RunBackend for ModalBackend {
 
 /// Marks the Volume as claimed by a started job, so `gpu ls` can tell a
 /// finished run's orphan from a Volume whose create may still be pending.
+/// It lives at the Volume root, outside the job-visible outputs directory.
 const CLAIM_MARKER: &str = ".gpu-cli-claimed";
 
 fn prepare_outputs(jobdir: &str, outputs: &str, mount: &str, volume: &str) -> String {
     let output = crate::pyfmt::shell_quote(&format!("{jobdir}/{outputs}"));
     let marker = crate::pyfmt::shell_quote(&format!("{mount}/{CLAIM_MARKER}"));
+    let dir = crate::pyfmt::shell_quote(&format!("{mount}/outputs"));
     let volume = crate::pyfmt::shell_quote(volume);
     let mount = crate::pyfmt::shell_quote(mount);
-    format!("out={output}\nmkdir -p -- \"$(dirname -- \"$out\")\" || exit\n[ ! -L \"$out\" ] || exit 1\nif [ -e \"$out\" ]; then\n [ -d \"$out\" ] && cp -a -- \"$out/.\" {mount}/ && rm -rf -- \"$out\" || exit 1\nfi\nln -s -- {mount} \"$out\" || exit\nprintf '%s\\n' {volume} >{marker} || exit\nsync -f {mount} 2>/dev/null || sync {mount} 2>/dev/null || :\n")
+    format!("out={output}\nmkdir -p -- {dir} \"$(dirname -- \"$out\")\" || exit\n[ ! -L \"$out\" ] || exit 1\nif [ -e \"$out\" ]; then\n [ -d \"$out\" ] && cp -a -- \"$out/.\" {dir}/ && rm -rf -- \"$out\" || exit 1\nfi\nln -s -- {dir} \"$out\" || exit\nprintf '%s\\n' {volume} >{marker} || exit\nsync -f {mount} 2>/dev/null || sync {mount} 2>/dev/null || :\n")
 }
 
 /// Refresh the keeper's start grace only as archive records arrive, so a slow

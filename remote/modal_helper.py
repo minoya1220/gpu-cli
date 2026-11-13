@@ -24,7 +24,9 @@ import tarfile
 import tempfile
 
 VOLUME_PREFIX = "gpu-cli-run-"
-OUTPUT_MOUNT = "/gpu-outputs"
+VOLUME_MOUNT = "/gpu-volume"
+# Job outputs live below this Volume directory; gpu-cli state stays outside it.
+OUTPUT_DIR = "outputs"
 # The supervisor writes and commits this marker when its job starts.
 CLAIM_MARKER = ".gpu-cli-claimed"
 # A create makes the Volume, then waits up to --timeout (default 600s) for a
@@ -81,7 +83,7 @@ async def create(modal, spec, timeout):
             # VolumeFS v2: an in-Sandbox sync commits, so checkpoints survive preemption.
             volume = modal.Volume.from_name(volume_name(spec["volume"]), create_if_missing=True, version=2)
             await volume.hydrate.aio()
-            volumes[OUTPUT_MOUNT] = volume
+            volumes[VOLUME_MOUNT] = volume
         return await modal.Sandbox.create.aio(
             *spec["command"], image=image, gpu=spec["gpu"],
             cpu=(spec["cpu"], spec["cpu"]), memory=(spec["memory"], spec["memory"]),
@@ -220,10 +222,13 @@ def volume_archive(modal, name, prefix, destination):
         root = tarfile.TarInfo(str(prefix))
         root.type, root.mode = tarfile.DIRTYPE, 0o700
         archive.addfile(root)
-        for entry in volume.iterdir("/", recursive=True):
-            path = safe_relative(entry.path.lstrip("/"))
-            if str(path) == CLAIM_MARKER:
-                continue
+        volume.hydrate()
+        try:
+            entries = volume.iterdir(f"/{OUTPUT_DIR}", recursive=True)
+        except modal.exception.NotFoundError:
+            entries = []
+        for entry in entries:
+            path = safe_relative(PurePosixPath(entry.path.lstrip("/")).relative_to(OUTPUT_DIR))
             info = tarfile.TarInfo(str(prefix / path))
             info.mode = 0o700 if int(entry.type) == 2 else 0o600
             if int(entry.type) == 2:

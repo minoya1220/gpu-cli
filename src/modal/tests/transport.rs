@@ -221,26 +221,28 @@ fn output_paths_write_through_to_the_volume_and_keep_uploaded_results() {
         .status()
         .unwrap()
         .success());
-    assert_eq!(fs::read(mount.join("seed")).unwrap(), b"initial");
+    assert_eq!(fs::read(mount.join("outputs/seed")).unwrap(), b"initial");
     assert_eq!(
         fs::read(mount.join(".gpu-cli-claimed")).unwrap(),
         b"gpu-cli-run-test\n"
     );
+    let visible: Vec<_> = fs::read_dir(work.join("results/checkpoints"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(visible, ["seed"]);
     fs::write(work.join("results/checkpoints/checkpoint"), b"next").unwrap();
-    assert_eq!(fs::read(mount.join("checkpoint")).unwrap(), b"next");
-    let args =
-        crate::run::RunBackend::archive_args(&ModalBackend::default(), "results/checkpoints");
+    assert_eq!(fs::read(mount.join("outputs/checkpoint")).unwrap(), b"next");
+    let operand =
+        crate::run::RunBackend::archive_operand(&ModalBackend::default(), "results/checkpoints");
     let archive = t.root.join("live.tar");
-    assert!(std::process::Command::new("bash")
+    assert!(std::process::Command::new("tar")
         .env("COPYFILE_DISABLE", "1")
-        .args([
-            "-c",
-            &format!(
-                "tar -C {} -cf {} {args}",
-                crate::pyfmt::shell_quote(&work.to_string_lossy()),
-                crate::pyfmt::shell_quote(&archive.to_string_lossy())
-            ),
-        ])
+        .arg("-C")
+        .arg(&work)
+        .arg("-cf")
+        .arg(&archive)
+        .args(["--", &operand])
         .status()
         .unwrap()
         .success());
@@ -258,13 +260,12 @@ fn output_paths_write_through_to_the_volume_and_keep_uploaded_results() {
         fs::read(local.join("results/checkpoints/checkpoint")).unwrap(),
         b"next"
     );
-    assert!(!local.join("results/checkpoints/.gpu-cli-claimed").exists());
     assert!(!std::process::Command::new("bash")
         .args(["-c", &command])
         .status()
         .unwrap()
         .success());
-    assert_eq!(fs::read(mount.join("checkpoint")).unwrap(), b"next");
+    assert_eq!(fs::read(mount.join("outputs/checkpoint")).unwrap(), b"next");
 }
 
 #[test]
@@ -291,7 +292,7 @@ fn output_flush_requests_use_syncfs_with_a_portable_fallback() {
     assert!(output.status.success());
     assert_eq!(
         fs::read_to_string(&log).unwrap(),
-        "-f /gpu-outputs\n/gpu-outputs\n"
+        "-f /gpu-volume\n/gpu-volume\n"
     );
     fs::remove_file(sync).unwrap();
     let output = std::process::Command::new("/bin/bash")

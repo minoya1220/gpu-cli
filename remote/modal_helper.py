@@ -25,9 +25,9 @@ import tempfile
 
 VOLUME_PREFIX = "gpu-cli-run-"
 OUTPUT_MOUNT = "/gpu-outputs"
-# A create (Volume first, then Sandbox) may wait up to the 24h scheduling cap.
-# Younger untagged Volumes may belong to a run that is still starting.
-PENDING_CREATE = timedelta(hours=25)
+# A create makes the Volume, then waits up to --timeout (default 600s) for a
+# Sandbox. An unclaimed Volume this young may belong to a run still starting.
+PENDING_CREATE = timedelta(minutes=15)
 
 
 def volume_name(name):
@@ -407,15 +407,17 @@ def dispatch(modal, args):
         if len(args) != 1:
             raise ValueError()
         rows = []
-        mounted = set()
+        mounted, claimed = set(), set()
         for sandbox in modal.Sandbox.list(tags={"gpu-cli": "true"}):
+            tags = sandbox.get_tags()
+            claimed.add(tags.get("volume"))
             if sandbox.poll() is None:
-                tags = sandbox.get_tags()
                 mounted.add(tags.get("volume"))
                 rows.append({"id": sandbox.object_id, "tags": tags})
         cutoff = datetime.now(timezone.utc) - PENDING_CREATE
-        volumes = [{"name": volume.name} for volume in modal.Volume.objects.list(created_before=cutoff)
-                   if volume.name and volume.name.startswith(VOLUME_PREFIX) and volume.name not in mounted]
+        volumes = [{"name": volume.name} for volume in modal.Volume.objects.list()
+                   if volume.name and volume.name.startswith(VOLUME_PREFIX) and volume.name not in mounted
+                   and (volume.name in claimed or volume.info().created_at < cutoff)]
         emit({"sandboxes": rows, "volumes": volumes})
     else:
         raise ValueError()

@@ -69,8 +69,11 @@ class Volume:
         self.load()
         return [SimpleNamespace(path=os.getenv('VOLUME_PATH', 'checkpoint.bin'), type=1)]
     def read_file(self, path): yield b'checkpoint\x00\xff'
-Volume.objects = SimpleNamespace(delete=Volume.delete, list=lambda created_before: [
-    Volume(p.name) for p in Path(os.environ['STATE']).iterdir() if p.stat().st_mtime < created_before.timestamp()])
+    def info(self):
+        from datetime import datetime, timezone
+        mtime = (Path(os.environ['STATE']) / self.name).stat().st_mtime
+        return SimpleNamespace(created_at=datetime.fromtimestamp(mtime, timezone.utc))
+Volume.objects = SimpleNamespace(delete=Volume.delete, list=lambda: [Volume(p.name) for p in Path(os.environ['STATE']).iterdir()])
 exception = SimpleNamespace(NotFoundError=NotFoundError)
 class App:
     pass
@@ -250,10 +253,17 @@ class HelperTest(unittest.TestCase):
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
         self.assertTrue((self.state / name).exists())
         (self.state / 'unrelated').touch()
+        # Unclaimed and young: its create may still be waiting for capacity.
         self.assertEqual(json.loads(self.call('list').stdout)['volumes'], [])
-        old = time.time() - 26 * 3600
+        # Claimed by a Sandbox that has finished: an orphan immediately.
+        rows = json.loads(self.call('list', RUN_VOLUME=name, FINISHED='1').stdout)['volumes']
+        self.assertEqual(rows, [{'name': name}])
+        # Mounted by a running Sandbox: never an orphan.
+        self.assertEqual(json.loads(self.call('list', RUN_VOLUME=name).stdout)['volumes'], [])
+        old = time.time() - 16 * 60
         for path in self.state.iterdir():
             os.utime(path, (old, old))
+        # Unclaimed past the create readiness window: an orphan.
         rows = json.loads(self.call('list').stdout)['volumes']
         self.assertEqual(rows, [{'name': name}])
         self.assertEqual(json.loads(self.call('list', RUN_VOLUME=name).stdout)['volumes'], [])

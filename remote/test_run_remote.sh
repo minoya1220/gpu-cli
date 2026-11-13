@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Fake-only Linux worker tests. No cloud command or endpoint is involved.
+# Literal snippets and assertions expand variables only in the spawned worker.
+# shellcheck disable=SC2016
 set -eu
 SOURCE=$(cd "$(dirname "$0")" && pwd)/run_remote.sh
 TMP=$(mktemp -d)
@@ -19,6 +21,7 @@ cleanup() {
 trap cleanup EXIT
 export GPU_RUN_LIBRARY=1
 GPU_RUN_SOURCE=$(<"$SOURCE")
+# shellcheck source=run_remote.sh
 source "$SOURCE"
 passed=0
 check() { if ! "$@"; then echo "FAIL: $*" >&2; exit 1; fi; }

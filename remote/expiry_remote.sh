@@ -186,7 +186,7 @@ accepted() {
                     c=${body:i:1}
                     case $c in
                         '"') break ;;
-                        '\')
+                        \\)
                             key+=${body:i:2}
                             i=$((i + 2))
                             ;;
@@ -203,7 +203,7 @@ accepted() {
                     rest=${body:i+1}
                     rest=${rest#"${rest%%[![:space:]]*}"}
                     case $rest in
-                        true | true[[:space:],}]*) success=1 ;;
+                        true | true[[:space:]]* | true','* | true'}'*) success=1 ;;
                         *) success=0 ;;
                     esac
                 fi
@@ -273,6 +273,8 @@ start_worker() {
         for name in $(compgen -e); do
             unset "$name" 2>/dev/null
         done
+        # HOME is intentionally overridden only inside this worker subshell.
+        # shellcheck disable=SC2030
         export HOME=$WORKER_HOME PATH=$WORKER_PATH
         export CONTAINER_ID=$instance_id CONTAINER_API_KEY=$key
         exec setsid bash "$ROOT/runner.sh" worker "$ROOT" "$token" "$instance_id" \
@@ -360,6 +362,8 @@ control() {
 
 main() {
     exec </dev/null
+    # Read the caller's HOME, not the isolated worker subshell's override.
+    # shellcheck disable=SC2031
     WORKER_HOME=${HOME:-/root}
     if [ "${1:-}" = worker ]; then
         [ $# -eq 4 ] || exit 1
@@ -371,7 +375,7 @@ main() {
     local action=${1:-} instance_id=${2:-}
     case $action in
         arm)
-            [ $# -eq 3 ] && is_digits "${3:-}" || fail remote
+            if [ $# -ne 3 ] || ! is_digits "${3:-}"; then fail remote; fi
             ;;
         show | cancel)
             [ $# -eq 2 ] || fail remote
@@ -381,7 +385,7 @@ main() {
     is_digits "$instance_id" || fail remote
     command -v flock >/dev/null 2>&1 || fail remote
     if [ "$action" = arm ]; then
-        command -v setsid >/dev/null 2>&1 && command -v curl >/dev/null 2>&1 || fail remote
+        if ! command -v setsid >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then fail remote; fi
     fi
     control "$action" "$instance_id" "${3:-}"
 }

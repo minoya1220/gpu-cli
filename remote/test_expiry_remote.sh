@@ -3,6 +3,9 @@
 # `cargo test` through tests/remote_worker.rs, or directly with bash. No test
 # reaches the network: `curl` is always a local stub.
 
+# Tests are dispatched dynamically inside run_test's isolated subshell;
+# state overrides and mock functions are intentionally consumed there.
+# shellcheck disable=SC2030,SC2031,SC2329
 set -u
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT=$HERE/expiry_remote.sh
@@ -235,6 +238,8 @@ test_worker_is_detached_and_startup_verified() {
     refute "startup verification" start_worker generation 123 scoped-key
     # A ready line naming a process that is not the worker fails without
     # signalling that process.
+    # Variables belong to the generated stub, not the test's shell.
+    # shellcheck disable=SC2016
     printf 'printf "ready %%s\\n" "$PPID" >"$2/ready.$3"\n' >"$ROOT/runner.sh"
     kill() { echo "$*" >>"$TEST_DIR/killed"; }
     refute "identity verification" start_worker generation 123 scoped-key

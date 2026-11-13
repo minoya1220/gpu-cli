@@ -20,6 +20,8 @@ publish() {
 }
 
 supervise() {
+    # Written at runtime by the launcher, not a checked-in shell library.
+    # shellcheck source=/dev/null
     source "$ROOT/config"
     export PATH="$HOME/.local/bin:$PATH"
     local stopped=0 timed=0 child='' phase=setup rc=0 end now last_commit=$SECONDS
@@ -87,6 +89,8 @@ forwarded() {
 }
 
 task() {
+    # Written at runtime by the launcher, not a checked-in shell library.
+    # shellcheck source=/dev/null
     source "$ROOT/config"
     export PATH="$HOME/.local/bin:$PATH"
     cd "$JOBDIR" || exit 1
@@ -113,6 +117,8 @@ task() {
     printf 'job\n' >"$ROOT/phase"
     # exec preserves the job PID; the supervisor's token remains in the
     # enclosing task's argv until the command starts. Keep this shell as leader.
+    # Expand environment variables in the forwarded child, not this shell.
+    # shellcheck disable=SC2016
     ( forwarded "$FORWARDED" 'if [ -d .venv ]; then export VIRTUAL_ENV="$PWD/.venv" PATH="$PWD/.venv/bin:$PATH"; fi'$'\n'"$COMMAND" ) &
     wait $!
 }

@@ -353,4 +353,16 @@ cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
 ```
 
+CI tests Rust **1.99.1** on Linux and macOS; action revisions are SHA-pinned in `.github/workflows/ci.yml`. Update those pins and the tested toolchain deliberately. CI also runs the following security and static checks (install the named tools first):
+
+```sh
+cargo deny --locked check advisories licenses
+gitleaks git --redact .
+git ls-files -z '*.sh' | xargs -0 shellcheck -x -P SCRIPTDIR
+ruff check .
+actionlint
+```
+
+The CI versions are cargo-deny 0.20.2, Gitleaks 8.24.3, ShellCheck 0.11.0, Ruff 0.11.13 and actionlint 1.7.7. `scripts/ci-tool.sh` verifies downloaded Linux tools against committed SHA-256 digests; update the digest with each tool version. The advisory database stays current rather than pinned, so a new advisory can fail an unchanged lockfile. `deny.toml` allows only the dependency graph's permissive licenses and exempts the unpublished application's own missing license, not its dependencies. Gitleaks scans full checkout history with redacted findings. No cloud credentials are supplied to these jobs; fetching tools, crates and advisories still requires network access.
+
 Tests never touch real Vast, Google Cloud or Modal accounts. Paid tests are manual, on throwaway instances: arm a 5-minute deadline, replace and cancel it, disconnect and confirm deletion, and repeat after a reboot and a Ctrl-C during `gpu up --expire 10m`. For TPUs, also cover Spot, stopped on-demand nodes and each runtime. Never expose credentials while checking.

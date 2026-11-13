@@ -404,6 +404,7 @@ dependencies = [
  "clap",
  "crossterm",
  "flate2",
+ "getrandom",
  "iana-time-zone",
  "jiff",
  "regex",

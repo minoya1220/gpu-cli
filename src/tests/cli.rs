@@ -2,16 +2,16 @@
 
 use crate::config::CONTAINER_ENV;
 use crate::launch::{launch, UpArgs};
-use crate::offers::{
-    gpu_cache_path, gpu_category, known_gpu_models, read_gpu_cache, update_gpu_cache,
-};
 use crate::process::{run, Output};
-use crate::prompt::{choose, choose_gpu, Choices};
+use crate::prompt::{choose, choose_gpu, Choices, Pick};
 use crate::pyjson::Value;
 use crate::repos::Repo;
-use crate::startup::startup_script;
 use crate::testing::fixture_config as defaults;
 use crate::testing::*;
+use crate::vast::offers::{
+    gpu_cache_path, gpu_category, known_gpu_models, read_gpu_cache, update_gpu_cache,
+};
+use crate::vast::startup::startup_script;
 use crate::vast::{argv, request, RequestArgs, Vast};
 
 pub const EXPECTED_CONTAINER_SCRIPT: &str = r#"#!/bin/bash
@@ -26,10 +26,10 @@ apt update || true; apt install -y gh || echo 'WARNING: gh install failed; conti
 touch /root/.no_auto_tmux
 rm -rf /venv
 mkdir -p /workspace
-git config --global user.name minoya1220
-git config --global user.email minoya1220@gmail.com
+git config --global user.name sampleuser
+git config --global user.email sampleuser@example.invalid
 if [ -n "${GH_TOKEN:-}" ]; then gh auth setup-git || echo "WARNING: gh auth setup-git failed; private GitHub repos may not clone." >&2; else echo "WARNING: GH_TOKEN is not set in Vast account environment; private GitHub repos may not clone." >&2; fi
-[ -d /workspace/gpu-kernels ] || git clone https://github.com/minoya1220/gpu-kernels /workspace/gpu-kernels
+[ -d /workspace/gpu-kernels ] || git clone https://github.com/sampleuser/gpu-kernels /workspace/gpu-kernels
 if [ -f /workspace/gpu-kernels/pyproject.toml ]; then uv sync --directory /workspace/gpu-kernels; fi
 echo done >/workspace/.gpu-setup
 trap - EXIT
@@ -43,7 +43,6 @@ fn repo(name: &str) -> Repo {
     Repo::from_arg(name)
 }
 
-/// The Python tests' `args()` defaults plus what `_launch` reads.
 pub fn up_args() -> UpArgs {
     UpArgs {
         repo: Some(repo("gpu-kernels")),
@@ -83,7 +82,7 @@ fn test_container_script_uses_selected_repo_directory_only() {
     let script = startup_script(&repo("gpu-kernels"), "container", &defaults(), None).unwrap();
     assert_eq!(script, EXPECTED_CONTAINER_SCRIPT);
     assert!(script
-        .contains("git clone https://github.com/minoya1220/gpu-kernels /workspace/gpu-kernels"));
+        .contains("git clone https://github.com/sampleuser/gpu-kernels /workspace/gpu-kernels"));
     assert!(script.contains("uv sync --directory /workspace/gpu-kernels"));
     assert!(!script.contains("/workspace/cute-kernels"));
     assert!(script.contains("gh auth setup-git"));
@@ -215,8 +214,6 @@ fn test_adapter_search_generates_exact_read_only_cli_call() {
     );
 }
 
-// Expected values from CPython 3.13: shlex.quote returns '' for falsy values
-// and raises TypeError for other non-strings.
 #[test]
 fn test_non_string_git_identity_is_quoted_like_shlex() {
     let gpu_kernels = repo("gpu-kernels");
@@ -257,8 +254,6 @@ fn test_non_string_git_identity_is_quoted_like_shlex() {
     }
 }
 
-// Python puts the raw image value into the argument list: json.dumps prints
-// it in a dry run, and subprocess.run raises TypeError before starting vastai.
 #[test]
 fn test_non_string_image_is_printed_raw_and_never_reaches_vastai() {
     let mut cfg = defaults();
@@ -406,7 +401,8 @@ fn test_interactive_offer_selection_does_not_print_second_list() {
         dry_run: true,
         ..up_args()
     };
-    let search = crate::offers::OfferSearch::new(Vast::new(&ctx), &args, &defaults()).unwrap();
+    let search =
+        crate::vast::offers::OfferSearch::new(Vast::new(&ctx), &args, &defaults()).unwrap();
     let offers = search.offers("container", Some("Tesla T4")).unwrap();
     crate::launch::select_offer(&ctx, offers, &args).unwrap();
     let output = out(&ctx);
@@ -426,7 +422,8 @@ fn test_ls_table_and_json_output() {
     assert!(output.contains("Uptime") && output.contains("2h 02m"));
     assert!(!output.contains("7342"));
     assert_eq!(main(&ctx, &["ls", "--json"]), 0);
-    assert_eq!(json(&out(&ctx)), json(payload));
+    let listed = payload.replace(r#"7342.81}"#, r#"7342.81, "provider": "vast"}"#);
+    assert_eq!(json(&out(&ctx)), json(&listed));
     let empty = FakeRunner::new(|_| ok("[]"));
     let ctx = t.ctx().runner(&empty).build();
     assert_eq!(main(&ctx, &["ls"]), 0);
@@ -506,7 +503,7 @@ fn test_picker_selects_unique_text_match_without_second_enter() {
     let ctx = t.ctx().input(&["gpu-k"]).build();
     let choices = Choices::strings(vec!["gpu-kernels".into(), "other".into()]);
     assert_eq!(
-        choose(&ctx, &choices, "Repository", None, None).unwrap(),
+        choose(&ctx, &choices, "Repository", &Pick::REPO, None).unwrap(),
         "gpu-kernels"
     );
 }
@@ -531,12 +528,13 @@ fn test_interactive_gpu_stats_and_offers_share_unverified_filter() {
         dry_run: true,
         ..up_args()
     };
-    let search = crate::offers::OfferSearch::new(Vast::new(&ctx), &args, &defaults()).unwrap();
+    let search =
+        crate::vast::offers::OfferSearch::new(Vast::new(&ctx), &args, &defaults()).unwrap();
     let (_, offers) = crate::launch::prompt_for_picks(
         &ctx,
         crate::wizard::Picks::new(args.repo.clone(), args.mode.as_deref(), None),
         &search,
-        "minoya1220",
+        "sampleuser",
     )
     .unwrap();
     let selected = crate::launch::select_offer(&ctx, offers, &args).unwrap();
@@ -554,7 +552,20 @@ fn test_picker_filters_and_paginates() {
     let ctx = t.ctx().input(&["n", "GPU 1", "1"]).build();
     let names: Vec<String> = (0..25).map(|i| format!("GPU {i}")).collect();
     let choices = Choices::labelled(names.clone(), names);
-    assert_eq!(choose(&ctx, &choices, "GPU", None, None).unwrap(), "GPU 1");
+    assert_eq!(
+        choose(
+            &ctx,
+            &choices,
+            "GPU",
+            &Pick {
+                history: None,
+                flag: "--gpu"
+            },
+            None
+        )
+        .unwrap(),
+        "GPU 1"
+    );
     let output = out(&ctx);
     assert!(output.contains("page 1/3") && output.contains("page 2/3"));
 }
@@ -567,7 +578,17 @@ fn test_picker_recents_use_frequency_weighted_recency_and_latest_default() {
     let ctx = t.ctx().input(&[""]).build();
     let choices = Choices::strings(vec!["a".into(), "b".into()]);
     assert_eq!(
-        choose(&ctx, &choices, "Repository", Some("repo"), None).unwrap(),
+        choose(
+            &ctx,
+            &choices,
+            "Repository",
+            &Pick {
+                history: Some("repo"),
+                flag: "--repo",
+            },
+            None
+        )
+        .unwrap(),
         "b"
     );
     let output = out(&ctx);
@@ -647,7 +668,7 @@ fn confirmed_launch(t: &TestEnv, response: Result<Output, String>) -> (i32, Stri
         ..up_args()
     };
     let status = match launch(&ctx, &args, &defaults(), None) {
-        Ok(()) => 0,
+        Ok(_) => 0,
         Err(err) => {
             ctx.eprintln(&format!("gpu: {}", err.text())).unwrap();
             1
@@ -702,7 +723,7 @@ fn test_run_redacts_secrets_from_failed_command_output() {
         ))
     });
     let ctx = t.ctx().runner(&runner).build();
-    let err = run(&ctx, &["vastai", "create", "instance", "7"], None).unwrap_err();
+    let err = crate::vast::run(&ctx, &["vastai", "create", "instance", "7"], None).unwrap_err();
     assert!(!err.text().contains(FAKE_INSTANCE_KEY));
     assert!(err.text().contains("id 7"));
 }

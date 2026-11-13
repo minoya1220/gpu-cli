@@ -7,10 +7,11 @@ use regex::Regex;
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use crate::picker::{pick, Next, Opt, Screen};
-use crate::pyfmt::{fixed, py_float, py_str, truthy};
+use crate::provider::Provider;
+use crate::pyfmt::{py_float, py_str, truthy};
 use crate::pyjson::{Dict, Value};
 
-static SAFE_NAME: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[A-Za-z0-9._-]+$").unwrap());
+const NO_INSTANCES: &str = "No instances. Launch one: gpu up";
 static CLONE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"git clone [^\n]+ /workspace/([A-Za-z0-9._-]+)(?:\s|\z)").unwrap()
 });
@@ -18,7 +19,7 @@ static CLONE: LazyLock<Regex> = LazyLock::new(|| {
 /// Use metadata stored on the instance by `gpu up`, never local history.
 pub fn repo_name(instance: &Dict) -> Option<String> {
     if let Some(Value::Str(label)) = instance.get("label") {
-        if label != "no-repo" && SAFE_NAME.is_match(label) && label != "." && label != ".." {
+        if label != "no-repo" && crate::repos::is_name(label) {
             return Some(label.clone());
         }
     }
@@ -30,7 +31,7 @@ pub fn repo_name(instance: &Dict) -> Option<String> {
     if let Some(Value::Str(script)) = script {
         if let Some(captures) = CLONE.captures(script) {
             let name = &captures[1];
-            if name != "." && name != ".." {
+            if crate::repos::is_name(name) {
                 return Some(name.to_string());
             }
         }
@@ -73,8 +74,7 @@ pub(crate) fn display_ids(items: &[Dict], long: bool) -> Result<Vec<String>> {
         .iter()
         .map(|item| {
             let full = item.get("id").map(py_str).unwrap_or_else(|| "-".into());
-            let tpu = full
-                .starts_with("gcp:")
+            let tpu = (Provider::of(item) == Provider::Gcp)
                 .then(|| crate::gcp::TpuId::parse(&full))
                 .transpose()?;
             Ok((full, tpu))
@@ -111,7 +111,7 @@ fn table_price(item: &Dict) -> String {
         .filter(|v| !matches!(v, Value::Bool(_)))
         .and_then(|v| py_float(v).ok())
         .filter(|p| p.is_finite() && *p >= 0.0)
-        .map(|p| format!("${}/hr", fixed(p, 2)))
+        .map(crate::table::hourly)
         .unwrap_or_else(|| "-".into())
 }
 
@@ -119,7 +119,7 @@ fn table_price(item: &Dict) -> String {
 /// provider-specific fields. One column measurement covers every provider.
 pub(crate) fn render_table(ctx: &Ctx, items: &[Dict], long: bool) -> Result<()> {
     if items.is_empty() {
-        return ctx.println("No instances. Launch one: gpu up");
+        return ctx.println(NO_INSTANCES);
     }
     let ids = display_ids(items, long)?;
     let mut cells = vec![["ID", "Provider", "Type", "Status", "Price", "Uptime"].map(String::from)];
@@ -130,17 +130,14 @@ pub(crate) fn render_table(ctx: &Ctx, items: &[Dict], long: bool) -> Result<()> 
                 .map(py_str)
                 .unwrap_or_else(|| "-".into())
         };
-        let provider = match item.get("provider").and_then(Value::as_str) {
-            Some("gcp") => "gcp",
-            _ => "vast",
-        };
+        let provider = Provider::of(item);
         let kind = field("gpu_name");
         cells.push(
             [
                 id,
-                provider.into(),
-                if provider == "gcp" {
-                    crate::gcp_types::public(kind)
+                provider.key().into(),
+                if provider == Provider::Gcp {
+                    crate::gcp::types::public(kind)
                 } else {
                     kind
                 },
@@ -156,23 +153,14 @@ pub(crate) fn render_table(ctx: &Ctx, items: &[Dict], long: bool) -> Result<()> 
             }),
         );
     }
-    use crate::offers::Column::{Left, Plain};
-    for line in crate::offers::aligned_rows(&cells, [Left, Left, Left, Left, Left, Plain]) {
+    use crate::table::Column::{Left, Plain};
+    for line in crate::table::aligned_rows(&cells, [Left, Left, Left, Left, Left, Plain]) {
         ctx.println(line.trim_end())?;
     }
     Ok(())
 }
 
 pub fn instance_label(item: &Dict) -> Result<String> {
-    let dash = Value::str("-");
-    let price = item
-        .get("dph_total")
-        .or_else(|| item.get("dph"))
-        .unwrap_or(&dash);
-    let price = match py_float(price) {
-        Ok(price) => format!("${}/hr", fixed(price, 3)),
-        Err(_) => "-".into(),
-    };
     let or_dash = |key: &str| match item.get(key) {
         Some(value) if truthy(value) => py_str(value),
         _ => "-".into(),
@@ -182,7 +170,7 @@ pub fn instance_label(item: &Dict) -> Result<String> {
         py_str(item.get("id").ok_or_else(|| Error::key("id"))?),
         or_dash("gpu_name"),
         or_dash("actual_status"),
-        price,
+        table_price(item),
         format_uptime(item.get("duration")),
         repo_name(item).unwrap_or_else(|| "-".into()),
     ))
@@ -191,18 +179,14 @@ pub fn instance_label(item: &Dict) -> Result<String> {
 /// The instance picker; `Ok(None)` when there is nothing to select.
 pub fn select_instance(ctx: &Ctx, instances: &[Dict], action: &str) -> Result<Option<String>> {
     if instances.is_empty() {
-        ctx.println("No instances. Launch one: gpu up")?;
+        ctx.println(NO_INSTANCES)?;
         return Ok(None);
     }
     let mut options = Vec::new();
     for item in instances {
         let id = py_str(item.get("id").ok_or_else(|| Error::key("id"))?);
         let label = instance_label(item)?;
-        let label = match item.get("provider") {
-            Some(Value::Str(p)) if p == "vast" => format!("Vast.ai  {label}"),
-            Some(Value::Str(p)) if p == "gcp" => format!("Google Cloud  {label}"),
-            _ => label,
-        };
+        let label = format!("{}  {label}", Provider::of(item).label());
         options.push(Opt::new(id, label));
     }
     // Even a single instance must be explicitly selected.

@@ -103,14 +103,9 @@ fn every_vast_command_has_one_json_object_with_machine_results() {
     );
     let result = object(&ctx, "ssh", 0, &["ssh", "123"]);
     assert!(result.get("ssh_command").is_some());
-    for (command, args) in [
-        ("edit", vec!["edit", "123", "--editor", "code"]),
-        ("cursor", vec!["cursor", "123"]),
-    ] {
-        let result = object(&ctx, command, 0, &args);
-        assert_eq!(result.get("ssh_alias"), Some(&Value::str("vast-123")));
-        assert_eq!(result.get("directory"), Some(&Value::str("/workspace")));
-    }
+    let result = object(&ctx, "edit", 0, &["edit", "123", "--editor", "code"]);
+    assert_eq!(result.get("ssh_alias"), Some(&Value::str("vast-123")));
+    assert_eq!(result.get("directory"), Some(&Value::str("/workspace")));
     let result = object(&ctx, "setup", 0, &["setup", "--provider", "vast"]);
     assert_eq!(result.get("ready"), Some(&Value::Bool(true)));
     let result = object(
@@ -252,7 +247,7 @@ fn up_reports_no_ssh_alias_until_its_stanza_is_written() {
     let result = object.get("result").unwrap().as_dict().unwrap();
     assert_eq!(result.get("id"), Some(&Value::str("123")));
     assert_eq!(result.get("ssh_alias"), Some(&Value::Null));
-    assert!(!crate::ssh_config::has_host(&t.env(), "123").unwrap());
+    assert!(!crate::vast::ssh_config::has_host(&t.env(), "123").unwrap());
 }
 
 fn transient_then(states: &'static [&'static str]) -> Arc<FakeRunner> {

@@ -1,57 +1,44 @@
-//! `gpu`: launch Vast.ai GPU and Google Cloud TPU workspaces through
-//! authenticated provider CLIs. External work always crosses the Runner seam.
+//! GPU jobs and workspaces on Vast.ai, Google Cloud and Modal.
+//! External work always crosses the Runner seam.
 
 mod atomic_file;
-pub mod cli;
-pub mod commands;
+mod cache;
+pub(crate) mod cli;
 pub mod config;
 pub mod ctx;
-pub mod editors;
+pub(crate) mod editors;
 pub mod error;
 pub mod expiry;
-pub mod gcp;
-pub mod gcp_catalog;
-pub mod gcp_expiry;
-mod gcp_facts;
-pub mod gcp_geo;
-mod gcp_http;
-mod gcp_preferences;
-pub mod gcp_prices;
-mod gcp_retry;
-pub mod gcp_ssh;
-mod gcp_types;
-pub mod gcp_wizard;
-mod gcp_zones;
+pub(crate) mod gcp;
 mod guardrails;
-pub mod history;
+pub(crate) mod history;
 pub mod instances;
 pub mod launch;
-pub mod modal;
-pub mod offers;
+pub(crate) mod modal;
 mod output;
+mod packing;
 pub mod picker;
+mod poll;
 pub mod process;
 mod progress;
 pub mod prompt;
-pub mod provider;
+pub(crate) mod provider;
 mod provider_errors;
 pub mod pyfmt;
 pub mod pyjson;
 pub mod redact;
-pub mod remote;
+pub(crate) mod remote;
 pub mod repos;
-pub mod run;
+pub(crate) mod run;
 mod run_files;
-pub mod setup;
-pub mod ssh_config;
-pub mod startup;
+pub(crate) mod setup;
+mod ssh;
+mod sync;
+mod table;
+mod url;
 pub mod vast;
-pub mod wizard;
+pub(crate) mod wizard;
 
-#[cfg(test)]
-mod run_files_tests;
-#[cfg(test)]
-mod run_tests;
 #[cfg(test)]
 mod testing;
 #[cfg(test)]
@@ -61,7 +48,6 @@ use cli::{Command, Parsed};
 use ctx::Ctx;
 use error::{Error, Result};
 use launch::UpArgs;
-use repos::Repo;
 
 /// Run the CLI with `argv` (program name first); the exit status.
 pub fn main_with(argv: &[String], ctx: &Ctx) -> i32 {
@@ -75,14 +61,14 @@ pub fn main_with(argv: &[String], ctx: &Ctx) -> i32 {
         } => {
             if !to_stdout && cli::wants_json(argv) {
                 let command = cli::parsed_command_name(argv);
-                let error = Err(Error::Usage(
-                    text.lines().next().unwrap_or("Invalid arguments").into(),
+                let error = Err(Error::usage(
+                    text.lines().next().unwrap_or("Invalid arguments"),
                 ));
                 let ctx = ctx.for_command(true);
                 if let Some(usage) = text.lines().find(|line| line.starts_with("Usage:")) {
                     ctx.result("usage", pyjson::Value::str(usage));
                 }
-                let _ = output::finish(&ctx, command, &error);
+                let _ = output::finish(&ctx, &command, &error);
                 return code;
             }
             let _ = if to_stdout {
@@ -122,34 +108,17 @@ pub fn main_with(argv: &[String], ctx: &Ctx) -> i32 {
     outcome.err().map_or(0, |error| error.exit_code())
 }
 
-fn up_args(flags: cli::UpFlags) -> UpArgs {
-    let repo = if flags.no_repo {
-        Some(Repo::NoRepo)
-    } else {
-        flags.repo.as_deref().map(Repo::from_arg)
-    };
-    UpArgs {
-        repo,
-        mode: flags.mode,
-        gpu: flags.gpu,
-        num_gpus: flags.num_gpus,
-        max_price: flags.max_price,
-        interruptible: flags.interruptible,
-        offer: flags.offer,
-        disk: flags.disk,
-        yes: flags.yes,
-        dry_run: flags.dry_run,
-        expire: flags.expire,
-        reliability: flags.reliability,
-        unverified: flags.unverified,
-    }
-}
-
 fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
     let mut cfg = config::load_config(&ctx.env)?;
+    ctx.set_gcp_ready(gcp::setup::gcp_ready(&cfg));
     if let Command::Up(flags) = &mut command {
         guardrails::defaults(flags, &cfg)?;
-        launch::validate_launch_args(&up_args(flags.clone()))?;
+        if flags.target() == provider::Provider::Vast && flags.tpu_flags() {
+            return Err(
+                Error::msg("TPU flags do not apply to Vast").next("gpu up --provider gcp --help")
+            );
+        }
+        launch::validate_launch_args(&UpArgs::from(&*flags))?;
         // Syntax validation does not need an inferred account name.
         if let Some(repo) = &flags.repo {
             repos::resolve_repo(repo, "owner")?;
@@ -159,7 +128,7 @@ fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
     let mut expire_plan = None;
     if let Command::Expire { expiry_args } = &command {
         let (id, when) = expiry::parse_expire_arguments(expiry_args)
-            .map_err(|e| Error::Usage(cli::usage_error("expire", &e)))?;
+            .map_err(|e| Error::usage(cli::usage_error("expire", &e)))?;
         let action = if when == "show" || when == "cancel" {
             when.clone()
         } else {
@@ -169,7 +138,7 @@ fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
             let zone = expiry::local_zone(&ctx.env);
             Some(
                 expiry::parse_when(&when, ctx.clock.now(), &zone)
-                    .map_err(|e| Error::Usage(cli::usage_error("expire", &e)))?,
+                    .map_err(|e| Error::usage(cli::usage_error("expire", &e)))?,
             )
         } else {
             None
@@ -181,7 +150,7 @@ fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
         if let Some(duration) = flags.expire.as_deref().filter(|e| !e.is_empty()) {
             up_deadline = Some(
                 expiry::parse_deadline_duration(duration, ctx.clock.now())
-                    .map_err(|e| Error::Usage(cli::usage_error("up", &e)))?,
+                    .map_err(|e| Error::usage(cli::usage_error("up", &e)))?,
             );
         }
     }
@@ -189,7 +158,7 @@ fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
         && (matches!(&command, Command::Ssh { exec: true, .. })
             || matches!(&command, Command::Edit { editor: Some(editor), .. } if editor == "nvim"))
     {
-        return Err(output::usage("Interactive SSH/editor sessions cannot use --json. Use gpu exec ID -- COMMAND for terminal-free execution."));
+        return Err(Error::usage("Interactive SSH/editor sessions cannot use --json. Use gpu exec ID -- COMMAND for terminal-free execution."));
     }
     guardrails::nonterminal(ctx, &command, &cfg)?;
     if let Command::Up(flags) = &command {
@@ -241,44 +210,33 @@ fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
                 ctx.set_ssh_timeout(timeout);
             }
             ctx.result("dry_run", pyjson::Value::Bool(flags.dry_run));
-            let tpu_flags = flags.tpu.is_some()
-                || flags.zone.is_some()
-                || flags.runtime.is_some()
-                || flags.spot
-                || flags.on_demand;
-            // TPU flags imply Google Cloud; only an explicit --provider vast rejects them.
-            if flags.provider.as_deref() == Some("gcp") || (flags.provider.is_none() && tpu_flags) {
-                gcp::launch(ctx, &flags, &cfg, up_deadline)?;
-                return remote::after_up(ctx, wait && !flags.dry_run, timeout, wait_setup);
-            }
-            if tpu_flags {
-                return Err(Error::msg(
-                    "TPU flags do not apply to Vast. Next: gpu up --provider gcp --help",
-                ));
+            if flags.target() == provider::Provider::Gcp {
+                let launched =
+                    gcp::launch(ctx, &gcp::TpuArgs::from_flags(&flags)?, &cfg, up_deadline)?;
+                return remote::after_up(
+                    ctx,
+                    launched,
+                    wait && !flags.dry_run,
+                    timeout,
+                    wait_setup,
+                );
             }
             let dry_run = flags.dry_run;
-            launch::launch(ctx, &up_args(flags), &cfg, up_deadline)?;
-            remote::after_up(ctx, wait && !dry_run, timeout, wait_setup)
+            let launched = launch::launch(ctx, &UpArgs::from(&flags), &cfg, up_deadline)?;
+            remote::after_up(ctx, launched, wait && !dry_run, timeout, wait_setup)
         }
         Command::Ls {
             json,
             long,
             provider,
             envelope,
-        } => provider::ls(ctx, &cfg, json, long, provider.as_deref(), envelope),
+        } => provider::ls(ctx, &cfg, json, long, provider, envelope),
         Command::Expire { .. } => {
             let (id, action, deadline) = expire_plan.expect("parsed above");
             ctx.result("action", pyjson::Value::str(&action));
-            let Some(id) = provider::selected_id(ctx, &cfg, id.as_deref(), "expire")? else {
-                return Ok(());
-            };
-            match provider::InstanceId::parse(&id)? {
-                provider::InstanceId::Vast(id) => {
-                    commands::expire_instance(ctx, &id, &action, deadline).map(drop)
-                }
-                provider::InstanceId::Gcp(id) => {
-                    gcp_expiry::manage(ctx, &cfg, &id, &action, deadline)
-                }
+            match provider::select(ctx, &cfg, id.as_deref(), "expire")? {
+                Some(instance) => instance.expire(ctx, &cfg, &action, deadline),
+                None => Ok(()),
             }
         }
         Command::Edit {
@@ -286,66 +244,26 @@ fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
             editor,
             nvim_config,
         } => {
-            let Some(id) = provider::selected_id(ctx, &cfg, id.as_deref(), "edit")? else {
+            let Some(instance) = provider::select(ctx, &cfg, id.as_deref(), "edit")? else {
                 return Ok(());
             };
             let nvim_config = match nvim_config {
                 Some(config) => Some(pyjson::Value::Str(config)),
                 None => config::nvim_config(&cfg)?,
             };
-            match provider::InstanceId::parse(&id)? {
-                provider::InstanceId::Vast(id) => commands::edit_instance(
-                    ctx,
-                    &id,
-                    editor.as_deref(),
-                    nvim_config.as_ref(),
-                    120.0,
-                ),
-                provider::InstanceId::Gcp(id) => {
-                    gcp_ssh::edit(ctx, &cfg, &id, editor.as_deref(), nvim_config.as_ref())
-                }
-            }
+            instance.edit(ctx, editor.as_deref(), nvim_config.as_ref())
         }
-        Command::Cursor { id } => {
-            let Some(id) = provider::selected_id(ctx, &cfg, id.as_deref(), "cursor")? else {
-                return Ok(());
-            };
-            // Compatibility alias for `gpu edit --editor cursor`.
-            match provider::InstanceId::parse(&id)? {
-                provider::InstanceId::Vast(id) => {
-                    commands::edit_instance(ctx, &id, Some("cursor"), None, 120.0)
-                }
-                provider::InstanceId::Gcp(id) => {
-                    gcp_ssh::edit(ctx, &cfg, &id, Some("cursor"), None)
-                }
-            }
-        }
-        Command::Ssh { id, exec } => {
-            let Some(id) = provider::selected_id(ctx, &cfg, id.as_deref(), "ssh")? else {
-                return Ok(());
-            };
-            match provider::InstanceId::parse(&id)? {
-                provider::InstanceId::Vast(id) => commands::ssh(ctx, &id, exec),
-                provider::InstanceId::Gcp(id) => gcp_ssh::ssh(ctx, &id, exec),
-            }
-        }
-        Command::Stop { id } => {
-            let Some(id) = provider::selected_id(ctx, &cfg, id.as_deref(), "stop")? else {
-                return Ok(());
-            };
-            match provider::InstanceId::parse(&id)? {
-                provider::InstanceId::Vast(id) => commands::lifecycle(ctx, &id, false, false),
-                provider::InstanceId::Gcp(id) => gcp::lifecycle(ctx, &id, &cfg, false, false),
-            }
-        }
-        Command::Down { id, yes } => {
-            let Some(id) = provider::selected_id(ctx, &cfg, id.as_deref(), "down")? else {
-                return Ok(());
-            };
-            match provider::InstanceId::parse(&id)? {
-                provider::InstanceId::Vast(id) => commands::lifecycle(ctx, &id, true, yes),
-                provider::InstanceId::Gcp(id) => gcp::lifecycle(ctx, &id, &cfg, true, yes),
-            }
-        }
+        Command::Ssh { id, exec } => match provider::select(ctx, &cfg, id.as_deref(), "ssh")? {
+            Some(instance) => instance.ssh(ctx, exec),
+            None => Ok(()),
+        },
+        Command::Stop { id } => match provider::select(ctx, &cfg, id.as_deref(), "stop")? {
+            Some(instance) => instance.stop(ctx, &cfg),
+            None => Ok(()),
+        },
+        Command::Down { id, yes } => match provider::select(ctx, &cfg, id.as_deref(), "down")? {
+            Some(instance) => instance.down(ctx, &cfg, yes),
+            None => Ok(()),
+        },
     }
 }

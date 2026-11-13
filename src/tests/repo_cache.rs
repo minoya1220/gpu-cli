@@ -14,17 +14,8 @@ pub fn flow(t: &TestEnv, job: Job<Vec<String>>) -> LaunchWizard {
         &t.env(),
         WizardOptions {
             repos: job,
-            search: None,
-            models: Vec::new(),
-            recent_gpus: Vec::new(),
-            choose_offer: false,
-            tpu_setup_error: None,
-            tpu_transition: None,
-            tpu_prices: None,
-            tpu_cached_prices: None,
-            tpu_types: Vec::new(),
-            tpu_catalog: None,
-            owner: "minoya1220".into(),
+            owner: "sampleuser".into(),
+            ..Default::default()
         },
     )
 }
@@ -49,7 +40,7 @@ fn b200() -> Picks {
 
 fn save(t: &TestEnv, names: &[&str]) {
     let names: Vec<String> = names.iter().map(|s| s.to_string()).collect();
-    save_cached_repos(&t.env(), "minoya1220", &names).unwrap();
+    save_cached_repos(&t.env(), "sampleuser", &names).unwrap();
 }
 
 #[test]
@@ -155,16 +146,16 @@ fn test_first_run_waits_for_sync() {
 fn test_sync_rewrites_cache_with_names_only() {
     let t = TestEnv::new();
     let runner = FakeRunner::new(|cmd| match strs(&cmd.argv)[..] {
-        ["gh", "repo", "list", "minoya1220", "--json", "name", "--limit", "1000"] => {
+        ["gh", "repo", "list", "sampleuser", "--json", "name", "--limit", "1000"] => {
             ok(r#"[{"name": "fresh"}]"#)
         }
         _ => panic!("unexpected command: {:?}", cmd.argv),
     });
     let ctx = t.ctx().runner(&runner).build();
     save(&t, &["old"]);
-    assert_eq!(sync_repos(&ctx, "minoya1220").unwrap(), ["fresh"]);
+    assert_eq!(sync_repos(&ctx, "sampleuser").unwrap(), ["fresh"]);
     assert_eq!(
-        load_cached_repos(&t.env(), "minoya1220"),
+        load_cached_repos(&t.env(), "sampleuser"),
         Some(vec!["fresh".to_string()])
     );
 }

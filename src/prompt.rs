@@ -3,9 +3,9 @@
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use crate::history::{by_frequent_recency, recent_picks};
-use crate::offers::{category_label, group_by_category, model_label, Stats};
 use crate::picker::AnyJob;
 use crate::pyfmt::{casefold, is_digits, repr_str};
+use crate::vast::offers::{category_label, group_by_category, model_label, Stats};
 
 const PAGE_SIZE: usize = 12;
 
@@ -44,13 +44,39 @@ fn number(answer: &str) -> Option<usize> {
     }
 }
 
+/// What a line prompt picks: the history key its picks are remembered
+/// under, if any, and the flag that makes the prompt unnecessary.
+pub struct Pick<'a> {
+    pub history: Option<&'a str>,
+    pub flag: &'a str,
+}
+
+impl Pick<'static> {
+    pub const REPO: Pick<'static> = Pick {
+        history: None,
+        flag: "--repo or --no-repo",
+    };
+    pub const MODE: Pick<'static> = Pick {
+        history: Some("mode"),
+        flag: "--mode",
+    };
+    pub const GPU: Pick<'static> = Pick {
+        history: Some("gpu"),
+        flag: "--gpu",
+    };
+    pub const OFFER: Pick<'static> = Pick {
+        history: None,
+        flag: "--offer",
+    };
+}
+
 /// Line-based picker: numbered pages of 12, typed filters, `n`/`p` paging,
 /// and Enter for the most recent pick (or the first match).
 pub fn choose<T: Clone + PartialEq>(
     ctx: &Ctx,
     choices: &Choices<T>,
     prompt: &str,
-    step: Option<&str>,
+    pick: &Pick<'_>,
     filter_across: Option<&Choices<T>>,
 ) -> Result<T> {
     let (options, labels) = (&choices.options, &choices.labels);
@@ -60,7 +86,10 @@ pub fn choose<T: Clone + PartialEq>(
             prompt.to_lowercase()
         )));
     }
-    let history = step.map(|s| recent_picks(&ctx.env, s)).unwrap_or_default();
+    let history = pick
+        .history
+        .map(|key| recent_picks(&ctx.env, key))
+        .unwrap_or_default();
     let recent: Vec<T> = by_frequent_recency(options, &history, choices.key)
         .into_iter()
         .take(5)
@@ -114,16 +143,9 @@ pub fn choose<T: Clone + PartialEq>(
         };
         let prompt_text = format!("Select number, text to filter, n/p page{hint}: ");
         let answer = ctx.console.input(&prompt_text)?.ok_or_else(|| {
-            let flag = match step {
-                Some("gpu") => "--gpu",
-                Some("mode") => "--mode",
-                _ if prompt.to_lowercase().contains("repository") => "--repo or --no-repo",
-                _ if prompt.to_lowercase().contains("offer") => "--offer",
-                _ if prompt.to_lowercase().contains("mode") => "--mode",
-                _ => "the corresponding flag",
-            };
             Error::msg(format!(
-                "Input ended at {prompt}. Pass {flag} to choose without a prompt."
+                "Input ended at {prompt}. Pass {} to choose without a prompt.",
+                pick.flag
             ))
         })?;
         let answer = answer.trim();
@@ -160,7 +182,7 @@ pub fn choose<T: Clone + PartialEq>(
                             labels: matches.iter().map(|i| all.labels[*i].clone()).collect(),
                             key: all.key,
                         };
-                        return choose(ctx, &narrowed, "GPU model filter", Some("gpu"), None);
+                        return choose(ctx, &narrowed, "GPU model filter", &Pick::GPU, None);
                     }
                     ctx.println("No GPU models match that filter.")?;
                 }
@@ -227,7 +249,7 @@ pub fn choose_gpu(ctx: &Ctx, models: &[String], stats: &Stats) -> Result<String>
                     members.clone(),
                     members.iter().map(|m| model_label(m, stats)).collect(),
                 );
-                return choose(ctx, &choices, name, Some("gpu"), Some(&all));
+                return choose(ctx, &choices, name, &Pick::GPU, Some(&all));
             }
         }
         let needle = casefold(answer);
@@ -249,7 +271,7 @@ pub fn choose_gpu(ctx: &Ctx, models: &[String], stats: &Stats) -> Result<String>
                 ctx,
                 &Choices::labelled(matches, labels),
                 "GPU model filter",
-                Some("gpu"),
+                &Pick::GPU,
                 None,
             );
         }
@@ -311,17 +333,25 @@ pub(crate) fn confirmation_screen<V: crate::picker::PickValue, T: Clone + Send +
         if text.trim().eq_ignore_ascii_case("yes") {
             Ok(())
         } else {
-            Err("Type yes to confirm".into())
+            Err(CONFIRM.into())
         }
     })))
-    .input_label("Type yes")
+    .input_label(CONFIRM)
     .submit_on_right(false)
     .back_clears_input(false)
     .settle_active_only()
 }
 
-/// `input(prompt).strip().lower() == "yes"`; end of input cancels with status 1.
-pub fn confirm(ctx: &Ctx, prompt: &str) -> Result<bool> {
-    let answer = read_text(ctx, prompt)?;
+/// The one instruction every paid or destructive confirmation shows.
+pub(crate) const CONFIRM: &str = "Type 'yes' to confirm";
+
+/// Ask `question` (or only the instruction, after a question already
+/// printed); true when the answer is "yes". End of input cancels with status 1.
+pub fn confirm(ctx: &Ctx, question: Option<&str>) -> Result<bool> {
+    let prompt = match question {
+        Some(question) => format!("{question} {CONFIRM}: "),
+        None => format!("{CONFIRM}: "),
+    };
+    let answer = read_text(ctx, &prompt)?;
     Ok(answer.trim().to_lowercase() == "yes")
 }

@@ -1,7 +1,8 @@
 //! Invocation-scoped structured results. Never derive machine data from prose.
 use crate::ctx::Ctx;
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::pyjson::{self, Dict, Value};
+use crate::sync::MutexExt;
 
 #[derive(Default)]
 pub(crate) struct CommandOutput {
@@ -34,7 +35,7 @@ pub(crate) fn envelope(ctx: &Ctx, command: &str, outcome: &Result<()>) -> Value 
 pub(crate) fn finish(ctx: &Ctx, command: &str, outcome: &Result<()>) -> Result<()> {
     // Remote stdout/stderr are caller data, not provider API responses. They
     // deliberately pass through unchanged. Provider data is redacted at source.
-    let _emission = ctx.emission.lock().unwrap_or_else(|p| p.into_inner());
+    let _emission = ctx.emission.lock_recover();
     if ctx.output_written() {
         return Ok(());
     }
@@ -42,8 +43,4 @@ pub(crate) fn finish(ctx: &Ctx, command: &str, outcome: &Result<()>) -> Result<(
         .println(&pyjson::dumps(&envelope(ctx, command, outcome), None))?;
     ctx.mark_output_written();
     Ok(())
-}
-
-pub(crate) fn usage(text: impl Into<String>) -> Error {
-    Error::Usage(text.into())
 }

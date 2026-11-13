@@ -1,7 +1,3 @@
-//! Test doubles for the `Ctx` seams: a scripted runner that records every
-//! command, a fake clock that advances on sleep, and isolated temp HOME and
-//! XDG directories (Python's `isolate_user_directories` fixture).
-
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -12,22 +8,81 @@ use crate::ctx::{Clock, Console, Ctx, Env, Ui};
 use crate::process::{Cmd, Output, RunError, Runner};
 use crate::pyjson::{self, Dict, Value};
 
-/// Explicit legacy fixture identity, not production defaults.
+/// Neutral fixture identity, separate from production defaults.
 pub fn fixture_config() -> Dict {
     let mut cfg = crate::config::defaults();
-    cfg.insert("owner", Value::str("minoya1220"));
-    cfg.insert("git_name", Value::str("minoya1220"));
-    cfg.insert("git_email", Value::str("minoya1220@gmail.com"));
+    cfg.insert("owner", Value::str("sampleuser"));
+    cfg.insert("git_name", Value::str("sampleuser"));
+    cfg.insert("git_email", Value::str("sampleuser@example.invalid"));
     cfg
+}
+
+/// Setup-complete GCP configuration shared with binary test fixtures.
+pub fn gcp_config(zone: Option<&str>, runtime: Option<&str>) -> Dict {
+    let mut config = dict(include_str!("../tests/common/gcp_setup.json"));
+    let mut gcp = config.get("gcp").unwrap().as_dict().unwrap().clone();
+    for (key, value) in [("zone", zone), ("runtime", runtime)] {
+        if let Some(value) = value {
+            gcp.insert(key, Value::str(value));
+        }
+    }
+    config.insert("gcp", Value::Dict(gcp));
+    config
+}
+
+/// Shared run-flag defaults; callers supply only the options/argv they vary.
+pub fn run_flags(options: &[&str], command: &[&str]) -> crate::cli::RunFlags {
+    use clap::Parser;
+    let mut argv = vec!["gpu", "run", "--gpu", "T4", "--expire", "30m"];
+    argv.extend_from_slice(options);
+    argv.push("--");
+    argv.extend_from_slice(command);
+    match crate::cli::Cli::parse_from(argv).command.unwrap() {
+        crate::cli::Command::Run(flags) => flags,
+        _ => unreachable!(),
+    }
+}
+
+/// Write the complete configuration fixture with isolated directory setup.
+pub fn write_config(env: &TestEnv, config: &Dict) {
+    let path = crate::config::config_path(&env.env());
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, pyjson::dumps(&Value::Dict(config.clone()), None)).unwrap();
 }
 
 /// Seed a setup-complete test's offline facts, not the production catalog.
 pub fn tpu_facts(ctx: &Ctx) {
     let data = dict(include_str!("../tests/common/tpu_facts.json"));
     for name in ["tpu-catalog-test-project.json", "tpu-sku-facts.json"] {
-        if crate::gcp_http::read_cache(ctx, name, i64::MAX).is_none() {
-            crate::gcp_http::write_cache(ctx, name, data.clone());
+        if crate::cache::read_json(ctx, name, i64::MAX).is_none() {
+            crate::cache::write_json(ctx, name, data.clone());
         }
+    }
+}
+
+/// Fixed wizard data for tests which do not need asynchronous call tracking.
+#[derive(Default)]
+pub struct OfferFixture {
+    rows: Vec<Dict>,
+}
+impl OfferFixture {
+    pub fn one(id: i64) -> Self {
+        let mut row = Dict::new();
+        row.insert("id", Value::Int(id));
+        row.insert("gpu_name", Value::str(""));
+        Self { rows: vec![row] }
+    }
+}
+impl crate::wizard::Search for OfferFixture {
+    fn offers(&self, _: &str, gpu: Option<&str>) -> crate::error::Result<Vec<Dict>> {
+        let mut rows = self.rows.clone();
+        for row in &mut rows {
+            row.insert("gpu_name", Value::str(gpu.unwrap_or_default()));
+        }
+        Ok(rows)
+    }
+    fn stats(&self, _: &str) -> crate::error::Result<crate::vast::offers::Stats> {
+        Ok(Default::default())
     }
 }
 

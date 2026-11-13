@@ -3,18 +3,18 @@
 
 use std::sync::{Arc, Mutex};
 
-use crate::commands::edit_instance;
 use crate::instances::{instance_label, repo_name};
 use crate::launch::{launch, UpArgs};
 use crate::picker::testing::*;
 use crate::picker::{Next, Opt, Outcome, Screen};
 use crate::process::{Cmd, Output, RunError};
+use crate::provider::{Instance, VastId};
 use crate::pyfmt::py_str;
 use crate::pyjson::{self, Dict, Value};
 use crate::repos::Repo;
-use crate::ssh_config::{remove_host, update_host};
 use crate::testing::fixture_config as defaults;
 use crate::testing::*;
+use crate::vast::ssh_config::{remove_host, update_host};
 
 pub const INSTANCES: &str = r#"[
     {"id": 12, "gpu_name": "RTX 4090", "actual_status": "running", "dph_total": 0.5,
@@ -65,7 +65,7 @@ pub fn no_other(cmd: &Cmd) -> Result<Output, RunError> {
 /// The SSH readiness probe succeeds and any GUI editor CLI accepts.
 pub fn ssh_ready(cmd: &Cmd) -> Result<Output, RunError> {
     match strs(&cmd.argv)[..] {
-        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", _, "true"] => {
+        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", _, "true"] => {
             Ok(Output::status(0))
         }
         ["ssh", ..]
@@ -81,17 +81,10 @@ pub fn ssh_ready(cmd: &Cmd) -> Result<Output, RunError> {
     }
 }
 
-/// GUI editor CLIs on PATH (the Python tests patch `shutil.which`).
 pub fn editor_stubs(t: &TestEnv) {
     for name in ["cursor", "code", "zed", "rsync"] {
         t.executable(name, "#!/bin/sh\nexit 0\n");
     }
-}
-
-fn running(item: &Dict) -> Dict {
-    let mut item = item.clone();
-    item.insert("actual_status", Value::str("running"));
-    item
 }
 
 #[test]
@@ -99,7 +92,6 @@ fn test_picker_zero_one_many() {
     for count in [0usize, 1, 2] {
         let t = TestEnv::new();
         let runner = fake_vast(instances()[..count].to_vec(), no_other);
-        // Select the last instance, as the Python test's patched picker does.
         let keys = format!("{}{RIGHT}", DOWN.repeat(count.saturating_sub(1)));
         let pickers: Vec<&str> = if count == 0 {
             vec![]
@@ -226,28 +218,6 @@ fn test_down_selection_still_confirms_and_cancel_is_safe() {
 }
 
 #[test]
-fn test_cursor_repo_and_fallback() {
-    let t = TestEnv::new();
-    editor_stubs(&t);
-    let runner = fake_vast(
-        vec![instances()[0].clone(), running(&instances()[1])],
-        ssh_ready,
-    );
-    let mut stdout = String::new();
-    for (instance_id, path) in [("12", "/workspace/ThunderKittens"), ("34", "/workspace")] {
-        let ctx = t.ctx().runner(&runner).interactive(true).build();
-        assert_eq!(main(&ctx, &["cursor", instance_id]), 0, "{}", err(&ctx));
-        stdout += &(out(&ctx) + &err(&ctx));
-        let alias = format!("ssh-remote+vast-{instance_id}");
-        assert_eq!(
-            runner.argvs().last().unwrap(),
-            &["cursor", "--remote", alias.as_str(), path]
-        );
-    }
-    assert!(stdout.contains("No repository recorded"));
-}
-
-#[test]
 fn test_managed_ssh_config_preserves_user_bytes() {
     let t = TestEnv::new();
     let env = t.env();
@@ -284,7 +254,8 @@ fn test_managed_ssh_config_with_crlf_replaces_stale_alias() {
         "Host vast-12\r\n  HostName old.example\r\n  Port 1\r\nHost vast-34\r\n  HostName ssh7.vast.ai\r\n  Port 2222\r\n",
     )
     .unwrap();
-    let entry = "Host vast-12\n  HostName ssh6.vast.ai\n  Port 12345\n  User root\n  IdentityFile ~/.ssh/id_ed25519\n  StrictHostKeyChecking accept-new\n  ServerAliveInterval 15\n  ServerAliveCountMax 4\n";
+    let entry = "Host vast-12\n  HostName ssh6.vast.ai\n  Port 12345\n  User root\n  IdentityFile ~/.ssh/id_ed25519\n  \
+        StrictHostKeyChecking accept-new\n  ServerAliveInterval 15\n  ServerAliveCountMax 4\n  ConnectTimeout 10\n";
     assert_eq!(update_host(&env, &instances()[0]).unwrap(), "vast-12");
     assert_eq!(
         read(&managed),
@@ -302,7 +273,9 @@ fn test_ssh_wait_timeout() {
     loading.insert("actual_status", Value::str("loading"));
     let runner = fake_vast(vec![loading], no_other);
     let ctx = t.ctx().runner(&runner).interactive(true).build();
-    let error = edit_instance(&ctx, "12", Some("cursor"), None, 4.0).unwrap_err();
+    let error = VastId("12".into())
+        .edit(&ctx, Some("cursor"), None)
+        .unwrap_err();
     assert!(error.text().contains("Timed out waiting"));
     assert!(err(&ctx).contains("Waiting for instance"));
 }
@@ -316,7 +289,9 @@ fn test_ssh_probe_failure_times_out() {
         _ => panic!("launched before SSH: {:?}", cmd.argv),
     });
     let ctx = t.ctx().runner(&runner).build();
-    let error = edit_instance(&ctx, "12", Some("cursor"), None, 4.0).unwrap_err();
+    let error = VastId("12".into())
+        .edit(&ctx, Some("cursor"), None)
+        .unwrap_err();
     assert!(error.text().contains("Timed out waiting"));
 }
 

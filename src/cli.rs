@@ -1,14 +1,30 @@
-//! Command-line definitions (argparse in the Python tool).
+//! Command-line definitions and usage rendering.
 
 use clap::error::ErrorKind;
 use clap::{ArgAction, CommandFactory, Parser, Subcommand};
 
-pub const VERSION: &str = "0.1.0";
+use crate::provider::Provider;
+
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+fn up_help() -> String {
+    let codes = crate::error::help_codes(false);
+    format!("Non-terminal example: gpu up --gpu 'RTX 4090' --mode container --no-repo --expire 2h --yes --json\nIDs: \
+        numeric Vast ID; gcp:PROJECT:ZONE:NAME or an unambiguous TPU name.\nExit codes: 0 success; 1 error; 2 \
+        usage; {codes}; 128+signal interrupted.")
+}
+
+fn run_help() -> String {
+    let codes = crate::error::help_codes(true);
+    format!("Example: gpu run --gpu 'RTX 4090' --expire 2h --yes --json -- python train.py\nNon-terminal launches \
+        require --gpu, --expire and --yes (or --dry-run).\nExit codes: remote job status, or 1 error; 2 usage; \
+        {codes}; 130 cancelled. IDs: numeric Vast or modal:sb-<id>.")
+}
 
 #[derive(Parser, Debug)]
 #[command(
     name = "gpu",
-    about = "Launch GPU workspaces on Vast.ai or TPU VMs on Google Cloud",
+    about = "GPU jobs and workspaces on Vast.ai, Google Cloud and Modal",
     disable_version_flag = true,
     infer_long_args = true,
     args_override_self = true
@@ -32,12 +48,12 @@ pub enum Command {
     Setup(SetupFlags),
     /// Launch a GPU or TPU workspace with an optional repository
     #[command(
-        after_help = "Non-terminal example: gpu up --gpu 'RTX 4090' --mode container --no-repo --expire 2h --yes --json\nIDs: numeric Vast ID; gcp:PROJECT:ZONE:NAME or an unambiguous TPU name.\nExit codes: 0 success; 1 error; 2 usage; 10 capacity; 11 price; 12 setup; 13 auth; 14 readiness timeout; 15 spend cap; 16 not found; 20 command timeout; 128+signal interrupted."
+        after_help = up_help()
     )]
     Up(UpFlags),
-    /// Run a one-shot job on a fresh Vast container, fetch results, then destroy it
+    /// Run a one-shot job on Vast or Modal, fetch results, then destroy it
     #[command(
-        after_help = "Example: gpu run --gpu 'RTX 4090' --expire 2h --yes --json -- python train.py\nNon-terminal launches require --gpu, --expire and --yes (or --dry-run).\nExit codes: remote job status, or 1 error; 2 usage; 10 capacity; 11 price; 12 setup; 13 auth; 14 readiness timeout; 15 spend cap; 16 not found; 17 job timeout; 18 instance lost; 19 cleanup unverified; 130 cancelled. Numeric Vast IDs only."
+        after_help = run_help()
     )]
     Run(RunFlags),
     /// List rented instances
@@ -52,8 +68,8 @@ pub enum Command {
         #[arg(long)]
         long: bool,
         /// Limit listing to one provider
-        #[arg(long, value_parser = ["vast", "gcp"])]
-        provider: Option<String>,
+        #[arg(long, value_parser = Provider::parser(&Provider::ALL))]
+        provider: Option<Provider>,
     },
     /// Wait until the instance answers a non-interactive SSH probe
     Wait {
@@ -106,11 +122,6 @@ pub enum Command {
         #[arg(long)]
         exec: bool,
     },
-    /// Open an instance's repository in Cursor over SSH
-    Cursor {
-        /// Numeric Vast ID, full GCP ID, or short TPU name (picker if omitted)
-        id: Option<String>,
-    },
     /// Open an instance workspace in an editor over SSH
     Edit {
         /// Numeric Vast ID, full GCP ID, or short TPU name (picker if omitted)
@@ -129,7 +140,7 @@ pub enum Command {
     },
     /// Destroy an instance
     Down {
-        /// Numeric Vast ID, full GCP ID, or short TPU name (picker if omitted)
+        /// Vast ID, GCP ID/short TPU name, or modal:sb-ID (picker if omitted)
         id: Option<String>,
         /// Approve permanent destruction without a prompt (required without a terminal)
         #[arg(long)]
@@ -138,7 +149,8 @@ pub enum Command {
     /// Schedule destruction, show or cancel it
     #[command(
         override_usage = "gpu expire [ID] WHEN|cancel|show",
-        long_about = "Auto-destroy (disk deleted). WHEN: 2h, 1h30m, 18:30, 6:30PM, 6pm, or ISO datetime. Clock times use the next local occurrence; bare numbers are instance IDs.",
+        long_about = "Auto-destroy (disk deleted). WHEN: 2h, 1h30m, 18:30, 6:30PM, 6pm, or ISO datetime. Clock times use the \
+            next local occurrence; bare numbers are instance IDs.",
         after_help = "Examples: gpu expire 2h; gpu expire 12345678 6:30pm; gpu expire 12345678 cancel; gpu expire show"
     )]
     Expire {
@@ -159,7 +171,6 @@ impl Command {
             Self::Exec { .. } => "exec",
             Self::Cp { .. } => "cp",
             Self::Ssh { .. } => "ssh",
-            Self::Cursor { .. } => "cursor",
             Self::Edit { .. } => "edit",
             Self::Stop { .. } => "stop",
             Self::Down { .. } => "down",
@@ -171,8 +182,8 @@ impl Command {
 #[derive(clap::Args, Debug, Default)]
 pub struct SetupFlags {
     /// Choose a provider explicitly (otherwise open the provider picker)
-    #[arg(long, value_parser = ["vast", "gcp", "modal"])]
-    pub provider: Option<String>,
+    #[arg(long, value_parser = Provider::parser(&Provider::ALL))]
+    pub provider: Option<Provider>,
     /// Google Cloud project ID (otherwise choose from your projects)
     #[arg(long)]
     pub project: Option<String>,
@@ -196,8 +207,8 @@ pub struct SetupFlags {
 #[derive(clap::Args, Clone, Debug)]
 pub struct UpFlags {
     /// Provider (optional; TPU flags or a TPU picked on the GPU screen use gcp)
-    #[arg(long, value_parser = ["vast", "gcp"])]
-    pub provider: Option<String>,
+    #[arg(long, value_parser = Provider::parser(&[Provider::Vast, Provider::Gcp]))]
+    pub provider: Option<Provider>,
     /// Full TPU accelerator type, e.g. v5e-1 or v6e-1
     #[arg(long, visible_alias = "type")]
     pub tpu: Option<String>,
@@ -266,11 +277,32 @@ pub struct UpFlags {
     pub unverified: bool,
 }
 
+impl UpFlags {
+    /// Whether any flag that only a TPU launch reads is present.
+    pub fn tpu_flags(&self) -> bool {
+        self.tpu.is_some()
+            || self.zone.is_some()
+            || self.runtime.is_some()
+            || self.spot
+            || self.on_demand
+    }
+
+    /// The launch's provider: `--provider`, else Google Cloud when TPU flags
+    /// are present, else Vast.
+    pub fn target(&self) -> Provider {
+        self.provider.unwrap_or(if self.tpu_flags() {
+            Provider::Gcp
+        } else {
+            Provider::Vast
+        })
+    }
+}
+
 #[derive(clap::Args, Clone, Debug)]
 pub struct RunFlags {
     /// Provider (Vast by default; Modal also available in the GPU picker)
-    #[arg(long, value_parser = ["vast", "modal"])]
-    pub provider: Option<String>,
+    #[arg(long, value_parser = Provider::parser(&[Provider::Vast, Provider::Modal]))]
+    pub provider: Option<Provider>,
     /// Modal physical CPU cores (default: 4; request equals limit)
     #[arg(long, allow_negative_numbers = true)]
     pub cpu: Option<f64>,
@@ -422,32 +454,17 @@ pub(crate) fn wants_json(argv: &[String]) -> bool {
         })
 }
 
-pub(crate) fn parsed_command_name(argv: &[String]) -> &'static str {
+pub(crate) fn parsed_command_name(argv: &[String]) -> String {
     let Ok(matches) = Cli::command()
         .ignore_errors(true)
         .try_get_matches_from(argv)
     else {
-        return "parse";
+        return "parse".into();
     };
-    match matches.subcommand_name() {
-        Some("up") => "up",
-        Some("run") => "run",
-        Some("setup") => "setup",
-        Some("ls") => "ls",
-        Some("wait") => "wait",
-        Some("exec") => "exec",
-        Some("cp") => "cp",
-        Some("ssh") => "ssh",
-        Some("cursor") => "cursor",
-        Some("edit") => "edit",
-        Some("stop") => "stop",
-        Some("down") => "down",
-        Some("expire") => "expire",
-        _ => "parse",
-    }
+    matches.subcommand_name().unwrap_or("parse").into()
 }
 
-/// A usage error raised after parsing (`parser.error` in Python), rendered
+/// A usage error raised after parsing, rendered
 /// with the subcommand's usage line.
 pub fn usage_error(subcommand: &str, message: &str) -> String {
     let mut cmd = Cli::command();

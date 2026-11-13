@@ -5,6 +5,7 @@
 //! state, result and listeners are only touched there. Listeners run in
 //! registration order, which the repository re-validation flow relies on.
 
+use crate::sync::MutexExt;
 use std::cell::{Cell, RefCell};
 use std::os::fd::OwnedFd;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -20,6 +21,18 @@ pub enum JobState {
     Running,
     Done,
     Failed,
+}
+
+impl JobState {
+    /// The cell shown for a value this job has not produced: "…" while it
+    /// may still arrive, "-" once it cannot.
+    pub fn placeholder(self) -> &'static str {
+        if matches!(self, JobState::Idle | JobState::Running) {
+            "…"
+        } else {
+            "-"
+        }
+    }
 }
 
 /// What a screen needs from a job, whatever its result type.
@@ -132,22 +145,20 @@ impl<T> Clone for Job<T> {
 }
 
 /// Reads a job's state from another thread (tests).
+#[cfg(test)]
 #[derive(Clone)]
 pub struct JobObserver {
     observed: Arc<Mutex<(JobState, String)>>,
 }
 
+#[cfg(test)]
 impl JobObserver {
     pub fn state(&self) -> JobState {
-        self.observed.lock().unwrap_or_else(|p| p.into_inner()).0
+        self.observed.lock_recover().0
     }
 
     pub fn error(&self) -> String {
-        self.observed
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .1
-            .clone()
+        self.observed.lock_recover().1.clone()
     }
 }
 
@@ -170,7 +181,7 @@ impl<T: Clone + Send + 'static> Job<T> {
         Self::build(
             Arc::new(move |wake: Arc<Waker>| {
                 work(&|value| {
-                    *slot.lock().unwrap_or_else(|p| p.into_inner()) = Some(value);
+                    *slot.lock_recover() = Some(value);
                     wake.wake();
                 })
             }),
@@ -192,15 +203,14 @@ impl<T: Clone + Send + 'static> Job<T> {
     }
 
     pub fn result(&self) -> Option<T> {
-        self.inner.result.borrow().clone().or_else(|| {
-            self.inner
-                .interim
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .clone()
-        })
+        self.inner
+            .result
+            .borrow()
+            .clone()
+            .or_else(|| self.inner.interim.lock_recover().clone())
     }
 
+    #[cfg(test)]
     pub fn observer(&self) -> JobObserver {
         JobObserver {
             observed: self.inner.observed.clone(),
@@ -210,15 +220,11 @@ impl<T: Clone + Send + 'static> Job<T> {
     fn set_state(&self, state: JobState) {
         self.inner.state.set(state);
         let error = self.inner.error.borrow().clone();
-        *self
-            .inner
-            .observed
-            .lock()
-            .unwrap_or_else(|p| p.into_inner()) = (state, error);
+        *self.inner.observed.lock_recover() = (state, error);
     }
 
     fn settle(&self, outcome: Result<T, String>) {
-        *self.inner.interim.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        *self.inner.interim.lock_recover() = None;
         match outcome {
             Ok(value) => {
                 *self.inner.result.borrow_mut() = Some(value);
@@ -245,7 +251,7 @@ struct PendingJob<T> {
 
 impl<T: Clone + Send + 'static> Pending for PendingJob<T> {
     fn poll(&self) -> bool {
-        let outcome = self.slot.lock().unwrap_or_else(|p| p.into_inner()).take();
+        let outcome = self.slot.lock_recover().take();
         match outcome {
             Some(outcome) => {
                 self.job.settle(outcome);
@@ -295,7 +301,7 @@ impl<T: Clone + Send + 'static> AnyJob for Job<T> {
                     }
                     Err(_) => Err("internal error".into()),
                 };
-                *filled.lock().unwrap_or_else(|p| p.into_inner()) = Some(outcome);
+                *filled.lock_recover() = Some(outcome);
                 waker.wake();
             })
             .expect("spawn picker job thread");

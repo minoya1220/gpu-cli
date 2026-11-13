@@ -1,6 +1,3 @@
-//! Data-driven parity tables generated from the Python reference (see
-//! tests/golden/README.md). Every row must match what Python produced.
-
 use std::sync::Arc;
 
 use gpu::config::defaults;
@@ -8,16 +5,16 @@ use gpu::ctx::{Clock, Console, Ctx, Env, Ui};
 use gpu::expiry::parse_when;
 use gpu::instances::{format_uptime, instance_label};
 use gpu::launch::UpArgs;
-use gpu::offers::{
-    category_label, gpu_category, group_by_category, model_label, offer_label, offer_rows,
-    valid_gpu_name, OfferSearch, Stats,
-};
-use gpu::prompt::{choose, choose_gpu, Choices};
+use gpu::prompt::{choose, choose_gpu, Choices, Pick};
 use gpu::pyfmt::{fixed, float_repr, general, parse_float, percent, py_float, py_str, shell_quote};
 use gpu::pyjson::{dumps, loads, Dict, Value};
 use gpu::redact::{redact, redact_text};
 use gpu::repos::{resolve_repo, Repo};
-use gpu::startup::startup_script;
+use gpu::vast::offers::{
+    category_label, gpu_category, group_by_category, model_label, offer_label, offer_rows,
+    valid_gpu_name, OfferSearch, Stats,
+};
+use gpu::vast::startup::startup_script;
 use gpu::vast::{request, RequestArgs, Vast};
 
 fn table(name: &str) -> Value {
@@ -108,7 +105,6 @@ fn python_float_formatting() {
 fn python_float_parsing() {
     for row in rows("float_parse") {
         let text = s(&row, "text");
-        // Non-ASCII digits are a documented difference (plan 9.3.2).
         if !text.is_ascii() {
             continue;
         }
@@ -195,7 +191,7 @@ fn python_redaction() {
 fn python_resolve_repo() {
     for row in rows("resolve_repo") {
         let repo = s(&row, "repo");
-        match resolve_repo(repo, "minoya1220") {
+        match resolve_repo(repo, "sampleuser") {
             Ok((url, name)) => {
                 let expected = row
                     .get("result")
@@ -294,8 +290,6 @@ fn python_offer_queries() {
 
 #[test]
 fn python_ls_json_output() {
-    // Human listing intentionally uses a new unified provider table. Machine
-    // JSON retains the Python reference's precision, shape and redaction.
     for row in rows("ls") {
         let raw = loads(s(&row, "raw")).unwrap();
         assert_eq!(dumps(&redact(&raw), Some(1)), s(&row, "json"));
@@ -353,7 +347,6 @@ fn python_uptime_and_labels() {
 fn python_gpu_models() {
     let golden = table("gpu_models");
     for (model, category) in golden.get("categories").unwrap().as_dict().unwrap().iter() {
-        // Full case folding differs for a few characters (plan 9.3.4).
         if model == "\u{df}" {
             continue;
         }
@@ -420,7 +413,6 @@ fn python_gpu_models() {
     }
 }
 
-/// Messages Python's `datetime` writes itself; the Rust text differs (plan 9.1.2).
 fn python_internal(message: &str) -> bool {
     [
         "Invalid datetime",
@@ -446,8 +438,6 @@ fn python_parse_when() {
         let when = s(&row, "when");
         let actual = parse_when(when, now, &zone);
         let ok = match (&actual, opt_s(&row, "result"), opt_s(&row, "error")) {
-            // jiff timestamps end at 9999-12-30T22:00Z, so the last day of
-            // year 9999, which Python accepts, is rejected (plan section 11).
             (result, Some(expected), _) if expected.starts_with("9999-12-31") => {
                 rejected += 1;
                 result.is_err()
@@ -520,13 +510,16 @@ fn python_line_prompts() {
             .map(py_str)
             .collect();
         let prompt = s(&case, "prompt").to_string();
-        let step = opt_s(&case, "step").map(String::from);
+        let pick = Pick {
+            history: opt_s(&case, "step"),
+            flag: s(&case, "flag"),
+        };
         let (result, stdout) = run(case.get("history"), case.get("answers").unwrap(), &|ctx| {
             choose(
                 ctx,
                 &Choices::strings(options.clone()),
                 &prompt,
-                step.as_deref(),
+                &pick,
                 None,
             )
         });

@@ -1,12 +1,13 @@
 //! Editor selection and SSH launch. Blocking work runs only after the picker exits.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::ctx::{Ctx, Env};
 use crate::error::{Error, Result};
 use crate::picker::{Next, Opt, Screen};
 use crate::process::{Cmd, Input};
 use crate::pyfmt::shell_quote;
+use crate::pyjson::Value;
 
 pub const EDITORS: [(&str, &str); 4] = [
     ("cursor", "Cursor"),
@@ -20,6 +21,90 @@ pub const NVIM_SHA256_X86_64: &str =
     "b2f91117be5b5ea39edd7297156dc2a4a8df4add6c95a90809a8df19e7ab6f52";
 pub const NVIM_SHA256_ARM64: &str =
     "ea4f9a31b11cc1477ff014aebb7b207684e7280f94ffa97abdab6cacd9b98519";
+
+/// How long `gpu edit` waits for SSH before giving up.
+pub(crate) const EDITOR_WAIT: f64 = 120.0;
+
+/// Where an editor connects to an instance.
+pub(crate) struct Target {
+    pub alias: String,
+    pub directory: String,
+    /// How the closing message names the instance.
+    pub shown: String,
+}
+
+/// The most recent editor picked on this machine.
+pub fn last_editor(env: &Env) -> Option<String> {
+    crate::history::recent_picks(env, "editor")
+        .into_iter()
+        .find(|e| EDITORS.iter().any(|(key, _)| key == e))
+}
+
+/// The one `gpu edit` flow: choose and check the editor, let the provider
+/// wait for its SSH target, launch, and remember the choice.
+pub(crate) fn open(
+    ctx: &Ctx,
+    id: &str,
+    editor: Option<&str>,
+    nvim_config: Option<&Value>,
+    connect: impl FnOnce(&str) -> Result<Target>,
+) -> Result<()> {
+    let editor = match editor.map(String::from).or_else(|| last_editor(&ctx.env)) {
+        Some(editor) => editor,
+        None if ctx.interactive() => crate::picker::pick(ctx, editor_screen())?,
+        None => {
+            let keys = EDITORS.map(|(key, _)| key).join("|");
+            return Err(
+                Error::usage(format!("No previous editor; specify --editor {keys}"))
+                    .next(format!("gpu edit {id} --editor code")),
+            );
+        }
+    };
+    check_editor(&ctx.env, &editor)?;
+    let target = connect(&editor)?;
+    ctx.result("ssh_alias", Value::str(&target.alias));
+    ctx.result("directory", Value::str(&target.directory));
+    ctx.result("editor", Value::str(&editor));
+    let nvim_config = if editor == "nvim" {
+        crate::config::nvim_config_text(nvim_config)?
+    } else {
+        None
+    };
+    launch_editor(
+        ctx,
+        &editor,
+        &target.alias,
+        &target.directory,
+        nvim_config.as_deref(),
+    )?;
+    crate::history::record_picks_best_effort(ctx, &[("editor", &editor)]);
+    ctx.println(&format!(
+        "Opened {} at {} on {}.",
+        editor_label(&editor).unwrap_or(&editor),
+        target.directory,
+        target.shown
+    ))
+}
+
+/// After an interactive launch, offer to open the new instance in an editor.
+pub(crate) fn offer_after_launch(
+    ctx: &Ctx,
+    cfg: &crate::pyjson::Dict,
+    instance: &dyn crate::provider::Instance,
+) -> Result<()> {
+    if !ctx.interactive() {
+        return Ok(());
+    }
+    let editor = crate::picker::pick(ctx, after_up_screen(last_editor(&ctx.env)))?;
+    if editor == "none" {
+        return Ok(());
+    }
+    instance.edit(
+        ctx,
+        Some(&editor),
+        crate::config::nvim_config(cfg)?.as_ref(),
+    )
+}
 
 pub fn editor_label(editor: &str) -> Option<&'static str> {
     EDITORS
@@ -45,11 +130,8 @@ pub fn after_up_screen(last: Option<String>) -> Screen<String, String> {
     let labels = last.clone();
     let options = move || {
         let mut options = Vec::new();
-        if let Some(last) = &labels {
-            options.push(Opt::new(
-                "default".to_string(),
-                format!("Open in {}", editor_label(last).unwrap_or(last)),
-            ));
+        if labels.is_some() {
+            options.push(Opt::new("default".to_string(), "Open editor"));
         }
         options.push(Opt::new("select".to_string(), "Select editor..."));
         options.push(Opt::new("none".to_string(), "Don't open"));
@@ -67,29 +149,11 @@ pub fn after_up_screen(last: Option<String>) -> Screen<String, String> {
     Screen::new("Open workspace", options, select)
 }
 
-/// `shutil.which`: the first executable `name` on `PATH`.
-pub fn which(env: &Env, name: &str) -> Option<PathBuf> {
-    use std::os::unix::fs::PermissionsExt;
-
-    let executable = |path: &Path| {
-        std::fs::metadata(path).is_ok_and(|m| !m.is_dir() && m.permissions().mode() & 0o111 != 0)
-    };
-    if name.contains('/') {
-        let path = PathBuf::from(name);
-        return executable(&path).then_some(path);
-    }
-    let search = env.get("PATH").unwrap_or("/bin:/usr/bin");
-    search
-        .split(':')
-        .map(|dir| Path::new(dir).join(name))
-        .find(|path| executable(path))
-}
-
 pub fn check_editor(env: &Env, editor: &str) -> Result<()> {
     if editor_label(editor).is_none() {
         return Err(Error::msg(format!("Unknown editor: {editor}")));
     }
-    if editor != "nvim" && which(env, editor).is_none() {
+    if editor != "nvim" && crate::process::which(env, editor).is_none() {
         let hint = match editor {
             "cursor" => {
                 "In Cursor's command palette, run 'Shell Command: Install cursor command in PATH'."
@@ -155,7 +219,8 @@ fi
 
 pub fn nvim_session(directory: &str) -> String {
     format!(
-        "export PATH=\"$HOME/.local/bin:$PATH\"; cd -- {} && if command -v tmux >/dev/null 2>&1; then exec tmux new-session -A -s gpu-nvim nvim; else exec nvim; fi",
+        "export PATH=\"$HOME/.local/bin:$PATH\"; cd -- {} && if command -v tmux >/dev/null 2>&1; then exec tmux \
+            new-session -A -s gpu-nvim nvim; else exec nvim; fi",
         shell_quote(directory)
     )
 }
@@ -166,7 +231,7 @@ fn checked(ctx: &Ctx, cmd: Cmd) -> Result<()> {
     let program = cmd.program().to_string();
     let output = ctx
         .run(&cmd)
-        .map_err(|e| Error::msg(e.python_text(&program)))?;
+        .map_err(|e| Error::msg(e.describe(&program)))?;
     if output.code != 0 {
         return Err(Error::msg(format!(
             "{program} failed while preparing or running Neovim (exit {})",
@@ -187,17 +252,9 @@ fn expand_user(env: &Env, path: &str) -> PathBuf {
     }
 }
 
-/// `urllib.parse.quote(text, safe='/')`.
+/// Percent-encode an editor URI path while preserving slashes.
 fn url_quote(text: &str) -> String {
-    let mut out = String::new();
-    for byte in text.bytes() {
-        if byte.is_ascii_alphanumeric() || b"_.-~/".contains(&byte) {
-            out.push(byte as char);
-        } else {
-            out.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    out
+    crate::url::encode(text, b"-._~/")
 }
 
 pub fn launch_editor(
@@ -208,7 +265,7 @@ pub fn launch_editor(
     config: Option<&str>,
 ) -> Result<()> {
     if ctx.json() && editor == "nvim" {
-        return Err(crate::output::usage(
+        return Err(Error::usage(
             "Neovim needs a terminal; use --editor code or gpu exec ID -- COMMAND with --json.",
         ));
     }
@@ -233,7 +290,7 @@ pub fn launch_editor(
         // Wait for the CLI handoff, not the editor window; a failed handoff must not enter history.
         let output = ctx
             .run(&Cmd::new(&argv))
-            .map_err(|e| Error::msg(e.python_text(editor)))?;
+            .map_err(|e| Error::msg(e.describe(editor)))?;
         if output.code != 0 {
             let label = editor_label(editor).unwrap_or(editor);
             return Err(Error::msg(format!(
@@ -259,7 +316,7 @@ pub fn launch_editor(
                     "Neovim config must be a git URL or an existing local directory",
                 ));
             };
-            if which(&ctx.env, "rsync").is_none() {
+            if crate::process::which(&ctx.env, "rsync").is_none() {
                 return Err(Error::msg("Install rsync to upload a local Neovim config"));
             }
             local = Some(resolved);
@@ -267,7 +324,7 @@ pub fn launch_editor(
     }
     checked(
         ctx,
-        Cmd::new(&["ssh", "-o", "BatchMode=yes", alias, "bash -s"])
+        crate::ssh::command(&["ssh"], false, alias, "bash -s")
             .stdin(Input::Text(nvim_bootstrap(url))),
     )?;
     if let Some(local) = local {

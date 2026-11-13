@@ -35,9 +35,7 @@ pub(crate) fn max_bytes(text: &str) -> Result<u64> {
         .ok()
         .and_then(|n| n.checked_mul(scale))
         .filter(|n| *n > 0)
-        .ok_or_else(|| {
-            Error::Usage("--max-upload must be positive bytes or a K/M/G size, e.g. 1G".into())
-        })
+        .ok_or_else(|| Error::usage("--max-upload must be positive bytes or a K/M/G size, e.g. 1G"))
 }
 
 pub(crate) fn secret_path(path: &Path) -> bool {
@@ -96,7 +94,7 @@ fn git_file(ctx: &Ctx, cwd: &Path, args: &[&str]) -> Result<Option<Vec<u8>>> {
                 .stdout_file(output.path())
                 .timeout(Some(30.0)),
         )
-        .map_err(|e| Error::msg(e.python_text("git")))?;
+        .map_err(|e| Error::msg(e.describe("git")))?;
     Ok((result.code == 0)
         .then(|| fs::read(output.path()))
         .transpose()?)
@@ -114,7 +112,9 @@ pub(crate) fn prepare(ctx: &Ctx, cwd: &Path, cap: u64) -> Result<Upload> {
             let stage = git_file(ctx, &root, &["ls-files", "--stage", "-z"])?
                 .ok_or_else(|| Error::msg("Cannot enumerate git files."))?;
             if stage.split(|b| *b == 0).any(|s| s.starts_with(b"160000 ")) {
-                return Err(Error::Usage("gpu run phase 1 does not support submodules; upload a project without gitlinks.".into()));
+                return Err(Error::usage(
+                    "gpu run does not upload git submodules; upload a project without gitlinks.",
+                ));
             }
             let list = git_file(
                 ctx,
@@ -172,7 +172,8 @@ pub(crate) fn prepare(ctx: &Ctx, cwd: &Path, cap: u64) -> Result<Upload> {
     }
     if bytes > cap {
         sizes.sort_by_key(|a| std::cmp::Reverse(a.0));
-        return Err(Error::Usage(format!("Upload is {bytes} bytes, above --max-upload {cap}. Largest: {}. Ignore them in .gitignore or raise --max-upload.", sizes.iter().take(5).map(|(s,p)| format!("{} ({s})", p.display())).collect::<Vec<_>>().join(", "))));
+        return Err(Error::usage(format!("Upload is {bytes} bytes, above --max-upload {cap}. Largest: {}. Ignore them in .gitignore or raise \
+            --max-upload.", sizes.iter().take(5).map(|(s,p)| format!("{} ({s})", p.display())).collect::<Vec<_>>().join(", "))));
     }
     let mut archive = tempfile::NamedTempFile::new()?;
     {
@@ -195,9 +196,8 @@ pub(crate) fn prepare(ctx: &Ctx, cwd: &Path, cap: u64) -> Result<Upload> {
         Ok(sum.saturating_add(e?.size()))
     })?;
     if actual > cap {
-        return Err(Error::Usage(
-            "Upload grew above --max-upload while archiving; retry after files stop changing."
-                .into(),
+        return Err(Error::usage(
+            "Upload grew above --max-upload while archiving; retry after files stop changing.",
         ));
     }
     bytes = actual;
@@ -309,3 +309,6 @@ pub(crate) fn tail(path: &Path) -> Result<String> {
     file.read_to_end(&mut text)?;
     Ok(String::from_utf8_lossy(&text).into_owned())
 }
+
+#[cfg(test)]
+mod tests;

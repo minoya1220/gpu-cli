@@ -1,6 +1,5 @@
 //! Port of tests/test_uptime.py.
 
-use crate::commands::render_instances;
 use crate::instances::{format_uptime, instance_label};
 use crate::pyjson::{Dict, Value};
 use crate::testing::*;
@@ -51,7 +50,7 @@ fn test_label_and_table_share_uptime() {
             format!("123  -  -  -  {expected}  -")
         );
         let ctx = t.ctx().build();
-        render_instances(&ctx, &Value::List(vec![Value::Dict(item)])).unwrap();
+        crate::instances::render_table(&ctx, &[item], false).unwrap();
         let output = out(&ctx);
         assert!(
             output

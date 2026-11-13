@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import tomllib
 import unittest
 
 STUB = r'''
@@ -13,6 +14,7 @@ __version__ = "1.6.3"
 class AuthError(Exception): pass
 class ResourceExhaustedError(Exception): pass
 class ImageBuildError(Exception): pass
+class InvalidError(Exception): pass
 class NotFoundError(Exception): pass
 class Billing:
     def rates(self):
@@ -23,18 +25,27 @@ class Workspace:
     @staticmethod
     def from_context(): return SimpleNamespace(name="offline", billing=Billing())
 class Image:
+    def __init__(self): self.has_uv = False
     @staticmethod
     def from_registry(name): return Image()
     @staticmethod
     def debian_slim(**kw): return Image()
     def pip_install(self, *args):
-        assert args == ("uv==0.10.4",)
+        raise AssertionError("bootstrap must work without Python/pip")
+    def dockerfile_commands(self, *commands):
+        # Consume the emitted image recipe, not helper source. Model the COPY
+        # of pinned, standalone executables without requiring a Python layer.
+        import shlex
+        assert len(commands) == 1
+        instruction, source, *paths = shlex.split(commands[0])
+        assert instruction.upper() == "COPY"
+        assert source == "--from=ghcr.io/astral-sh/uv:0.10.4"
+        assert set(paths[:-1]) == {"/uv", "/uvx"}
+        assert paths[-1].rstrip("/") == "/usr/local/bin"
+        self.has_uv = True
         return self
 class App:
-    @staticmethod
-    def lookup(name, **kw):
-        assert name == "gpu-cli"
-        return object()
+    pass
 class AsyncCall:
     def __init__(self, value): self.value = value
     async def aio(self, *args, **kw): return self.value
@@ -59,12 +70,22 @@ class Sandbox:
     object_id = "sb-test"
     def __init__(self): self.exec = AsyncCall(Process())
     @staticmethod
-    def create(*args, **kw):
+    async def allocate(*args, **kw):
+        assert kw["image"].has_uv
         assert kw["cpu"] == (4, 4)
         assert kw["memory"] == (16384, 16384)
         assert kw["timeout"] == 1800
         assert "secrets" not in kw and "env" not in kw
         assert kw["tags"]["gpu-cli"] == "true"
+        if os.getenv("SLOW_CREATE"):
+            import asyncio
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                print("pending-terminated", file=__import__("sys").stderr)
+                raise
+        if os.getenv("FAIL_KIND"):
+            raise globals()[os.environ["FAIL_KIND"]]("private-canary")
         return Sandbox()
     @staticmethod
     def from_id(id):
@@ -79,6 +100,8 @@ class Sandbox:
         assert kw["wait"] is True
         os.environ["FINISHED"] = "1"
     def get_tags(self): return {"gpu-cli": "true", "run_id": "test"}
+Sandbox.create = SimpleNamespace(aio=Sandbox.allocate)
+App.lookup = AsyncCall(object())
 '''
 
 
@@ -87,7 +110,13 @@ class HelperTest(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         package = Path(self.temp.name) / "modal"
         package.mkdir()
-        (package / "__init__.py").write_text(STUB)
+        # PEP 723 metadata is the uv dependency contract: consume it as TOML
+        # and make the stub report that version, so runtime checks cannot drift.
+        source = Path(os.environ["HELPER_PATH"]).read_text()
+        metadata = source.split("# /// script\n", 1)[1].split("# ///", 1)[0]
+        dependencies = tomllib.loads("\n".join(line.removeprefix("# ") for line in metadata.splitlines()))["dependencies"]
+        self.version = dependencies[0].removeprefix("modal==")
+        (package / "__init__.py").write_text(STUB.replace('__version__ = "1.6.3"', f'__version__ = {self.version!r}'))
         (package / "config.py").write_text('import os\nclass Config:\n def get(self, key): return None if os.getenv("NO_TOKEN") else {"token_id":"test-id", "token_secret":"private-canary"}.get(key)\nconfig=Config()\n')
         self.env = {"PATH": os.environ.get("PATH", ""), "PYTHONPATH": self.temp.name,
                     "PYTHONDONTWRITEBYTECODE": "1"}
@@ -102,11 +131,11 @@ class HelperTest(unittest.TestCase):
 
     def test_check_and_rates(self):
         self.assertEqual(json.loads(self.call("check").stdout),
-                         {"workspace": "offline", "environment": "main", "client_version": "1.6.3"})
+                         {"workspace": "offline", "environment": "main", "client_version": self.version})
         self.assertEqual(json.loads(self.call("rates").stdout)["gpu_hour_cost_t4"], "0.59")
 
     def test_errors_are_typed_and_never_echo_secrets(self):
-        for kind in ["AuthError", "ResourceExhaustedError", "ImageBuildError"]:
+        for kind in ["AuthError", "ResourceExhaustedError", "ImageBuildError", "InvalidError"]:
             out = self.call("rates", FAIL_KIND=kind)
             self.assertEqual(out.returncode, 1)
             self.assertEqual(json.loads(out.stdout)["error"]["kind"], kind)
@@ -119,10 +148,33 @@ class HelperTest(unittest.TestCase):
         out = self.call("create", data=json.dumps(spec).encode())
         self.assertEqual(out.returncode, 0, out.stdout)
         self.assertEqual(json.loads(out.stdout)["id"], "sb-test")
+        out = self.call("create", "0.01", data=json.dumps(spec).encode(), SLOW_CREATE="1")
+        self.assertEqual(json.loads(out.stdout)["error"]["kind"], "SchedulingTimeout")
+        self.assertIn(b"pending-terminated", out.stderr)
+        self.assertNotIn(b"private-canary", out.stdout + out.stderr)
         spec["env"] = {"TOKEN": "private-canary"}
         out = self.call("create", data=json.dumps(spec).encode())
         self.assertEqual(out.returncode, 1)
         self.assertNotIn(b"private-canary", out.stdout + out.stderr)
+
+    def test_pythonless_registry_bootstrap_and_create_diagnostics(self):
+        spec = {"gpu": "T4", "image": "nvidia/cuda:12.8.1-devel-ubuntu24.04",
+                "cpu": 4, "memory": 16384, "timeout": 1800,
+                "tags": {"run_id": "test"}, "command": ["true"]}
+        data = json.dumps(spec).encode()
+        out = self.call("create", data=data)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertEqual(json.loads(out.stdout)["id"], "sb-test")
+        for kind, hint in [("InvalidError", "account/billing"),
+                           ("ImageBuildError", "build logs in the Modal dashboard")]:
+            out = self.call("create", data=data, FAIL_KIND=kind)
+            self.assertEqual(out.returncode, 1)
+            error = json.loads(out.stdout)["error"]
+            self.assertEqual(error["kind"], kind)
+            self.assertIn(hint, error["message"])
+            self.assertNotIn(b"private-canary", out.stdout + out.stderr)
+            self.assertNotIn("helper failed", error["message"])
+            self.assertLess(len(error["message"]), 256)
 
     def test_byte_exact_exec_and_remote_exit(self):
         out = self.call("exec", "sb-test", "--", "cat", data=b"\x00\xff\r\n")

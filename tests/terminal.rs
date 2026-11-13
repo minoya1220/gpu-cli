@@ -69,7 +69,6 @@ impl Terminal {
             .stdin(Stdio::from(slave.try_clone().unwrap()))
             .stdout(Stdio::from(slave.try_clone().unwrap()))
             .stderr(Stdio::from(slave));
-        // A new session without a controlling terminal, like Python's start_new_session.
         unsafe {
             command.pre_exec(|| {
                 rustix::process::setsid().map_err(std::io::Error::from)?;
@@ -514,7 +513,15 @@ fn test_auto_tpu_prices_use_stubs_and_without_setup_explain_the_gate() {
         if configured {
             let config = sandbox.root.join("config/gpu");
             std::fs::create_dir_all(&config).unwrap();
-            std::fs::write(config.join("config.json"),r#"{"gcp":{"setup":{"version":1,"project":"test-project"},"project":"test-project","zone":"us-east5-b","expiry":{"queue":"gpu-expiry","location":"us-central1","service_account":"123456-compute@developer.gserviceaccount.com"}}}"#).unwrap();
+            std::fs::write(
+                config.join("config.json"),
+                common::gcp_config(
+                    Some("us-east5-b"),
+                    None,
+                    Some("123456-compute@developer.gserviceaccount.com"),
+                ),
+            )
+            .unwrap();
             sandbox.gcp_reads("[]", true);
             sandbox.stub(
                 "gcloud",
@@ -629,7 +636,11 @@ fn test_tpu_category_and_type_search_continue_into_cloud_dry_run() {
         let sandbox = Sandbox::new();
         let config = sandbox.root.join("config/gpu");
         std::fs::create_dir_all(&config).unwrap();
-        std::fs::write(config.join("config.json"), r#"{"gcp":{"setup":{"version":1,"project":"test-project"},"project":"test-project","zone":"us-central1-a","runtime":"v2-alpha-tpuv5lite","expiry":{"queue":"gpu-expiry","location":"us-central1","service_account":"reaper@test-project.iam.gserviceaccount.com"}}}"#).unwrap();
+        std::fs::write(
+            config.join("config.json"),
+            common::gcp_config(Some("us-central1-a"), Some("v2-alpha-tpuv5lite"), None),
+        )
+        .unwrap();
         sandbox.gcp_reads("[]", false);
         // The only cloud calls allowed are read-only catalog requests. All
         // lifecycle, IAM and task operations fail if this dry run reaches them.
@@ -671,7 +682,7 @@ esac
             term.wait(with_footer(on("Destroy after (e.g. 2h)"), "← back"));
             assert!(shows("30m, 2h or 1d")(&term));
             term.press("30s");
-            term.press_until(RIGHT, shows("Choose 1 minute to 29 days"));
+            term.press_until(RIGHT, shows("Expiry must be 1 minute–29 days"));
             term.press_until(BACK, on("TPU zone"));
             term.press_until(RIGHT, on("Destroy after (e.g. 2h)"));
             term.press("2h");
@@ -810,7 +821,11 @@ fn test_type_first_priced_zones_and_last_zone_highlight_in_terminal() {
     let sandbox = Sandbox::new();
     let config = sandbox.root.join("config/gpu");
     std::fs::create_dir_all(&config).unwrap();
-    std::fs::write(config.join("config.json"),r#"{"gcp":{"setup":{"version":1,"project":"test-project"},"project":"test-project","expiry":{"queue":"gpu-expiry","location":"us-central1","service_account":"reaper@test-project.iam.gserviceaccount.com"}}}"#).unwrap();
+    std::fs::write(
+        config.join("config.json"),
+        common::gcp_config(None, None, None),
+    )
+    .unwrap();
     let history = sandbox.history_path();
     std::fs::create_dir_all(history.parent().unwrap()).unwrap();
     std::fs::write(&history, r#"{"gcp_zone:test-project":["us-central1-a"]}"#).unwrap();
@@ -891,10 +906,13 @@ fn test_vast_confirmation_left_restores_offer_and_only_yes_enter_creates() {
     .read_in_chunks(16);
     term.wait(on("Offer: RTX 4090"));
     term.wait(shows("id=100"));
-    term.press_until(RIGHT, with_footer(shows("Type yes:"), "← back"));
+    term.press_until(
+        RIGHT,
+        with_footer(shows("Type 'yes' to confirm:"), "← back"),
+    );
     assert_eq!(
         term.title(),
-        "Launch RTX 4090 container for gpu-cli at $0.30/hr?"
+        "Launch RTX 4090 container for gpu-cli at $0.300/hr?"
     );
     assert_eq!(term.last_line(), "← back");
     assert_eq!(
@@ -919,8 +937,11 @@ fn test_vast_confirmation_left_restores_offer_and_only_yes_enter_creates() {
         .calls()
         .iter()
         .any(|a| a.iter().any(|s| s == "create")));
-    term.press_until(ENTER, with_footer(shows("Type yes:"), "← back"));
-    assert!(!shows("Type yes: ye")(&term));
+    term.press_until(
+        ENTER,
+        with_footer(shows("Type 'yes' to confirm:"), "← back"),
+    );
+    assert!(!shows("Type 'yes' to confirm: ye")(&term));
     term.press("yes");
     term.press(RIGHT);
     term.pump(Duration::from_millis(100));
@@ -977,7 +998,10 @@ fn test_tpu_confirmation_left_restores_filtered_zone_in_direct_and_shared_flows(
             term.wait(on("TPU zone"));
         }
         term.press_until("us-east5-b", shows("Filter: us-east5-b"));
-        term.press_until(ENTER, with_footer(shows("Type yes:"), "← back"));
+        term.press_until(
+            ENTER,
+            with_footer(shows("Type 'yes' to confirm:"), "← back"),
+        );
         assert!(term
             .title()
             .starts_with("Launch v6e-1 Spot in us-east5-b for $"));
@@ -995,8 +1019,11 @@ fn test_tpu_confirmation_left_restores_filtered_zone_in_direct_and_shared_flows(
             .calls()
             .iter()
             .any(|a| a.iter().any(|s| s == "create" || s == "create-http-task")));
-        term.press_until(RIGHT, with_footer(shows("Type yes:"), "← back"));
-        assert!(!shows("Type yes: ye")(&term));
+        term.press_until(
+            RIGHT,
+            with_footer(shows("Type 'yes' to confirm:"), "← back"),
+        );
+        assert!(!shows("Type 'yes' to confirm: ye")(&term));
         term.press_until("yes\r", shows("Open workspace"));
         term.press("2");
         assert_eq!(term.exit_status(), 0, "{}", term.output_text());
@@ -1092,9 +1119,9 @@ fn test_ls_is_one_compact_aligned_table_in_a_real_terminal() {
     assert_eq!(
         term.lines(),
         [
-            "ID          Provider  Type      Status    Price     Uptime",
-            "30306428    vast      RTX 4090  created   $0.10/hr  5m",
-            "gpu-uwhcp7  gcp       v5e-1     deleting  $0.36/hr  7m",
+            "ID          Provider  Type      Status    Price      Uptime",
+            "30306428    vast      RTX 4090  created   $0.102/hr  5m",
+            "gpu-uwhcp7  gcp       v5e-1     deleting  $0.359/hr  7m",
         ]
     );
     assert_aligned(&term, "$");
@@ -1248,12 +1275,12 @@ fn test_tpu_retry_manual_zone_confirmation_keeps_back_navigation() {
             "2h",
         ],
     );
-    term.wait(shows("Type yes:"));
+    term.wait(shows("Type 'yes' to confirm:"));
     term.press("yes\r");
     term.wait(shows("Retry v5e-1 Spot"));
     term.press_until("2", shows("TPU zone"));
     term.press_until("us-central1-a", shows("Filter: us-central1-a"));
-    term.press_until(ENTER, shows("Type yes:"));
+    term.press_until(ENTER, shows("Type 'yes' to confirm:"));
     term.press("ye");
     term.press_until(LEFT, shows("TPU zone"));
     assert!(shows("Filter: us-central1-a")(&term));
@@ -1269,7 +1296,7 @@ fn test_tpu_retry_manual_zone_confirmation_keeps_back_navigation() {
         !sandbox.root.join("gcp-task.json").exists(),
         "back must not arm another paid attempt"
     );
-    term.press_until(ENTER, shows("Type yes:"));
+    term.press_until(ENTER, shows("Type 'yes' to confirm:"));
     term.press_until("yes\r", shows("Open workspace"));
     term.press("2");
     assert_eq!(term.exit_status(), 0, "{}", term.output_text());
@@ -1308,7 +1335,7 @@ fn test_tpu_wait_timer_counts_in_place_and_clears_for_retry_and_results() {
             "2h",
         ],
     );
-    term.wait(shows("Type yes:"));
+    term.wait(shows("Type 'yes' to confirm:"));
     let confirmation = term
         .lines()
         .into_iter()
@@ -1451,7 +1478,7 @@ fn test_tpu_wait_timer_clears_before_a_create_error() {
 }
 
 #[test]
-fn test_tpu_post_launch_editor_then_edit_and_cursor_use_instance_picker() {
+fn test_tpu_post_launch_editor_then_edit_uses_instance_picker() {
     let sandbox = Sandbox::new();
     sandbox.gcp_lifecycle();
     let history = sandbox.history_path();
@@ -1467,11 +1494,11 @@ fn test_tpu_post_launch_editor_then_edit_and_cursor_use_instance_picker() {
     term.press_until(RIGHT, on("TPU capacity"));
     term.press_until("2", on("TPU zone"));
     term.press_until("us-east5-b", shows("Filter: us-east5-b"));
-    term.press_until(RIGHT, shows("Type yes:"));
+    term.press_until(RIGHT, shows("Type 'yes' to confirm:"));
     term.press_until("yes\r", |t| {
         shows("Open workspace")(t) && shows("Don't open")(t)
     });
-    assert!(shows("Open in Cursor")(&term));
+    assert!(shows("Open editor")(&term));
     assert!(shows("Select editor...")(&term));
     assert!(shows("Don't open")(&term));
     term.press(DOWN);
@@ -1481,7 +1508,8 @@ fn test_tpu_post_launch_editor_then_edit_and_cursor_use_instance_picker() {
     assert_eq!(term.exit_status(), 0, "{}", term.output_text());
     assert!(term.output_text().contains("CREATING"));
     assert!(term.output_text().contains("Opened VS Code"));
-    for (command, tool) in [("edit", "code"), ("cursor", "cursor")] {
+    {
+        let (command, tool) = ("edit", "code");
         if command == "edit" {
             let nodes = sandbox.root.join("gcp-nodes.json");
             let data = std::fs::read_to_string(&nodes).unwrap();
@@ -1637,7 +1665,11 @@ fn test_cloud_generation_and_size_left_restores_gpu_page() {
         let sandbox = Sandbox::new();
         let config = sandbox.root.join("config/gpu");
         std::fs::create_dir_all(&config).unwrap();
-        std::fs::write(config.join("config.json"),r#"{"gcp":{"setup":{"version":1,"project":"test-project"},"project":"test-project","expiry":{"queue":"gpu-expiry","location":"us-central1","service_account":"reaper@test-project.iam.gserviceaccount.com"}}}"#).unwrap();
+        std::fs::write(
+            config.join("config.json"),
+            common::gcp_config(None, None, None),
+        )
+        .unwrap();
         sandbox.gcp_reads("[]", true);
         sandbox.stub(
             "gcloud",
@@ -1738,9 +1770,12 @@ fn test_run_without_expire_asks_for_it_in_a_terminal_then_opens_the_gpu_picker()
 }
 
 #[test]
-fn test_live_run_picker_lists_no_modal_rows_and_never_starts_the_modal_helper() {
+fn test_explicit_vast_live_run_picker_never_starts_the_modal_helper() {
     let sandbox = Sandbox::new();
-    let mut term = Terminal::start(&sandbox, &["run", "--expire", "30m", "--", "true"]);
+    let mut term = Terminal::start(
+        &sandbox,
+        &["run", "--provider", "vast", "--expire", "30m", "--", "true"],
+    );
     term.wait(on("GPU"));
     term.wait(shows("Consumer RTX 40 series        from $0.300/hr"));
     assert!(!shows("Modal")(&term));
@@ -1761,7 +1796,6 @@ fn test_run_with_modal_provider_and_no_gpu_opens_a_modal_only_picker() {
             "modal",
             "--expire",
             "30m",
-            "--dry-run",
             "--",
             "true",
         ],

@@ -4,10 +4,10 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use crate::commands::wait_for_lifecycle;
 use crate::process::Output;
-use crate::ssh_config::update_host;
 use crate::testing::*;
+use crate::vast::instance::wait_for_lifecycle;
+use crate::vast::ssh_config::update_host;
 
 #[test]
 fn test_lifecycle_verifies_before_reporting() {

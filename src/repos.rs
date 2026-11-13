@@ -1,20 +1,18 @@
 //! Repository choices shared by flags, picker, and startup generation.
 
-use std::io::Write;
 use std::path::PathBuf;
 use std::sync::LazyLock;
 
 use regex::Regex;
 
 use crate::ctx::Env;
-use crate::error::{os_error, Error, Result};
+use crate::error::{Error, Result};
 use crate::pyfmt::is_printable;
 use crate::pyjson::{self, Value};
 
 pub const ERROR: &str =
     "Use a bare repo name, owner/name, https://host/path/repo.git, or git@host:path/repo.git (no credentials or query).";
 
-/// A repository pick. `NoRepo` is written as `""` wherever Python writes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Repo {
     NoRepo,
@@ -22,7 +20,6 @@ pub enum Repo {
 }
 
 impl Repo {
-    /// The flag value: an empty string means no repository, as in Python.
     pub fn from_arg(value: &str) -> Repo {
         if value.is_empty() {
             Repo::NoRepo
@@ -48,6 +45,10 @@ impl Repo {
 
 static PART: &str = r"[A-Za-z0-9._-]+";
 static NAME: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[A-Za-z0-9._-]+$").unwrap());
+/// A single repository name: GitHub's character set, never `.` or `..`.
+pub(crate) fn is_name(name: &str) -> bool {
+    name != "." && name != ".." && NAME.is_match(name)
+}
 static PATH: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(&format!(r"^{PART}(?:/{PART})*$")).unwrap());
 static NETLOC: LazyLock<Regex> =
@@ -125,7 +126,7 @@ pub fn resolve_repo(repo: &str, owner: &str) -> Result<(String, String)> {
             return Err(reject());
         }
         if !repo.contains('/') && owner.is_empty() {
-            return Err(Error::Usage("No GitHub owner configured. Use --repo OWNER/NAME or set owner in gpu/config.json (gh api user can infer it).".into()));
+            return Err(Error::usage("No GitHub owner configured. Use --repo OWNER/NAME or set owner in gpu/config.json (gh api user can infer it)."));
         }
         let path = if repo.contains('/') {
             repo.to_string()
@@ -146,7 +147,7 @@ pub fn resolve_repo(repo: &str, owner: &str) -> Result<(String, String)> {
     }
     let name = path.rsplit('/').next().unwrap_or("");
     let name = name.strip_suffix(".git").unwrap_or(name);
-    if name == "." || name == ".." || !NAME.is_match(name) {
+    if !is_name(name) {
         return Err(reject());
     }
     Ok((clone_url, name.to_string()))
@@ -155,9 +156,7 @@ pub fn resolve_repo(repo: &str, owner: &str) -> Result<(String, String)> {
 /// Account-scoped repository names, never credentials.
 pub fn cache_path(env: &Env, owner: &str) -> PathBuf {
     let safe_owner = UNSAFE_OWNER.replace_all(owner, "_");
-    env.xdg("XDG_CACHE_HOME", ".cache")
-        .join("gpu")
-        .join(format!("repos-{safe_owner}.json"))
+    crate::cache::dir(env).join(format!("repos-{safe_owner}.json"))
 }
 
 fn names(value: &Value) -> Vec<String> {
@@ -167,7 +166,7 @@ fn names(value: &Value) -> Vec<String> {
     items
         .iter()
         .filter_map(Value::as_str)
-        .filter(|name| NAME.is_match(name) && *name != "." && *name != "..")
+        .filter(|name| is_name(name))
         .map(String::from)
         .collect()
 }
@@ -179,18 +178,10 @@ pub fn load_cached_repos(env: &Env, owner: &str) -> Option<Vec<String>> {
 
 pub fn save_cached_repos(env: &Env, owner: &str, repos: &[String]) -> Result<()> {
     let path = cache_path(env, owner);
-    let parent = path.parent().unwrap_or(&path).to_path_buf();
-    std::fs::create_dir_all(&parent).map_err(|e| os_error(&e, &parent))?;
     let list = Value::List(repos.iter().map(|r| Value::str(r.as_str())).collect());
     let text = pyjson::dumps(
         &Value::List(names(&list).into_iter().map(Value::Str).collect()),
         None,
     );
-    let mut temp = tempfile::Builder::new()
-        .prefix("tmp")
-        .tempfile_in(&parent)
-        .map_err(|e| os_error(&e, &parent))?;
-    temp.write_all(text.as_bytes())?;
-    temp.persist(&path).map_err(|e| os_error(&e.error, &path))?;
-    Ok(())
+    crate::atomic_file::update(&path, |_| Ok(text.into_bytes()))
 }

@@ -1,4 +1,5 @@
-//! Local deadline parsing and SSH transport; no account credentials cross SSH.
+//! Local deadline parsing and formatting, and the `expiry` result every
+//! provider reports.
 
 use std::sync::LazyLock;
 
@@ -8,16 +9,8 @@ use jiff::{Span, Timestamp};
 use regex::Regex;
 
 use crate::ctx::{Ctx, Env};
-use crate::error::{Error, Result};
-use crate::process::{Cmd, Input, RunError};
-use crate::pyfmt::{is_digits, py_float, shell_join, shell_quote};
-use crate::pyjson::{self, Dict, Value};
-
-/// The remote controller, sent over SSH stdin and run with the instance's bash.
-pub const REMOTE_SOURCE: &str = include_str!("../remote/expiry_remote.sh");
-
-/// The boot-time guard the onstart script starts (`crate::startup::expiry_guard`).
-pub const GUARD_SOURCE: &str = include_str!("../remote/expiry_guard.sh");
+use crate::pyfmt::is_digits;
+use crate::pyjson::{Dict, Value};
 
 static DURATION: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^(?:([0-9]+)d)?(?:([0-9]+)h)?(?:([0-9]+)m)?(?:([0-9]+)s)?$").unwrap()
@@ -60,7 +53,7 @@ pub fn parse_expire_arguments(
     let mut values = values.to_vec();
     let id = if values.first().is_some_and(|v| {
         is_digits(v)
-            || v.starts_with("gcp:")
+            || crate::provider::qualified(v)
             || (values.len() == 2 && crate::provider::short_candidate(v))
     }) {
         Some(values.remove(0))
@@ -75,8 +68,6 @@ pub fn parse_expire_arguments(
     Ok((id, values.remove(0)))
 }
 
-/// The system time zone: `TZ` from the environment snapshot, else the OS
-/// default (`/etc/localtime`), as Python's `astimezone()` uses.
 pub fn local_zone(env: &Env) -> TimeZone {
     let Some(tz) = env.get("TZ") else {
         return TimeZone::try_system().unwrap_or(TimeZone::UTC);
@@ -242,7 +233,6 @@ fn digits(s: &[u8], pos: usize, n: usize) -> Option<(i64, usize)> {
     Some((value, pos + n))
 }
 
-/// Where the date ends, following CPython's `_find_isoformat_datetime_separator`.
 fn separator_position(s: &[u8]) -> Option<usize> {
     let len = s.len();
     if len == 7 {
@@ -351,8 +341,6 @@ fn parse_date(s: &[u8], end: usize) -> std::result::Result<(i64, i64, i64), Date
     Ok((year, month, day))
 }
 
-/// `[HH[:?MM[:?SS[.ffffff]]]]` between `start` and `end`, as CPython's
-/// `parse_hh_mm_ss_ff`; the flag says whether text follows what was parsed.
 fn parse_hms(s: &[u8], start: usize, end: usize) -> Option<([i64; 4], bool)> {
     let mut values = [0i64; 4];
     let mut p = start;
@@ -395,7 +383,6 @@ fn invalid_iso(text: &str) -> String {
     )
 }
 
-/// `datetime.fromisoformat` as in CPython 3.11+.
 pub fn fromisoformat(text: &str) -> std::result::Result<IsoDateTime, String> {
     let s = text.as_bytes();
     let invalid = || invalid_iso(text);
@@ -476,107 +463,9 @@ pub fn fromisoformat(text: &str) -> std::result::Result<IsoDateTime, String> {
     Ok(IsoDateTime { wall, offset })
 }
 
-/// The `ssh` argv; the remote command line holds only validated words.
-pub fn remote_command(
-    alias: &str,
-    instance_id: &str,
-    action: &str,
-    deadline: Option<Timestamp>,
-) -> Result<Vec<String>> {
-    if !is_digits(instance_id) || alias != format!("vast-{instance_id}") {
-        return Err(Error::msg("Invalid managed instance SSH alias or ID."));
-    }
-    if !matches!(action, "arm" | "show" | "cancel") {
-        return Err(Error::msg("Invalid expiry action."));
-    }
-    let mut args = vec![
-        "bash".to_string(),
-        "-s".into(),
-        "--".into(),
-        action.into(),
-        instance_id.into(),
-    ];
-    if action == "arm" {
-        let deadline = deadline.ok_or_else(|| Error::msg("Arming requires a deadline."))?;
-        args.push(deadline_seconds(deadline).to_string());
-    }
-    Ok([
-        "ssh",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "ConnectTimeout=10",
-        alias,
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .chain([shell_join(&args)])
-    .collect())
-}
-
 /// A deadline as whole epoch seconds, rounded up so it is never early.
 pub fn deadline_seconds(deadline: Timestamp) -> i64 {
     deadline.as_second() + i64::from(deadline.subsec_nanosecond() > 0)
-}
-
-/// The script sent on stdin: the source as a variable, then the source.
-pub fn transport_payload() -> String {
-    format!(
-        "GPU_EXPIRE_SOURCE={}\n{REMOTE_SOURCE}",
-        shell_quote(REMOTE_SOURCE)
-    )
-}
-
-pub fn manage_expiry(
-    ctx: &Ctx,
-    alias: &str,
-    instance_id: &str,
-    action: &str,
-    deadline: Option<Timestamp>,
-) -> Result<Dict> {
-    let command = remote_command(alias, instance_id, action, deadline)?;
-    let cmd = Cmd::new(&command)
-        .stdin(Input::Text(transport_payload()))
-        .timeout(Some(45.0));
-    let result =
-        match ctx.run(&cmd) {
-            Ok(result) => result,
-            Err(RunError::TimedOut) => return Err(Error::msg(
-                format!("Expiry SSH timed out; arming/cancellation is unverified. Run gpu expire {instance_id} show."),
-            )),
-            Err(other) => return Err(Error::msg(other.python_text("ssh"))),
-        };
-    // Never echo SSH stderr or arbitrary remote text: it may contain secrets.
-    let reply = pyjson::loads(&result.stdout).unwrap_or(Value::Dict(Dict::new()));
-    let message = |code: &str| {
-        match code {
-        "credentials" => "Instance-scoped CONTAINER_ID/CONTAINER_API_KEY missing or mismatched; expiry NOT armed.".to_string(),
-        "past" => format!("Deadline passed before SSH was ready; expiry NOT armed. Run gpu expire {instance_id} 2h."),
-        "verification" => format!("Timer startup verification failed; new expiry NOT armed (previous deadline unchanged). Run gpu expire {instance_id} show."),
-        _ => format!("Remote expiry operation failed; check bash, curl, flock and writable ~/.local/state/gpu-expire; run gpu expire {instance_id} show."),
-    }
-    };
-    let error = reply.get("error").filter(|e| crate::pyfmt::truthy(e));
-    let Value::Dict(reply) = reply.clone() else {
-        return Err(Error::msg(message("remote")));
-    };
-    if result.code != 0 || error.is_some() {
-        let code = error.and_then(Value::as_str).unwrap_or("remote");
-        return Err(Error::msg(message(code)));
-    }
-    let status = reply.get("status").and_then(Value::as_str).unwrap_or("");
-    if !matches!(
-        status,
-        "armed" | "retrying" | "inactive" | "none" | "cancelled" | "destroy-request-accepted"
-    ) {
-        return Err(Error::msg(format!(
-            "Invalid expiry response; completion unverified. Run gpu expire {instance_id} show."
-        )));
-    }
-    if action == "arm" && status != "armed" {
-        return Err(Error::msg(message("verification")));
-    }
-    Ok(reply)
 }
 
 fn iso_offset(seconds: i32) -> String {
@@ -601,40 +490,14 @@ pub fn local_time(ctx: &Ctx, at: Timestamp) -> String {
     )
 }
 
-pub fn expiry_summary(ctx: &Ctx, instance_id: &str, reply: &Dict) -> Result<String> {
-    let status = crate::pyfmt::py_str(reply.get("status").ok_or_else(|| Error::key("status"))?);
-    if status == "none" || status == "cancelled" {
-        let suffix = if status == "cancelled" {
-            " (cancelled)."
-        } else {
-            "."
-        };
-        return Ok(format!(
-            "Instance {instance_id}: no auto-destroy deadline{suffix}"
-        ));
-    }
-    let deadline = reply
-        .get("deadline")
-        .ok_or_else(|| Error::key("deadline"))?;
-    let seconds = py_float(deadline).map_err(|_| {
-        Error::msg(format!(
-            "Expiry deadline must be a number, got {}. Run gpu expire {instance_id} show.",
-            deadline.kind()
-        ))
-    })?;
-    let micros = (seconds * 1e6).round_ties_even();
-    let deadline = Timestamp::from_microsecond(micros as i64)
-        .map_err(|_| Error::msg("year is out of range"))?;
-    let text = local_time(ctx, deadline);
-    let remaining = deadline.as_microsecond() - ctx.clock.now().as_microsecond();
-    let total = if remaining <= 0 {
-        0
-    } else {
-        (remaining + 999_999) / 1_000_000
-    };
-    let (hours, rest) = (total / 3600, total % 3600);
-    let (minutes, secs) = (rest / 60, rest % 60);
-    Ok(format!(
-        "Instance {instance_id}: auto-DESTROY at {text} (in {hours}h {minutes}m {secs}s); timer {status}. Disk will be deleted; all billing stops on destruction."
-    ))
+/// The `expiry` result every provider reports: its status and the pending
+/// deadlines.
+pub(crate) fn report(ctx: &Ctx, status: Value, deadlines: Vec<Value>) {
+    ctx.result(
+        "expiry",
+        Value::Dict(Dict::from_iter([
+            ("status".into(), status),
+            ("deadlines".into(), Value::List(deadlines)),
+        ])),
+    );
 }

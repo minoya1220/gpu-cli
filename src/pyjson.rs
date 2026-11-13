@@ -1,8 +1,7 @@
 //! JSON that reads and writes like Python's `json` module.
 //!
-//! The Python tool keeps every JSON document as plain dicts and lists and
-//! formats values with `str()`, so this module has its own value type rather
-//! than typed structs. It accepts what `json.loads` accepts (including bare
+//! The CLI's output contract preserves dictionary insertion order and
+//! Python-compatible value formatting, so this module uses its own value type. It accepts what `json.loads` accepts (including bare
 //! `NaN` and `Infinity`) and `dumps` reproduces `json.dumps` byte for byte for
 //! the indent styles the tool uses.
 

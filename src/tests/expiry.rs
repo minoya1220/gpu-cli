@@ -6,13 +6,13 @@ use jiff::Timestamp;
 
 use super::instances::{fake_vast, ssh_ready};
 use crate::ctx::Clock;
-use crate::expiry::{
-    expiry_summary, local_zone, manage_expiry, parse_duration, parse_expire_arguments, parse_when,
-    remote_command, transport_payload, REMOTE_SOURCE,
-};
+use crate::expiry::{local_zone, parse_duration, parse_expire_arguments, parse_when};
 use crate::process::{Output, RunError};
 use crate::pyjson::Value;
 use crate::testing::*;
+use crate::vast::expiry::{
+    expiry_summary, manage_expiry, remote_command, transport_payload, REMOTE_SOURCE,
+};
 
 fn now() -> Timestamp {
     "2026-01-01T12:00:00Z".parse().unwrap()
@@ -189,7 +189,6 @@ fn test_ambiguous_arguments() {
 
 #[test]
 fn test_arm_deadline_rounds_up_to_whole_seconds() {
-    // Python sends math.ceil(deadline.timestamp()).
     for (deadline, seconds) in [
         ("2023-11-14T22:13:20.25Z", "1700000001"),
         ("2023-11-14T22:13:20.000000001Z", "1700000001"),
@@ -392,7 +391,10 @@ fn test_cli_dispatch() {
         let remote = calls
             .iter()
             .find(|a| {
-                a.len() == 7 && a[4] == "ConnectTimeout=10" && a[5] == format!("vast-{instance}")
+                a.len() == 7
+                    && a[5] == format!("vast-{instance}")
+                    && a.last()
+                        .is_some_and(|remote| remote.starts_with("bash -s -- "))
             })
             .expect("expiry call");
         let words = shlex::split(remote.last().unwrap()).unwrap();

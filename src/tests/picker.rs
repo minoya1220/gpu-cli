@@ -543,7 +543,6 @@ fn test_loading_screen_stays_responsive_while_its_loader_blocks() {
 
 #[test]
 fn test_failed_load_error_splits_like_python_splitlines() {
-    // "\n".join(f"  {line}" for line in error.splitlines()) in Python.
     let job = Job::new(|| Err::<Vec<String>, _>("gh: a\rb\x0bc\r\nd\u{2028}e\n".to_string()));
     let observer = job.observer();
     let screen = Screen::new("Repository", Vec::<Opt<String>>::new, Next::Done).load(job);

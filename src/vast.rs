@@ -1,18 +1,71 @@
 //! The authenticated `vastai` CLI: offer search, instance listing, and the
 //! exact `create instance` request.
+pub mod expiry;
+pub(crate) mod instance;
+pub mod offers;
+pub(crate) mod run;
+pub(crate) mod ssh_config;
+pub mod startup;
 
 use jiff::Timestamp;
 
 use crate::config::{self, CONTAINER_ENV};
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
-use crate::offers::{offer_number, price_field};
-use crate::process::{run, run_output};
-use crate::pyfmt::{float_repr, py_str};
+use crate::process::{Cmd, Output, RunError};
+use crate::pyfmt::{float_repr, py_str, truthy};
 use crate::pyjson::{self, Dict, Value};
 use crate::redact::redact_text;
 use crate::repos::{resolve_repo, Repo};
-use crate::startup::startup_script;
+use crate::vast::offers::{offer_number, price_field};
+use crate::vast::startup::startup_script;
+
+/// Deadline for a Vast CLI call that names none.
+const CLI_TIMEOUT: f64 = 60.0;
+/// Vast subcommands that change nothing, so their failures are retryable.
+const READS: [&str; 3] = ["show", "search", "ssh-url"];
+
+/// Run `vastai ...` (`argv` starts with `vastai`), translating Vast's known
+/// failure signatures before the generic command report.
+pub(crate) fn run_output<S: AsRef<str>>(
+    ctx: &Ctx,
+    argv: &[S],
+    timeout: Option<f64>,
+) -> Result<Output> {
+    let cmd = Cmd::new(argv).timeout(Some(timeout.unwrap_or(CLI_TIMEOUT)));
+    match ctx.run(&cmd) {
+        Err(RunError::NotFound) => Err(Error::status(
+            crate::error::ExitCode::NotSetup,
+            "Install the Vast CLI, then check authentication",
+        )
+        .next("gpu setup --provider vast")),
+        Ok(output) if output.code != 0 => {
+            let detail = crate::process::failure_detail(&output);
+            if let Some(error) = crate::provider_errors::vast(&detail) {
+                return Err(error);
+            }
+            let message = if detail.is_empty() {
+                "Command failed: vastai".to_string()
+            } else {
+                detail
+            };
+            let read = argv
+                .get(1)
+                .is_some_and(|command| READS.contains(&command.as_ref()));
+            Err(if read {
+                Error::unavailable(message)
+            } else {
+                Error::msg(message)
+            })
+        }
+        result => crate::process::checked("vastai", result),
+    }
+}
+
+/// `run_output`, keeping only the trimmed stdout.
+pub(crate) fn run<S: AsRef<str>>(ctx: &Ctx, argv: &[S], timeout: Option<f64>) -> Result<String> {
+    run_output(ctx, argv, timeout).map(|output| output.stdout.trim().to_string())
+}
 
 /// The choices a create request depends on.
 pub struct RequestArgs<'a> {
@@ -71,7 +124,7 @@ impl Vast {
     pub fn create(&self, request: &[Value]) -> Result<Option<Dict>> {
         let output = run_output(&self.ctx, &argv(request)?, Some(120.0)).map_err(|error| {
             if matches!(error, Error::Timeout(_)) {
-                Error::Timeout("Vast create timed out; completion unverified. An instance may be billing. Check: gpu ls before retrying.".into())
+                Error::timeout("Vast create timed out; completion unverified. An instance may be billing. Check: gpu ls before retrying.")
             } else { error }
         })?;
         let stdout = output.stdout.trim();
@@ -96,8 +149,6 @@ impl Vast {
     }
 }
 
-/// The create request as Python builds it: every item is a string except the
-/// image, which is the raw config value.
 pub fn request(offer: &Dict, args: &RequestArgs, cfg: &Dict) -> Result<Vec<Value>> {
     let mode = args.mode;
     let script = startup_script(args.repo, mode, cfg, args.deadline)?;
@@ -124,7 +175,7 @@ pub fn run_request(
         offer,
         &args,
         cfg,
-        crate::startup::run_script(deadline)?,
+        crate::vast::startup::run_script(deadline)?,
         label,
     )
 }
@@ -195,6 +246,43 @@ pub fn argv(request: &[Value]) -> Result<Vec<String>> {
         .collect()
 }
 
+pub(crate) fn created_id(response: &Dict) -> Option<String> {
+    response
+        .get("new_contract")
+        .map(py_str)
+        .filter(|id| crate::pyfmt::is_digits(id) && id.bytes().any(|b| b != b'0'))
+}
+
+/// Summarize a `vastai create instance --raw` reply (`None`: unreadable)
+/// without echoing its secrets (`instance_api_key`).
+pub fn created_summary(reply: Option<&Dict>) -> Result<String> {
+    let Some(response) = reply else {
+        return Ok("Vast accepted the create request but its response was unreadable; run `gpu ls` to find the instance."
+            .into());
+    };
+    if !response.get("success").is_some_and(truthy) {
+        let reason = ["msg", "error"]
+            .iter()
+            .filter_map(|k| response.get(k))
+            .find(|v| truthy(v))
+            .map(py_str)
+            .unwrap_or_else(|| "unknown error".into());
+        if let Some(error) = crate::provider_errors::vast(&reason) {
+            return Err(error);
+        }
+        return Err(Error::msg(format!(
+            "Vast did not create the instance: {}",
+            redact_text(&reason)
+        )));
+    }
+    match created_id(response) {
+        None => Ok("Created instance. Next: `gpu ls` to find it.".into()),
+        Some(instance) => Ok(format!(
+            "Created instance {instance}.\nConnect: gpu ssh {instance} --exec"
+        )),
+    }
+}
+
 /// `vastai show instances --raw` as instance dicts.
 pub fn list_instances(ctx: &Ctx, timeout: Option<f64>) -> Result<Vec<Dict>> {
     let value = parse_reply(&run(
@@ -202,15 +290,12 @@ pub fn list_instances(ctx: &Ctx, timeout: Option<f64>) -> Result<Vec<Dict>> {
         &["vastai", "show", "instances", "--raw"],
         timeout,
     )?)?;
-    let unreadable = || {
-        Error::ProviderUnavailable(
-            "Vast returned an unreadable instance list. Retry: gpu ls".into(),
-        )
-    };
+    let unreadable =
+        || Error::unavailable("Vast returned an unreadable instance list. Retry: gpu ls");
     if !matches!(value, Value::List(_)) {
         return Err(unreadable());
     }
-    let instances = crate::offers::offer_dicts(value).map_err(|_| unreadable())?;
+    let instances = crate::vast::offers::offer_dicts(value).map_err(|_| unreadable())?;
     if instances.iter().any(|item| {
         item.get("id")
             .is_none_or(|id| !crate::pyfmt::is_digits(&py_str(id)))
@@ -224,7 +309,7 @@ pub fn list_instances(ctx: &Ctx, timeout: Option<f64>) -> Result<Vec<Dict>> {
 pub(crate) fn parse_reply(output: &str) -> Result<Value> {
     let value = pyjson::loads(output).map_err(|_| {
         crate::provider_errors::vast(output).unwrap_or_else(|| {
-            Error::ProviderUnavailable("Vast returned no readable data; the provider may be temporarily unavailable. Retry: gpu ls".into())
+            Error::unavailable("Vast returned no readable data; the provider may be temporarily unavailable. Retry: gpu ls")
         })
     })?;
     if let Some(dict) = value.as_dict() {
@@ -236,8 +321,8 @@ pub(crate) fn parse_reply(output: &str) -> Result<Value> {
                     }
                 }
             }
-            return Err(Error::ProviderUnavailable(
-                "Vast returned an unsuccessful reply. Retry: gpu ls".into(),
+            return Err(Error::unavailable(
+                "Vast returned an unsuccessful reply. Retry: gpu ls",
             ));
         }
     }
@@ -252,36 +337,4 @@ pub fn find_instance<'a>(instances: &'a [Dict], instance_id: &str) -> Option<&'a
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::testing::{self, FakeRunner, TestEnv};
-
-    #[test]
-    fn unreadable_instances_reply_has_retry_hint_without_raw_output() {
-        for output in ["", "Please log in: secret-token", "{broken secret-token"] {
-            let env = TestEnv::new();
-            let runner = FakeRunner::new(move |cmd| {
-                assert_eq!(cmd.argv, ["vastai", "show", "instances", "--raw"]);
-                testing::ok(output)
-            });
-            let ctx = env.ctx().runner(&runner).build();
-            let expected =
-                "Vast returned no readable data; the provider may be temporarily unavailable. Retry: gpu ls";
-            assert_eq!(list_instances(&ctx, None).unwrap_err().text(), expected);
-            for json in [false, true] {
-                assert_eq!(
-                    crate::commands::ls(&ctx, json).unwrap_err().text(),
-                    expected
-                );
-                assert!(testing::out(&ctx).is_empty());
-            }
-            assert_eq!(
-                Vast::new(&ctx)
-                    .json(&["show", "instances"])
-                    .unwrap_err()
-                    .text(),
-                expected
-            );
-        }
-    }
-}
+mod tests;

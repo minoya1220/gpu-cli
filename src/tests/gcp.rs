@@ -1,5 +1,4 @@
 //! No test in this module can invoke a real cloud command.
-#[path = "gcp_automation.rs"]
 mod automation;
 use crate::ctx::Ctx;
 use crate::gcp::TpuId;
@@ -8,7 +7,9 @@ use crate::pyjson::{self, Dict, Value};
 use crate::testing::*;
 use std::sync::{Arc, Mutex};
 
-const CONFIG: &str = r#"{"gcp":{"setup":{"version":1,"project":"test-project"},"project":"test-project","zone":"us-east5-b","runtime":"v2-alpha-tpuv6e","expiry":{"queue":"gpu-expiry","location":"us-central1","service_account":"reaper@test-project.iam.gserviceaccount.com"}}}"#;
+fn configuration() -> Dict {
+    gcp_config(Some("us-east5-b"), Some("v2-alpha-tpuv6e"))
+}
 const ID: &str = "gcp:test-project:us-east5-b:test-tpu";
 const QUEUE: &str = "projects/test-project/locations/us-central1/queues/gpu-expiry";
 const UP: &[&str] = &[
@@ -69,11 +70,10 @@ fn node(spot: bool) -> Dict {
 }
 fn fixture() -> (TestEnv, Ctx, Arc<FakeRunner>, Arc<Mutex<State>>) {
     let env = TestEnv::new();
-    let path = env.config.join("gpu");
-    std::fs::create_dir(&path).unwrap();
-    std::fs::write(path.join("config.json"), CONFIG).unwrap();
+    write_config(&env, &configuration());
     let state = Arc::new(Mutex::new(State::default()));
     let shared = state.clone();
+    let rest_state = state.clone();
     let native = move |cmd: &Cmd| {
         let mut state = shared.lock().unwrap();
         let a = strs(&cmd.argv);
@@ -85,12 +85,6 @@ fn fixture() -> (TestEnv, Ctx, Arc<FakeRunner>, Arc<Mutex<State>>) {
             return ok(
                 r#"[{"id":123,"gpu_name":"RTX 4090","actual_status":"running","instance_api_key":"not-for-output"}]"#,
             );
-        }
-        if a[0] == "gcloud" && a.get(1) == Some(&"auth") {
-            return Ok(Output::failed(
-                1,
-                "test deliberately has no Billing credentials",
-            ));
         }
         if ["code", "cursor", "zed", "ssh"].contains(&a[0]) {
             return ok("");
@@ -137,7 +131,6 @@ fn fixture() -> (TestEnv, Ctx, Arc<FakeRunner>, Arc<Mutex<State>>) {
                     }
                     return ok(&value(task));
                 }
-                "list" => return ok(&list(state.tasks.clone())),
                 "delete" => {
                     if state.fail_delete_task {
                         return Ok(Output::failed(1, "cannot delete"));
@@ -152,12 +145,8 @@ fn fixture() -> (TestEnv, Ctx, Arc<FakeRunner>, Arc<Mutex<State>>) {
             }
         }
         assert_eq!(a[1..3], ["compute", "tpus"]);
-        if a[3] == "locations" {
-            return ok(r#"[{"locationId":"us-east5-b"},{"locationId":"us-central1-a"}]"#);
-        }
         assert_eq!(a[3], "tpu-vm");
         match a[4] {
-            "accelerator-types" => if state.empty_types { ok("[]") } else { ok(r#"[{"type":"v6e-1"},{"type":"v5p-8"},{"type":"v5p-16"}]"#) },
             "list" if state.fail_presence => Ok(Output::failed(1,"PERMISSION_DENIED")),
             "list" => ok(&list(if ["us-east5-b","-"].contains(&arg(cmd,"zone").as_str()) {state.nodes.clone()} else {Vec::new()})),
             "describe" if state.fail_presence => Ok(Output::failed(1,"PERMISSION_DENIED: secret")),
@@ -179,7 +168,8 @@ fn fixture() -> (TestEnv, Ctx, Arc<FakeRunner>, Arc<Mutex<State>>) {
                 ok("{}")
             },
             "delete" => { state.nodes.clear(); ok("{}") },
-            "ssh" if a.contains(&"--dry-run") => ok("/usr/bin/ssh -t -i /tmp/test-key -o CheckHostIP=no -o HostKeyAlias=compute.123 -o UserKnownHostsFile=/tmp/known_hosts developer@192.0.2.10"),
+            "ssh" if a.contains(&"--dry-run") => ok("/usr/bin/ssh -t -i /tmp/test-key -o CheckHostIP=no -o HostKeyAlias=compute.123 -o \
+                UserKnownHostsFile=/tmp/known_hosts developer@192.0.2.10"),
             "ssh" => {
                 assert!(a.contains(&"--command=true"));
                 if state.deny_ssh {return Ok(Output::failed(1,"PERMISSION_DENIED token=do-not-print"));}
@@ -190,7 +180,58 @@ fn fixture() -> (TestEnv, Ctx, Arc<FakeRunner>, Arc<Mutex<State>>) {
         }
     };
     let runner = FakeRunner::new(move |cmd| {
-        super::gcp_transport::adapt(cmd, &native).unwrap_or_else(|| native(cmd))
+        if cmd.program() == "gcloud" && cmd.argv.get(1).is_some_and(|arg| arg == "auth") {
+            return ok("test-oauth-token");
+        }
+        super::gcp_transport::curl(cmd, |url| {
+            let state = rest_state.lock().unwrap();
+            assert!(url.starts_with("https://"));
+            if url.starts_with("https://cloudbilling.") {
+                return (403, "{}".into());
+            }
+            assert!(
+                url.contains("/projects/test-project/locations"),
+                "unscoped REST request: {url}"
+            );
+            let (key, rows) = if url.contains("/acceleratorTypes?") {
+                (
+                    "acceleratorTypes",
+                    if state.empty_types {
+                        Vec::new()
+                    } else {
+                        dicts(r#"[{"type":"v6e-1"},{"type":"v5p-8"},{"type":"v5p-16"}]"#)
+                    },
+                )
+            } else if url.contains("/nodes?") {
+                if state.fail_presence {
+                    return (403, r#"{"error":{"status":"PERMISSION_DENIED"}}"#.into());
+                }
+                (
+                    "nodes",
+                    if url.contains("/locations/-/") || url.contains("/locations/us-east5-b/") {
+                        state.nodes.clone()
+                    } else {
+                        Vec::new()
+                    },
+                )
+            } else if url.contains("/queues/gpu-expiry/tasks?") {
+                ("tasks", state.tasks.clone())
+            } else if url.contains("/locations?") {
+                (
+                    "locations",
+                    dicts(r#"[{"locationId":"us-east5-b"},{"locationId":"us-central1-a"}]"#),
+                )
+            } else {
+                panic!("unexpected REST request: {url}")
+            };
+            let mut page = Dict::new();
+            page.insert(
+                key,
+                Value::List(rows.into_iter().map(Value::Dict).collect()),
+            );
+            (200, value(page))
+        })
+        .unwrap_or_else(|| native(cmd))
     });
     let ctx = env
         .ctx()
@@ -466,7 +507,7 @@ fn tpu_listing_uses_cached_slice_prices_and_create_time_without_price_requests()
         assert_eq!(main(&ctx, &["ls", "--provider", "gcp"]), 0, "{}", err(&ctx));
         let output = out(&ctx);
         assert!(
-            output.contains(if spot { "$0.75/hr" } else { "$2.75/hr" }),
+            output.contains(if spot { "$0.750/hr" } else { "$2.750/hr" }),
             "{output}"
         );
         assert!(
@@ -529,7 +570,6 @@ fn short_tpu_ids_resolve_freshly_for_ssh_edit_expire_stop_and_down() {
     for args in [
         vec!["ssh", "gpu-uwhcp7"],
         vec!["edit", "gpu-uwhcp7", "--editor", "code"],
-        vec!["cursor", "gpu-uwhcp7"],
         vec!["expire", "gpu-uwhcp7", "2h"],
         vec!["stop", "gpu-uwhcp7"],
         vec!["down", "gpu-uwhcp7", "--yes"],
@@ -608,6 +648,37 @@ fn explicit_ssh_routes_without_listing_and_exec_uses_gcloud() {
 }
 
 #[test]
+fn tpu_edit_shares_the_vast_editor_messages_and_result_order() {
+    let (env, ctx, _runner, state) = fixture();
+    state.lock().unwrap().nodes.push(node(false));
+    assert_eq!(main(&ctx, &["edit", ID]), 2);
+    assert_eq!(
+        err(&ctx),
+        format!(
+            "No previous editor; specify --editor cursor|code|zed|nvim. Next: gpu edit {ID} --editor code\n"
+        )
+    );
+    env.executable("code", "#!/bin/sh\nexit 0\n");
+    assert_eq!(
+        main(&ctx, &["edit", ID, "--editor", "code", "--json"]),
+        0,
+        "{}",
+        err(&ctx)
+    );
+    let object = dict(&out(&ctx));
+    let keys = object
+        .get("result")
+        .unwrap()
+        .as_dict()
+        .unwrap()
+        .iter()
+        .map(|(key, _)| key.clone())
+        .collect::<Vec<_>>();
+    let tail = &keys[keys.len() - 3..];
+    assert_eq!(tail, ["ssh_alias", "directory", "editor"]);
+}
+
+#[test]
 fn edit_reuses_gcloud_user_keys_and_workspace_in_temp_home() {
     let (env, ctx, runner, state) = fixture();
     env.executable("code", "#!/bin/sh\nexit 0\n");
@@ -677,7 +748,7 @@ fn every_tpu_editor_waits_for_creating_and_ssh_key_propagation_without_mutating_
             }
         }
         assert_eq!(
-            crate::commands::last_editor(&ctx.env).as_deref(),
+            crate::editors::last_editor(&ctx.env).as_deref(),
             Some(editor)
         );
     }
@@ -870,7 +941,7 @@ fn tpu_flag_routes_without_provider_and_catalog_jobs_use_real_keys() {
     // gated Runner and wait for rendered choices before sending Enter.
     use crate::picker::{testing::*, JobState, Outcome};
     use crate::process::Runner;
-    let settings = crate::gcp::Settings::load(&dict(CONFIG)).unwrap();
+    let settings = crate::gcp::Settings::load(&configuration()).unwrap();
     for (kind, title, expected) in [
         ("locations", "TPU zone", "us-east5-b"),
         ("accelerator-types", "TPU type", "v6e-1"),
@@ -884,11 +955,11 @@ fn tpu_flag_routes_without_provider_and_catalog_jobs_use_real_keys() {
             inner.run(cmd)
         });
         let ctx = env.ctx().runner(&gated_runner).build();
-        let job = crate::gcp_wizard::catalog_job(&ctx, &settings, Some("us-east5-b"), kind, None);
+        let job = crate::gcp::wizard::catalog_job(&ctx, &settings, Some("us-east5-b"), kind, None);
         let observer = job.observer();
         let release = gate.clone();
         let result = drive(
-            crate::gcp_wizard::catalog_screen(job, title, crate::picker::Next::Done),
+            crate::gcp::wizard::catalog_screen(job, title, crate::picker::Next::Done),
             move |keys| {
                 keys.wait_for("the catalog job", || observer.state() == JobState::Running);
                 assert!(keys.labels().is_empty());
@@ -908,8 +979,8 @@ fn tpu_flag_routes_without_provider_and_catalog_jobs_use_real_keys() {
 fn catalog_choices_share_a_stack_and_back_does_not_refetch() {
     use crate::picker::{testing::*, Next, Outcome};
     let (_env, ctx, runner, _state) = fixture();
-    let settings = crate::gcp::Settings::load(&dict(CONFIG)).unwrap();
-    let Next::Screen(first) = crate::gcp_wizard::next(ctx, settings, Default::default()) else {
+    let settings = crate::gcp::Settings::load(&configuration()).unwrap();
+    let Next::Screen(first) = crate::gcp::wizard::next(ctx, settings, Default::default()) else {
         panic!("missing first screen")
     };
     let result = drive(first, move |keys| {
@@ -946,11 +1017,11 @@ fn catalog_choices_share_a_stack_and_back_does_not_refetch() {
 fn expiry_entry_has_duration_help_validation_and_back_to_capacity() {
     use crate::picker::{testing::*, Next, Outcome};
     let (_env, ctx, runner, _state) = fixture();
-    let settings = crate::gcp::Settings::load(&dict(CONFIG)).unwrap();
-    let Next::Screen(first) = crate::gcp_wizard::next(
+    let settings = crate::gcp::Settings::load(&configuration()).unwrap();
+    let Next::Screen(first) = crate::gcp::wizard::next(
         ctx,
         settings,
-        crate::gcp_wizard::Selection {
+        crate::gcp::wizard::TpuSelection {
             zone: Some("us-east5-b".into()),
             tpu: Some("v6e-1".into()),
             ..Default::default()
@@ -977,7 +1048,7 @@ fn expiry_entry_has_duration_help_validation_and_back_to_capacity() {
             .snapshot()
             .body
             .iter()
-            .any(|s| s.contains("1 minute to 29 days")));
+            .any(|s| s.contains("1 minute–29 days")));
         keys.press_until(BACK, on("TPU capacity"));
         keys.press_until(RIGHT, on("Destroy after (e.g. 2h)"));
         keys.type_text("1d");
@@ -1100,7 +1171,7 @@ fn declining_creation_or_destruction_never_creates_paid_resources() {
 #[test]
 fn malformed_node_list_never_verifies_destruction() {
     let (env, _, _, _) = fixture();
-    let runner = super::gcp_transport::runner(|cmd| {
+    let runner = FakeRunner::new(|cmd| {
         if cmd.argv[1] == "tasks" {
             return ok("[]");
         }
@@ -1192,19 +1263,19 @@ fn capacity_prices_reuse_the_size_job_without_blocking_input() {
         held.lock().unwrap().recv().unwrap();
         Ok(Arc::new(super::gcp_prices::prices()))
     });
-    let settings = crate::gcp::Settings::load(&dict(CONFIG)).unwrap();
-    let selected = crate::gcp_wizard::Selection {
+    let settings = crate::gcp::Settings::load(&configuration()).unwrap();
+    let selected = crate::gcp::wizard::TpuSelection {
         tpu: Some("v6e-4".into()),
         zone: Some("us-east5-b".into()),
         expiry_at: Some("2026-11-03T02:00:00Z".parse().unwrap()),
         ..Default::default()
     };
-    let screen = crate::gcp_wizard::capacity_screen(
+    let screen = crate::gcp::wizard::capacity_screen(
         ctx,
         settings,
-        dict(CONFIG),
+        configuration(),
         selected.clone(),
-        Some(crate::gcp_wizard::Types {
+        Some(crate::gcp::wizard::Types {
             initial: Vec::new(),
             catalog: Job::new(|| panic!("capacity must not reload the type catalog")),
             rates: rates.clone(),
@@ -1240,7 +1311,7 @@ fn capacity_prices_reuse_the_size_job_without_blocking_input() {
     });
     assert_eq!(
         result,
-        Outcome::Done(crate::gcp_wizard::Selection {
+        Outcome::Done(crate::gcp::wizard::TpuSelection {
             spot: Some(true),
             ..selected
         })
@@ -1254,19 +1325,19 @@ fn failed_or_missing_capacity_prices_still_allow_number_selection() {
     use crate::picker::{testing::*, Job, Outcome};
     for failed in [false, true] {
         let (_env, ctx, runner, _) = fixture();
-        let settings = crate::gcp::Settings::load(&dict(CONFIG)).unwrap();
-        let selected = crate::gcp_wizard::Selection {
+        let settings = crate::gcp::Settings::load(&configuration()).unwrap();
+        let selected = crate::gcp::wizard::TpuSelection {
             tpu: Some("v5e-1".into()),
             zone: Some("us-east5-b".into()),
             expiry_at: Some("2026-11-03T02:00:00Z".parse().unwrap()),
             ..Default::default()
         };
-        let screen = crate::gcp_wizard::capacity_screen(
+        let screen = crate::gcp::wizard::capacity_screen(
             ctx,
             settings,
-            dict(CONFIG),
+            configuration(),
             selected.clone(),
-            Some(crate::gcp_wizard::Types {
+            Some(crate::gcp::wizard::Types {
                 initial: Vec::new(),
                 catalog: Job::new(|| panic!("no catalog read expected")),
                 rates: Job::new(move || {
@@ -1293,7 +1364,7 @@ fn failed_or_missing_capacity_prices_still_allow_number_selection() {
         });
         assert_eq!(
             result,
-            Outcome::Done(crate::gcp_wizard::Selection {
+            Outcome::Done(crate::gcp::wizard::TpuSelection {
                 spot: Some(true),
                 ..selected
             })
@@ -1337,7 +1408,7 @@ fn launch_confirmation_quotes_cached_catalog_prices_for_both_capacity_modes() {
         assert_eq!(line, format!(
             "Launch v6e-1 {} in us-east5-b for {}, deletes at 2:00 AM? (storage and networking charges apply)",
             if spot { "Spot" } else { "on-demand" },
-            if spot { "$0.75/hr" } else { "$2.75/hr" }
+            if spot { "$0.750/hr" } else { "$2.750/hr" }
         ));
         assert!(!text.contains("cached") && !text.contains(';') && !text.contains("USD list"));
     }
@@ -1391,7 +1462,7 @@ fn identifiers_and_ssh_stanzas_reject_injection() {
         "ssh -i 'key\nHost *' user@192.0.2.1",
         "sh -c evil",
     ] {
-        assert!(crate::gcp_ssh::stanza(&id, command).is_err());
+        assert!(crate::gcp::ssh::stanza(&id, command).is_err());
     }
 }
 
@@ -1449,7 +1520,7 @@ fn incomplete_inventory_never_proves_absence() {
     }
 }
 
-fn retry_flags() -> crate::cli::UpFlags {
+fn retry_flags() -> crate::gcp::TpuArgs {
     let mut args = UP.to_vec();
     args.extend(["--zone", "us-east5-b", "--spot"]);
     let crate::cli::Parsed::Run(command) = crate::cli::parse(&argv(&args)) else {
@@ -1458,17 +1529,17 @@ fn retry_flags() -> crate::cli::UpFlags {
     let crate::cli::Command::Up(flags) = *command else {
         panic!("up")
     };
-    flags
+    crate::gcp::TpuArgs::from_flags(&flags).unwrap()
 }
 fn restrict_retry_zones(ctx: &Ctx) {
-    let mut zones = crate::gcp_facts::known_zones(ctx, "test-project");
+    let mut zones = crate::gcp::facts::known_zones(ctx, "test-project");
     for zone in &mut zones {
         zone.types.clear();
         if zone.name == "us-east5-b" {
             zone.types.push("v6e-1".into());
         }
     }
-    zones.push(crate::gcp_catalog::Zone {
+    zones.push(crate::gcp::catalog::Zone {
         name: "us-east5-a".into(),
         types: vec!["v6e-1".into()],
     });
@@ -1490,7 +1561,7 @@ fn restrict_retry_zones(ctx: &Ctx) {
                 .collect(),
         ),
     );
-    crate::gcp_http::write_cache(ctx, "tpu-catalog-test-project.json", d);
+    crate::cache::write_json(ctx, "tpu-catalog-test-project.json", d);
 }
 #[test]
 fn spot_stockout_names_a_different_zone_and_preserves_request_scope() {
@@ -1533,7 +1604,7 @@ fn interactive_capacity_retry_is_one_key_and_keeps_original_deadline() {
     let flags = retry_flags();
     let clock = ctx.clock.clone();
     let watched = state.clone();
-    let result = crate::gcp::launch_with_retry(
+    let result = crate::gcp::launch::launch_with_retry(
         &ctx,
         &flags,
         &cfg,
@@ -1545,7 +1616,7 @@ fn interactive_capacity_retry_is_one_key_and_keeps_original_deadline() {
             );
             let clock = clock.clone();
             match drive(screen, move |keys| {
-                keys.wait(|s| s.labels.iter().any(|l| l.contains("us-east5-a  $0.75/hr")));
+                keys.wait(|s| s.labels.iter().any(|l| l.contains("us-east5-a  $0.750/hr")));
                 assert!(keys.snapshot().notice.contains("Deletes at 2:00 AM"));
                 assert!(!keys.labels().iter().any(|s| s.contains("in us-east5-b")));
                 clock.sleep(30.0);
@@ -1591,7 +1662,7 @@ fn ambiguous_create_never_offers_capacity_retry_or_disarms_timer() {
         s.ambiguous_create = true;
     }
     let cfg = crate::config::load_config(&ctx.env).unwrap();
-    assert!(crate::gcp::launch_with_retry(
+    assert!(crate::gcp::launch::launch_with_retry(
         &ctx,
         &retry_flags(),
         &cfg,
@@ -1607,7 +1678,7 @@ fn retry_can_return_to_grouped_zone_picker_without_authorizing_payment() {
     let (env, ctx, _runner, _state) = fixture();
     restrict_retry_zones(&ctx);
     super::gcp_prices::cache(&env);
-    let picks = crate::gcp_wizard::Picks {
+    let picks = crate::gcp::wizard::TpuPicks {
         zone: "us-east5-b".into(),
         tpu: "v6e-1".into(),
         spot: true,
@@ -1616,10 +1687,10 @@ fn retry_can_return_to_grouped_zone_picker_without_authorizing_payment() {
         directory: "/workspace".into(),
         deadline: "2026-11-03T02:00:00Z".parse().unwrap(),
     };
-    let settings = crate::gcp::Settings::load(&dict(CONFIG)).unwrap();
+    let settings = crate::gcp::Settings::load(&configuration()).unwrap();
     let skipped = ["us-east5-b".into()].into_iter().collect();
     let result = drive(
-        crate::gcp_retry::screen(&ctx, &settings, &dict(CONFIG), &picks, &skipped),
+        crate::gcp::retry::screen(&ctx, &settings, &configuration(), &picks, &skipped),
         |keys| {
             keys.wait(|s| s.labels.iter().any(|l| l.starts_with("Retry")));
             keys.press_until("2", on("TPU zone"));
@@ -1630,7 +1701,7 @@ fn retry_can_return_to_grouped_zone_picker_without_authorizing_payment() {
     );
     assert_eq!(
         result,
-        Outcome::Done(Some(crate::gcp_retry::Choice {
+        Outcome::Done(Some(crate::gcp::retry::Choice {
             zone: "us-east5-a".into(),
             approved: false,
             rate: None
@@ -1653,7 +1724,7 @@ fn cleanup_failure_never_offers_retry_and_keeps_expiry() {
         s.fail_delete_task = true;
     }
     let cfg = crate::config::load_config(&ctx.env).unwrap();
-    assert!(crate::gcp::launch_with_retry(
+    assert!(crate::gcp::launch::launch_with_retry(
         &ctx,
         &retry_flags(),
         &cfg,
@@ -1678,7 +1749,7 @@ fn retry_does_not_extend_an_expired_deadline_or_create_again() {
     state.lock().unwrap().reject_creates = 1;
     let cfg = crate::config::load_config(&ctx.env).unwrap();
     let clock = ctx.clock.clone();
-    let result = crate::gcp::launch_with_retry(
+    let result = crate::gcp::launch::launch_with_retry(
         &ctx,
         &retry_flags(),
         &cfg,
@@ -1721,13 +1792,13 @@ fn changed_retry_estimate_requires_a_new_confirmation() {
     super::gcp_prices::cache(&env);
     state.lock().unwrap().reject_creates = 1;
     let cfg = crate::config::load_config(&ctx.env).unwrap();
-    crate::gcp::launch_with_retry(
+    crate::gcp::launch::launch_with_retry(
         &ctx,
         &retry_flags(),
         &cfg,
         Some("2026-11-03T02:00:00Z".parse().unwrap()),
         |_| {
-            Ok(Some(crate::gcp_retry::Choice {
+            Ok(Some(crate::gcp::retry::Choice {
                 zone: "us-east5-a".into(),
                 approved: true,
                 rate: Some(999.0),
@@ -1758,18 +1829,18 @@ fn remembered_zone_is_project_scoped_and_does_not_replace_config() {
     args.extend(["--zone", "us-east5-a"]);
     assert_eq!(main(&ctx, &args), 0, "{}", err(&ctx));
     assert_eq!(
-        crate::gcp_preferences::last(&ctx, "test-project"),
+        crate::gcp::preferences::last(&ctx, "test-project"),
         Some("us-east5-a".into())
     );
     assert_eq!(
-        crate::gcp_preferences::generation(&ctx, "test-project"),
+        crate::gcp::preferences::generation(&ctx, "test-project"),
         Some("v6e".into())
     );
     assert_eq!(
-        crate::gcp_preferences::accelerator(&ctx, "test-project", "v6e"),
+        crate::gcp::preferences::accelerator(&ctx, "test-project", "v6e"),
         Some("v6e-1".into())
     );
-    assert_eq!(crate::gcp_preferences::last(&ctx, "other-project"), None);
+    assert_eq!(crate::gcp::preferences::last(&ctx, "other-project"), None);
     let cfg = dict(&read(&env.config.join("gpu/config.json")));
     assert_eq!(
         crate::gcp::text(cfg.get("gcp").unwrap().as_dict().unwrap(), "zone"),
@@ -1782,8 +1853,7 @@ fn type_filter_counts_and_prices_exclude_unsupported_remembered_zone() {
     let (env, ctx, _runner, _state) = fixture();
     restrict_retry_zones(&ctx);
     super::gcp_prices::cache(&env);
-    let mut cache =
-        crate::gcp_http::read_cache(&ctx, "tpu-catalog-test-project.json", 900).unwrap();
+    let mut cache = crate::cache::read_json(&ctx, "tpu-catalog-test-project.json", 900).unwrap();
     let Value::List(mut zones) = cache.get("zones").unwrap().clone() else {
         panic!("zones")
     };
@@ -1794,14 +1864,14 @@ fn type_filter_counts_and_prices_exclude_unsupported_remembered_zone() {
         }
     }
     cache.insert("zones", Value::List(zones));
-    crate::gcp_http::write_cache(&ctx, "tpu-catalog-test-project.json", cache);
-    crate::gcp_preferences::remember(&ctx, "test-project", "us-central1-a");
-    let settings = crate::gcp::Settings::load(&dict(CONFIG)).unwrap();
+    crate::cache::write_json(&ctx, "tpu-catalog-test-project.json", cache);
+    crate::gcp::preferences::remember(&ctx, "test-project", "us-central1-a");
+    let settings = crate::gcp::Settings::load(&configuration()).unwrap();
     let result = drive(
-        crate::gcp_wizard::priced_zone_screen(
+        crate::gcp::wizard::priced_zone_screen(
             &ctx,
             &settings,
-            &dict(CONFIG),
+            &configuration(),
             "v6e-1",
             true,
             &Default::default(),
@@ -1854,13 +1924,13 @@ fn full_type_cli_alias_is_offline_and_preserves_canonical_accelerator_name() {
 fn generation_and_size_preferences_are_scoped_and_highlight_without_reordering() {
     use crate::picker::{testing::*, Next, Outcome};
     let (_env, ctx, _runner, _state) = fixture();
-    crate::gcp_preferences::remember_type(&ctx, "test-project", "v5p-16");
+    crate::gcp::preferences::remember_type(&ctx, "test-project", "v5p-16");
     assert_eq!(
-        crate::gcp_preferences::generation(&ctx, "other-project"),
+        crate::gcp::preferences::generation(&ctx, "other-project"),
         None
     );
-    let settings = crate::gcp::Settings::load(&dict(CONFIG)).unwrap();
-    let Next::Screen(first) = crate::gcp_wizard::next(ctx, settings, Default::default()) else {
+    let settings = crate::gcp::Settings::load(&configuration()).unwrap();
+    let Next::Screen(first) = crate::gcp::wizard::next(ctx, settings, Default::default()) else {
         panic!("generation")
     };
     let result = drive(first, |keys| {
@@ -1899,25 +1969,21 @@ fn mapped_cloud_completion_still_waits_for_cached_repository_validation() {
                 assert!(blocked.wait());
                 Ok(vec!["demo".into()])
             }),
-            search: None,
-            models: Vec::new(),
-            recent_gpus: Vec::new(),
-            choose_offer: false,
-            tpu_setup_error: None,
-            tpu_transition: Some(crate::gcp_wizard::transition(
-                &ctx,
-                &crate::launch::UpArgs {
-                    num_gpus: 1,
-                    ..Default::default()
-                },
-                &cfg,
-                Some("2026-11-03T02:00:00Z".parse().unwrap()),
-            )),
-            tpu_prices: None,
-            tpu_cached_prices: None,
-            tpu_types: crate::gcp_facts::known_types(&ctx, "test-project", None),
-            tpu_catalog: None,
             owner: "owner".into(),
+            tpu: crate::wizard::TpuOptions {
+                transition: Some(crate::gcp::wizard::transition(
+                    &ctx,
+                    &crate::launch::UpArgs {
+                        num_gpus: 1,
+                        ..Default::default()
+                    },
+                    &cfg,
+                    Some("2026-11-03T02:00:00Z".parse().unwrap()),
+                )),
+                types: crate::gcp::facts::known_types(&ctx, "test-project", None),
+                ..Default::default()
+            },
+            ..Default::default()
         },
     );
     let Next::Screen(first) = wizard.next(crate::wizard::Picks::new(None, Some("container"), None))

@@ -1,9 +1,7 @@
-//! Ported Python tests, one module per Python test file (`tests/test_X.py`
-//! maps to `X.rs`, keeping each test's name).
-
 mod automation;
 mod boot_guard;
 mod cli;
+mod cli_validation;
 mod editors;
 mod expiry;
 mod expiry_launch;
@@ -16,7 +14,6 @@ mod not_found;
 mod picker;
 mod repo_cache;
 mod repos;
-mod review_fixes;
 mod setup;
 mod uptime;
 mod wizard;

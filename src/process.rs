@@ -1,5 +1,4 @@
-//! Subprocesses: the `Runner` seam and Python's `run()` helper.
-
+use crate::sync::MutexExt;
 use std::io::{Read, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -31,7 +30,6 @@ pub struct Cmd {
     /// Capture stdout and stderr; otherwise they are inherited.
     pub capture: bool,
     pub timeout: Option<f64>,
-    /// Python-compatible text mode by default; remote command data opts out.
     pub normalize_newlines: bool,
     /// Binary stdout destination (archives and byte-exact log chunks).
     pub stdout_file: Option<std::path::PathBuf>,
@@ -90,7 +88,6 @@ impl Cmd {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Output {
-    /// Exit status; a signal is reported as its negative number, like Python.
     pub code: i32,
     pub stdout: String,
     pub stderr: String,
@@ -130,13 +127,10 @@ pub enum RunError {
 }
 
 impl RunError {
-    /// The text Python's subprocess exceptions carry when not handled.
-    pub fn python_text(&self, program: &str) -> String {
+    /// One line describing why `program` could not complete.
+    pub fn describe(&self, program: &str) -> String {
         match self {
-            RunError::NotFound => format!(
-                "[Errno 2] No such file or directory: {}",
-                crate::pyfmt::repr_str(program)
-            ),
+            RunError::NotFound => format!("Required command not found: {program}"),
             RunError::TimedOut => format!("Command '{program}' timed out"),
             RunError::Os(text) | RunError::Denied(text) => text.clone(),
         }
@@ -216,10 +210,7 @@ struct TimeoutGroup(Option<i32>);
 impl TimeoutGroup {
     fn register(pid: Option<i32>) -> TimeoutGroup {
         if let Some(pid) = pid {
-            TIMEOUT_GROUPS
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .push(pid);
+            TIMEOUT_GROUPS.lock_recover().push(pid);
         }
         TimeoutGroup(pid)
     }
@@ -228,10 +219,7 @@ impl TimeoutGroup {
 impl Drop for TimeoutGroup {
     fn drop(&mut self) {
         if let Some(pid) = self.0 {
-            TIMEOUT_GROUPS
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .retain(|p| *p != pid);
+            TIMEOUT_GROUPS.lock_recover().retain(|p| *p != pid);
         }
     }
 }
@@ -244,11 +232,7 @@ pub fn forward_signal(signal: i32) {
         signal_hook::consts::SIGHUP => Signal::HUP,
         _ => Signal::TERM,
     };
-    for pid in TIMEOUT_GROUPS
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .iter()
-    {
+    for pid in TIMEOUT_GROUPS.lock_recover().iter() {
         if let Some(pid) = rustix::process::Pid::from_raw(*pid) {
             let _ = rustix::process::kill_process_group(pid, signal);
         }
@@ -382,55 +366,61 @@ impl Runner for RealRunner {
     }
 }
 
-/// Run a CLI and return its stripped stdout. It never reads the terminal,
-/// which the picker owns. Failures keep Python's messages, redacted.
 pub fn run<S: AsRef<str>>(ctx: &Ctx, argv: &[S], timeout: Option<f64>) -> Result<String> {
     run_output(ctx, argv, timeout).map(|output| output.stdout.trim().to_string())
 }
 
 /// `run`, keeping a successful command's full output, stderr included.
 pub fn run_output<S: AsRef<str>>(ctx: &Ctx, argv: &[S], timeout: Option<f64>) -> Result<Output> {
-    let program = argv.first().map(AsRef::as_ref).unwrap_or("");
-    let timeout = timeout.or_else(|| matches!(program, "vastai" | "gcloud" | "gh").then_some(60.0));
     let cmd = Cmd::new(argv).timeout(timeout);
-    let program = cmd.program().to_string();
-    match ctx.run(&cmd) {
-        Err(RunError::TimedOut) => Err(Error::Timeout(format!("Timed out running {program}"))),
-        Err(RunError::NotFound) if program == "vastai" => Err(Error::status(
-            crate::error::ExitCode::NotSetup,
-            "Install the Vast CLI, then check authentication. Next: gpu setup --provider vast",
-        )),
-        Err(RunError::NotFound) => {
-            Err(Error::msg(format!("Required command not found: {program}")))
-        }
-        Err(RunError::Os(text) | RunError::Denied(text)) => Err(Error::msg(text)),
-        Ok(output) if output.code != 0 => {
-            let detail = if output.stderr.is_empty() {
-                &output.stdout
-            } else {
-                &output.stderr
-            };
-            let detail = redact_text(detail.trim());
-            if program == "vastai" {
-                if let Some(error) = crate::provider_errors::vast(&detail) {
-                    return Err(error);
-                }
-            }
-            let message = if detail.is_empty() {
+    checked(cmd.program(), ctx.run(&cmd))
+}
+
+/// Report a command result generically; provider adapters translate their
+/// own failure signatures first.
+pub(crate) fn checked(
+    program: &str,
+    result: std::result::Result<Output, RunError>,
+) -> Result<Output> {
+    match result {
+        Ok(output) if output.code == 0 => Ok(output),
+        Ok(output) => {
+            let detail = failure_detail(&output);
+            Err(Error::msg(if detail.is_empty() {
                 format!("Command failed: {program}")
             } else {
                 detail
-            };
-            if program == "vastai"
-                && argv
-                    .get(1)
-                    .is_some_and(|s| matches!(s.as_ref(), "show" | "search" | "ssh-url"))
-            {
-                Err(Error::ProviderUnavailable(message))
-            } else {
-                Err(Error::msg(message))
-            }
+            }))
         }
-        Ok(output) => Ok(output),
+        Err(RunError::TimedOut) => Err(Error::timeout(format!("Timed out running {program}"))),
+        Err(error) => Err(Error::msg(error.describe(program))),
     }
+}
+
+/// The redacted diagnostic of a failed command: stderr, else stdout.
+pub(crate) fn failure_detail(output: &Output) -> String {
+    let detail = if output.stderr.is_empty() {
+        &output.stdout
+    } else {
+        &output.stderr
+    };
+    redact_text(detail.trim())
+}
+
+/// Find the first executable `name` on `PATH`.
+pub(crate) fn which(env: &crate::ctx::Env, name: &str) -> Option<std::path::PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let executable = |path: &std::path::Path| {
+        std::fs::metadata(path).is_ok_and(|m| !m.is_dir() && m.permissions().mode() & 0o111 != 0)
+    };
+    if name.contains('/') {
+        let path = std::path::PathBuf::from(name);
+        return executable(&path).then_some(path);
+    }
+    let search = env.get("PATH").unwrap_or("/bin:/usr/bin");
+    search
+        .split(':')
+        .map(|dir| std::path::Path::new(dir).join(name))
+        .find(|path| executable(path))
 }

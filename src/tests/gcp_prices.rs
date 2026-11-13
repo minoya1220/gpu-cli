@@ -1,13 +1,15 @@
 use crate::{
     ctx::Ctx,
-    gcp_prices::{self, Prices},
+    gcp::prices::{self, Prices},
     picker::{testing::*, Job, Next, Outcome},
     process::Input,
     pyjson::{Dict, Value},
     testing::*,
 };
 use std::sync::{Arc, Mutex};
-const CFG: &str = r#"{"gcp":{"setup":{"version":1,"project":"test-project"},"project":"test-project","zone":"us-east5-b"}}"#;
+fn configuration() -> Dict {
+    gcp_config(Some("us-east5-b"), None)
+}
 pub(crate) fn prices() -> Prices {
     Prices {
         region: "us-east5".into(),
@@ -30,14 +32,14 @@ pub(crate) fn cache(env: &TestEnv) {
     let p = prices();
     let ctx = env.ctx().clock(&FakeClock::at(p.at)).build();
     tpu_facts(&ctx);
-    let entries = crate::gcp_facts::skus(&ctx)
+    let entries = crate::gcp::facts::skus(&ctx)
         .into_iter()
         .filter(|m| {
             crate::gcp::text(m, "generation") == Some("v6e")
                 && m.get("regions")
                     .and_then(Value::as_list)
                     .is_some_and(|v| v.contains(&Value::str("us-east5")))
-                && crate::gcp_facts::capacity(m).is_some()
+                && crate::gcp::facts::capacity(m).is_some()
         })
         .map(|m| {
             let mut d = Dict::new();
@@ -45,14 +47,14 @@ pub(crate) fn cache(env: &TestEnv) {
             d.insert("at", Value::Int(p.at.as_second()));
             d.insert(
                 "sku",
-                Value::Dict(p.skus[usize::from(crate::gcp_facts::capacity(&m).unwrap())].clone()),
+                Value::Dict(p.skus[usize::from(crate::gcp::facts::capacity(&m).unwrap())].clone()),
             );
             Value::Dict(d)
         })
         .collect();
     let mut data = Dict::new();
     data.insert("entries", Value::List(entries));
-    crate::gcp_http::write_cache(&ctx, "tpu-prices-test-project.json", data);
+    crate::cache::write_json(&ctx, "tpu-prices-test-project.json", data);
 }
 #[test]
 fn normalizes_units_slice_sizes_and_capacity_without_guessing_missing_rates() {
@@ -83,6 +85,33 @@ fn normalizes_units_slice_sizes_and_capacity_without_guessing_missing_rates() {
     foreign.region = "other-region".into();
     assert_eq!(foreign.hourly("v6e-1", false), None);
 }
+#[test]
+fn facts_and_prices_exclude_the_same_normalized_capacity_keywords() {
+    let mut price = prices();
+    price.skus.truncate(1);
+    assert_eq!(price.hourly("v6e-1", false), Some(2.75));
+    assert_eq!(crate::gcp::facts::capacity(&price.skus[0]), Some(false));
+    for keyword in [
+        "capacity optimized",
+        "capacityoptimized",
+        "Capacity-Optimized",
+        "commit",
+        "dws",
+        "flex",
+        "calendar",
+        "reservation",
+        "subscription",
+    ] {
+        price.skus[0].insert("description", Value::str(format!("TPU v6e chip {keyword}")));
+        assert_eq!(
+            crate::gcp::facts::capacity(&price.skus[0]),
+            None,
+            "{keyword}"
+        );
+        assert_eq!(price.hourly("v6e-1", false), None, "{keyword}");
+    }
+}
+
 #[test]
 fn future_tiered_monthly_or_malformed_money_is_never_quoted_as_an_hourly_rate() {
     for (at, unit, money, rates) in [
@@ -141,8 +170,7 @@ fn future_tiered_monthly_or_malformed_money_is_never_quoted_as_an_hourly_rate() 
 
 fn fixture() -> (TestEnv, Ctx, Arc<FakeRunner>) {
     let env = TestEnv::new();
-    std::fs::create_dir(env.config.join("gpu")).unwrap();
-    std::fs::write(env.config.join("gpu/config.json"), CFG).unwrap();
+    write_config(&env, &configuration());
     let runner = FakeRunner::new(|cmd| {
         if cmd.program() == "gcloud" {
             assert_eq!(strs(&cmd.argv)[1..3], ["auth", "print-access-token"]);
@@ -159,8 +187,8 @@ fn fixture() -> (TestEnv, Ctx, Arc<FakeRunner>) {
             if url.contains("acceleratorTypes") {return (200,r#"{"acceleratorTypes":[{"type":"v6e-1"}]}"#.into());}
             if url.contains("/locations?") {return (200,r#"{"locations":[{"locationId":"us-east5-b"}]}"#.into());}
             let id=url.split("/skus/").nth(1).unwrap().split('/').next().unwrap();
-            let env=TestEnv::new();let probe=env.ctx().build();tpu_facts(&probe);let meta=crate::gcp_facts::skus(&probe).into_iter().find(|m|crate::gcp::text(m,"id")==Some(id)).unwrap();
-            let spot=crate::gcp_facts::capacity(&meta)==Some(true);
+            let env=TestEnv::new();let probe=env.ctx().build();tpu_facts(&probe);let meta=crate::gcp::facts::skus(&probe).into_iter().find(|m|crate::gcp::text(m,"id")==Some(id)).unwrap();
+            let spot=crate::gcp::facts::capacity(&meta)==Some(true);
             (200,format!(r#"{{"currencyCode":"USD","rate":{{"unitInfo":{{"unit":"h","unitDescription":"hour","unitQuantity":{{"value":"1"}}}},"tiers":[{{"startAmount":{{"value":"0"}},"listPrice":{{"currencyCode":"USD","units":"{}","nanos":750000000}}}}]}}}}"#,if spot {0} else {2}))
         }).unwrap()
     });
@@ -175,12 +203,12 @@ fn fixture() -> (TestEnv, Ctx, Arc<FakeRunner>) {
 #[test]
 fn known_skus_batch_prices_and_cache_public_data_not_tokens() {
     let (env, ctx, runner) = fixture();
-    let cfg = dict(CFG);
-    let p = gcp_prices::load(&ctx, &cfg, "us-east5-b").unwrap();
+    let cfg = configuration();
+    let p = prices::load(&ctx, &cfg, "us-east5-b").unwrap();
     assert_eq!(p.hourly("v6e-1", false), Some(2.75));
     assert_eq!(runner.calls().len(), 2);
     assert_eq!(
-        gcp_prices::load(&ctx, &cfg, "us-east5-b")
+        prices::load(&ctx, &cfg, "us-east5-b")
             .unwrap()
             .hourly("v6e-1", true),
         Some(0.75)
@@ -196,7 +224,7 @@ fn gate_applies_even_to_cached_prices_and_errors_do_not_leak_credentials() {
     let env = TestEnv::new();
     cache(&env);
     let ctx = env.ctx().build();
-    assert!(gcp_prices::load(&ctx, &dict(CFG), "us-east5-b").is_err());
+    assert!(prices::load(&ctx, &configuration(), "us-east5-b").is_err());
     let (env, _ctx, _runner) = fixture();
     let runner = FakeRunner::new(|_| {
         Ok(crate::process::Output::failed(
@@ -205,21 +233,12 @@ fn gate_applies_even_to_cached_prices_and_errors_do_not_leak_credentials() {
         ))
     });
     let ctx = env.ctx().runner(&runner).build();
-    let error = gcp_prices::load(&ctx, &dict(CFG), "us-east5-b")
+    let error = prices::load(&ctx, &configuration(), "us-east5-b")
         .err()
         .unwrap()
         .text()
         .to_string();
     assert!(!error.contains("private"));
-}
-struct EmptySearch;
-impl crate::wizard::Search for EmptySearch {
-    fn offers(&self, _: &str, _: Option<&str>) -> crate::error::Result<Vec<Dict>> {
-        Ok(Vec::new())
-    }
-    fn stats(&self, _: &str) -> crate::error::Result<crate::offers::Stats> {
-        Ok(Default::default())
-    }
 }
 
 #[test]
@@ -230,27 +249,25 @@ fn tpu_prices_load_automatically_and_no_setup_note_is_visible() {
         let job = if configured {
             Job::new(|| Ok(Arc::new(prices())))
         } else {
-            gcp_prices::job(&ctx, &Dict::new())
+            prices::job(&ctx, &Dict::new())
         };
         let wizard = crate::wizard::LaunchWizard::new(
             &env.env(),
             crate::wizard::WizardOptions {
-                repos: Job::new(|| Ok(Vec::new())),
-                search: Some(Arc::new(EmptySearch)),
+                search: Some(Arc::new(OfferFixture::default())),
                 models: vec!["RTX 4090".into()],
-                recent_gpus: Vec::new(),
-                choose_offer: false,
-                tpu_setup_error: (!configured).then(|| "needs gpu setup".into()),
-                tpu_transition: None,
-                tpu_prices: Some(job),
-                tpu_cached_prices: None,
-                tpu_types: if configured {
-                    vec!["v6e-1".into()]
-                } else {
-                    Vec::new()
-                },
-                tpu_catalog: None,
                 owner: "example".into(),
+                tpu: crate::wizard::TpuOptions {
+                    setup_error: (!configured).then(|| "needs gpu setup".into()),
+                    prices: Some(job),
+                    types: if configured {
+                        vec!["v6e-1".into()]
+                    } else {
+                        Vec::new()
+                    },
+                    ..Default::default()
+                },
+                ..Default::default()
             },
         );
         let Next::Screen(screen) = wizard.next(crate::wizard::Picks::new(
@@ -281,13 +298,13 @@ fn tpu_prices_load_automatically_and_no_setup_note_is_visible() {
 #[test]
 fn shared_token_catalog_cache_and_fresh_preflight_do_not_duplicate_auth() {
     let (_env, ctx, runner) = fixture();
-    let cfg = dict(CFG);
-    gcp_prices::load(&ctx, &cfg, "us-east5-b").unwrap();
-    crate::gcp_catalog::zones(&ctx, "test-project", None).unwrap();
+    let cfg = configuration();
+    prices::load(&ctx, &cfg, "us-east5-b").unwrap();
+    crate::gcp::catalog::zones(&ctx, "test-project", None).unwrap();
     let before = runner.calls().len();
-    crate::gcp_catalog::cached_types(&ctx, "test-project", "us-east5-b").unwrap();
+    crate::gcp::catalog::cached_types(&ctx, "test-project", "us-east5-b").unwrap();
     assert_eq!(runner.calls().len(), before);
-    crate::gcp_catalog::verify(&ctx, "test-project", "us-east5-b", "v6e-1").unwrap();
+    crate::gcp::catalog::verify(&ctx, "test-project", "us-east5-b", "v6e-1").unwrap();
     assert_eq!(
         runner.calls().len(),
         before + 1,
@@ -305,11 +322,11 @@ fn shared_token_catalog_cache_and_fresh_preflight_do_not_duplicate_auth() {
 #[test]
 fn compute_engine_hours_are_chip_hours_and_regions_share_sku_cache() {
     let (_env, ctx, runner) = fixture();
-    let cfg = dict(CFG);
-    let p = gcp_prices::load_for(&ctx, &cfg, "us-east5-b", Some(("v6e-1", false))).unwrap();
+    let cfg = configuration();
+    let p = prices::load_for(&ctx, &cfg, "us-east5-b", Some(("v6e-1", false))).unwrap();
     assert_eq!(p.hourly("v6e-4", false), Some(11.0));
     let count = runner.calls().len();
-    let cached = gcp_prices::load_for(&ctx, &cfg, "us-east5-a", Some(("v6e-1", false))).unwrap();
+    let cached = prices::load_for(&ctx, &cfg, "us-east5-a", Some(("v6e-1", false))).unwrap();
     assert_eq!(runner.calls().len(), count);
     assert_eq!(cached.cache_age, Some(0));
 }
@@ -319,7 +336,7 @@ fn live_prices_use_cached_skus_during_refresh_and_reprice_only_on_change() {
     for changed in [false, true] {
         let env = TestEnv::new();
         std::fs::create_dir(env.config.join("gpu")).unwrap();
-        std::fs::write(env.config.join("gpu/config.json"), CFG).unwrap();
+        write_config(&env, &configuration());
         cache(&env);
         let release = super::picker::Gate::default();
         let held = release.clone();
@@ -350,9 +367,9 @@ fn live_prices_use_cached_skus_during_refresh_and_reprice_only_on_change() {
             .runner(&runner)
             .clock(&FakeClock::at(prices().at))
             .build();
-        let cfg = dict(CFG);
-        let job = gcp_prices::job(&ctx, &cfg);
-        let again = gcp_prices::job_at(&ctx, &cfg, Some("us-east5-a"));
+        let cfg = configuration();
+        let job = prices::job(&ctx, &cfg);
+        let again = prices::job_at(&ctx, &cfg, Some("us-east5-a"));
         let (rows, observer) = (job.clone(), job.observer());
         let screen = crate::picker::Screen::new(
             "Prices",

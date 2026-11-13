@@ -7,6 +7,7 @@
 //! SIGWINCH through `poll(2)` on stdin plus a wake pipe, so no reader thread
 //! outlives the picker and a following prompt gets every keystroke.
 
+use crate::sync::MutexExt;
 use std::io::Write;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -72,7 +73,7 @@ fn aborted(abort: &Option<Arc<Abort>>, now: Instant) -> bool {
     if abort.script_failed.load(Ordering::SeqCst) {
         return true;
     }
-    let done = *abort.script_done.lock().unwrap_or_else(|p| p.into_inner());
+    let done = *abort.script_done.lock_recover();
     done.is_some_and(|at| now >= at + Duration::from_secs(2))
 }
 
@@ -102,7 +103,7 @@ pub fn run_loop<V: PickValue, R: 'static>(
             let core = core.borrow();
             renderer.draw(io, &core.frame());
             if let Some(snapshot) = &options.snapshot {
-                *snapshot.lock().unwrap_or_else(|p| p.into_inner()) = core.snapshot();
+                *snapshot.lock_recover() = core.snapshot();
             }
         }
         if let Some(outcome) = core.borrow_mut().take_outcome() {
@@ -492,180 +493,4 @@ pub fn run_scripted<V: PickValue, R: 'static>(first: Screen<V, R>, keys: &[u8]) 
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::picker::Line;
-
-    struct Screen {
-        size: (usize, usize),
-        parser: vt100::Parser,
-    }
-
-    impl Screen {
-        fn new(columns: u16, rows: u16) -> Screen {
-            let nz = |n: u16| std::num::NonZeroU16::new(n).unwrap();
-            Screen {
-                size: (columns as usize, rows as usize),
-                parser: vt100::Parser::new(nz(rows), nz(columns), 0),
-            }
-        }
-
-        fn rows(&self) -> Vec<String> {
-            self.parser
-                .screen()
-                .rows(0, self.size.0 as u16)
-                .map(|r| r.trim_end().to_string())
-                .collect()
-        }
-    }
-
-    impl Io for Screen {
-        fn input(&self) -> BorrowedFd<'_> {
-            rustix::stdio::stdin()
-        }
-
-        fn write(&mut self, bytes: &[u8]) {
-            self.parser.process(bytes);
-        }
-
-        fn size(&self) -> (usize, usize) {
-            self.size
-        }
-    }
-
-    fn plain(text: &str) -> Line {
-        vec![(Style::Plain, text.to_string())]
-    }
-
-    fn frame(count: usize, cursor: usize) -> Frame {
-        let body = (0..count)
-            .map(|i| {
-                if i == cursor {
-                    vec![(Style::Selected, format!("> item {i}"))]
-                } else {
-                    plain(&format!("  item {i}"))
-                }
-            })
-            .collect();
-        Frame {
-            header: vec![plain("Title")],
-            wrap_title: false,
-            body,
-            cursor_line: Some(cursor),
-            footer: "hints".into(),
-        }
-    }
-
-    #[test]
-    fn draws_in_place_and_erases_when_done() {
-        let mut screen = Screen::new(40, 10);
-        screen.write(b"before\r\n");
-        let mut renderer = Renderer::default();
-        renderer.draw(&mut screen, &frame(3, 0));
-        assert_eq!(
-            screen.rows()[..6],
-            ["before", "Title", "> item 0", "  item 1", "  item 2", "hints"]
-        );
-        renderer.draw(&mut screen, &frame(2, 1));
-        assert_eq!(
-            screen.rows()[..6],
-            ["before", "Title", "  item 0", "> item 1", "hints", ""]
-        );
-        renderer.erase(&mut screen);
-        assert_eq!(screen.rows()[..2], ["before", ""]);
-    }
-
-    #[test]
-    fn long_lines_wrap_in_the_body_and_cut_in_header_and_footer() {
-        let mut screen = Screen::new(10, 10);
-        let mut renderer = Renderer::default();
-        let frame = Frame {
-            header: vec![plain("A very long title")],
-            wrap_title: false,
-            body: vec![plain("0123456789abcde")],
-            cursor_line: None,
-            footer: "footer hints that are long".into(),
-        };
-        renderer.draw(&mut screen, &frame);
-        assert_eq!(
-            screen.rows()[..4],
-            ["A very lon", "0123456789", "abcde", "footer hin"]
-        );
-    }
-
-    #[test]
-    fn paid_prompt_titles_wrap_without_hiding_the_deadline_or_reply() {
-        let mut screen = Screen::new(20, 10);
-        let mut renderer = Renderer::default();
-        let frame = Frame {
-            header: vec![
-                plain("Launch GPU for $1.00/hr, delete at 18:30?"),
-                plain("Type yes:"),
-            ],
-            wrap_title: true,
-            body: Vec::new(),
-            cursor_line: None,
-            footer: "← back".into(),
-        };
-        renderer.draw(&mut screen, &frame);
-        assert_eq!(
-            screen.rows()[..5],
-            [
-                "Launch GPU for $1.00",
-                "/hr, delete at 18:30",
-                "?",
-                "Type yes:",
-                "← back"
-            ]
-        );
-    }
-
-    #[test]
-    fn control_characters_show_as_prompt_toolkit_draws_them() {
-        let mut screen = Screen::new(40, 10);
-        let mut renderer = Renderer::default();
-        let frame = Frame {
-            header: vec![plain("T\x1b[2Jitle")],
-            wrap_title: false,
-            body: vec![plain("a\tb\x7fc\u{85}d\x00")],
-            cursor_line: None,
-            footer: "x\ry".into(),
-        };
-        renderer.draw(&mut screen, &frame);
-        assert_eq!(screen.rows()[..3], ["T^[[2Jitle", "a^Ib^?c<85>d^@", "x^My"]);
-        let mut narrow = Screen::new(4, 10);
-        let mut renderer = Renderer::default();
-        let frame = Frame {
-            header: vec![],
-            wrap_title: false,
-            body: vec![plain("\t\t\t")],
-            cursor_line: None,
-            footer: String::new(),
-        };
-        renderer.draw(&mut narrow, &frame);
-        assert_eq!(narrow.rows()[..3], ["^I^I", "^I", ""]);
-        renderer.erase(&mut narrow);
-        assert_eq!(narrow.rows()[..2], ["", ""]);
-    }
-
-    #[test]
-    fn the_selection_stays_visible_with_a_line_of_margin() {
-        let mut screen = Screen::new(40, 8);
-        let mut renderer = Renderer::default();
-        // Eight rows: title, six body rows, footer.
-        renderer.draw(&mut screen, &frame(50, 0));
-        assert_eq!(screen.rows()[1], "> item 0");
-        renderer.draw(&mut screen, &frame(50, 10));
-        let rows = screen.rows();
-        assert_eq!(rows[0], "Title");
-        assert_eq!(rows[5], "> item 10");
-        assert_eq!(rows[6], "  item 11");
-        assert_eq!(rows[7], "hints");
-        renderer.draw(&mut screen, &frame(50, 49));
-        assert_eq!(screen.rows()[6], "> item 49");
-        renderer.draw(&mut screen, &frame(50, 40));
-        let rows = screen.rows();
-        assert_eq!(rows[1], "  item 39");
-        assert_eq!(rows[2], "> item 40");
-    }
-}
+mod tests;

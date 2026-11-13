@@ -1,4 +1,3 @@
-//! Human listing is intentionally independent of the historical Python table.
 use crate::instances::{display_ids, render_table};
 use crate::testing::*;
 
@@ -16,9 +15,9 @@ fn one_table_aligns_both_providers_and_formats_prices_status_and_ids() {
     assert_eq!(
         out(&ctx),
         concat!(
-            "ID          Provider  Type      Status    Price     Uptime\n",
-            "30306428    vast      RTX 4090  created   $0.10/hr  5m\n",
-            "gpu-uwhcp7  gcp       v5e-1     deleting  $0.36/hr  7m\n",
+            "ID          Provider  Type      Status    Price      Uptime\n",
+            "30306428    vast      RTX 4090  created   $0.102/hr  5m\n",
+            "gpu-uwhcp7  gcp       v5e-1     deleting  $0.359/hr  7m\n",
         )
     );
     render_table(&ctx, &items, true).unwrap();
@@ -29,23 +28,23 @@ fn one_table_aligns_both_providers_and_formats_prices_status_and_ids() {
 fn colliding_short_names_fall_back_to_unique_node_names_or_full_ids() {
     for (input, expected) in [
         (
-            r#"[{"id":"gcp:p1:z1:gpu-100-same"},{"id":"gcp:p1:z2:gpu-200-same"}]"#,
+            r#"[{"id":"gcp:p1:z1:gpu-100-same","provider":"gcp"},{"id":"gcp:p1:z2:gpu-200-same","provider":"gcp"}]"#,
             vec!["gpu-100-same", "gpu-200-same"],
         ),
         (
-            r#"[{"id":"gcp:p1:z1:gpu-100-same"},{"id":"gcp:p1:z2:gpu-100-same"}]"#,
+            r#"[{"id":"gcp:p1:z1:gpu-100-same","provider":"gcp"},{"id":"gcp:p1:z2:gpu-100-same","provider":"gcp"}]"#,
             vec!["gcp:p1:z1:gpu-100-same", "gcp:p1:z2:gpu-100-same"],
         ),
         (
-            r#"[{"id":"gcp:p1:z1:gpu-100-same"},{"id":"gcp:p1:z2:gpu-same"}]"#,
+            r#"[{"id":"gcp:p1:z1:gpu-100-same","provider":"gcp"},{"id":"gcp:p1:z2:gpu-same","provider":"gcp"}]"#,
             vec!["gpu-100-same", "gcp:p1:z2:gpu-same"],
         ),
         (
-            r#"[{"id":"gcp:p1:z1:custom-name"},{"id":123}]"#,
+            r#"[{"id":"gcp:p1:z1:custom-name","provider":"gcp"},{"id":123}]"#,
             vec!["custom-name", "123"],
         ),
         (
-            r#"[{"id":"gcp:p1:z1:123"},{"id":123}]"#,
+            r#"[{"id":"gcp:p1:z1:123","provider":"gcp"},{"id":123}]"#,
             vec!["gcp:p1:z1:123", "123"],
         ),
     ] {

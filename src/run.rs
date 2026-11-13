@@ -1,7 +1,7 @@
 //! Attached jobs: detached remote execution, resumable logs, download, verified cleanup.
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use jiff::Timestamp;
@@ -10,27 +10,49 @@ use crate::cli::RunFlags;
 use crate::ctx::Ctx;
 use crate::error::{Error, ExitCode, Result};
 use crate::launch::UpArgs;
-use crate::offers::{offer_price, OfferSearch};
 use crate::picker::Job;
 use crate::process::{Cmd, Input, Output};
+use crate::provider::Provider;
 use crate::pyfmt::{shell_join, shell_quote};
 use crate::pyjson::{self, Dict, Value};
 use crate::run_files;
-use crate::vast::{self, Vast};
+use crate::vast::offers::OfferSearch;
+use crate::vast::Vast;
 
 #[cfg(test)]
-#[path = "run_review_tests.rs"]
-mod review_tests;
+mod tests;
 
 pub const REMOTE_SOURCE: &str = include_str!("../remote/run_remote.sh");
-const DOWNLOAD_RESERVE: i64 = 600;
+pub(crate) const DOWNLOAD_RESERVE: i64 = 600;
 const CHUNK: u64 = 131072;
+/// Where results land, under the directory `gpu run` was started in.
+const RESULTS_DIR: &str = "gpu-runs";
 
-fn phase(ctx: &Ctx, phase: &str) {
-    ctx.result("phase", Value::str(phase));
+/// The run's current phase, reported as the `phase` result field.
+struct Phase<'a> {
+    ctx: &'a Ctx,
+    current: std::cell::RefCell<String>,
 }
 
-fn step_result(
+impl<'a> Phase<'a> {
+    fn start(ctx: &'a Ctx, phase: &str) -> Phase<'a> {
+        let started = Phase {
+            ctx,
+            current: std::cell::RefCell::new(String::new()),
+        };
+        started.set(phase);
+        started
+    }
+    fn set(&self, phase: &str) {
+        *self.current.borrow_mut() = phase.into();
+        self.ctx.result("phase", Value::str(phase));
+    }
+    fn get(&self) -> String {
+        self.current.borrow().clone()
+    }
+}
+
+pub(crate) fn step_result(
     ctx: &Ctx,
     result: std::result::Result<Output, crate::process::RunError>,
     message: &str,
@@ -56,36 +78,23 @@ fn step_result(
         }
         Err(error) => Err(Error::msg(format!(
             "{message} {}",
-            ctx.safe_diagnostic(&error.python_text("ssh"))
+            ctx.safe_diagnostic(&error.describe("ssh"))
         ))),
     }
 }
 
-fn checked(ctx: &Ctx, cmd: &Cmd, message: &str) -> Result<Output> {
-    step_result(ctx, ctx.run(cmd), message)
+fn checked(ctx: &Ctx, backend: &dyn RunBackend, cmd: &Cmd, message: &str) -> Result<Output> {
+    backend.remote_result(ctx, ctx.run(cmd), message)
 }
 
-fn checked_transfer(ctx: &Ctx, cmd: &Cmd, threshold: usize, message: &str) -> Result<Output> {
-    step_result(ctx, ctx.transfer(cmd, threshold), message)
-}
-
-fn ssh(alias: &str, command: &str, timeout: f64) -> Cmd {
-    Cmd::new(&[
-        "ssh",
-        "-T",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "ConnectTimeout=10",
-        "-o",
-        "ServerAliveInterval=15",
-        "-o",
-        "ServerAliveCountMax=4",
-        alias,
-        command,
-    ])
-    .timeout(Some(timeout.max(0.1)))
-    .raw_output()
+fn checked_transfer(
+    ctx: &Ctx,
+    backend: &dyn RunBackend,
+    cmd: &Cmd,
+    threshold: usize,
+    message: &str,
+) -> Result<Output> {
+    backend.remote_result(ctx, ctx.transfer(cmd, threshold), message)
 }
 
 /// The shared runner owns uploads, supervision, logs and downloads. A backend
@@ -98,8 +107,11 @@ pub(crate) struct RunPlan {
     pub(crate) request: Result<Value>,
 }
 
+/// `gpu run` rents Vast or Modal GPUs, never TPUs.
+const NO_TPU: &str = "gpu run uses Vast or Modal GPUs; TPUs are not supported.";
+
 pub(crate) trait RunBackend {
-    fn provider(&self) -> &'static str;
+    fn provider(&self) -> Provider;
     fn plan(
         &self,
         ctx: &Ctx,
@@ -116,135 +128,30 @@ pub(crate) trait RunBackend {
         request: &Value,
         deadline: Timestamp,
         timeout: f64,
-        created: &mut dyn FnMut(&str) -> Result<()>,
+        // The created instance ID, and the provider's own run ID if it names runs.
+        created: &mut dyn FnMut(&str, Option<&str>) -> Result<()>,
     ) -> Result<String>;
     fn remote(&self, command: &str, timeout: f64) -> Cmd;
+    fn remote_result(
+        &self,
+        ctx: &Ctx,
+        result: std::result::Result<Output, crate::process::RunError>,
+        message: &str,
+    ) -> Result<Output> {
+        step_result(ctx, result, message)
+    }
     fn lost(&self, ctx: &Ctx, id: &str) -> bool;
     fn restore_expiry(&self, ctx: &Ctx, id: &str, deadline: Timestamp) -> Result<()>;
     fn hook(&self, id: &str) -> String;
+    /// Wrap the source archive extraction, which reads the archive on stdin.
+    fn upload(&self, extract: String) -> String {
+        extract
+    }
+    fn start_prelude(&self) -> String {
+        String::new()
+    }
     fn wait_for_startup(&self) -> bool;
     fn destroy(&self, ctx: &Ctx, id: &str) -> Result<()>;
-}
-
-#[derive(Default)]
-struct VastBackend {
-    alias: String,
-    offer: Option<Dict>,
-}
-
-impl RunBackend for VastBackend {
-    fn provider(&self) -> &'static str {
-        "vast"
-    }
-
-    fn plan(
-        &self,
-        _ctx: &Ctx,
-        flags: &RunFlags,
-        cfg: &Dict,
-        deadline: Timestamp,
-        label: String,
-    ) -> Result<RunPlan> {
-        let offer = self
-            .offer
-            .clone()
-            .ok_or_else(|| Error::msg("No Vast offer selected."))?;
-        let rate = offer_price(&offer)?;
-        if !rate.is_finite() || rate < 0.0 {
-            return Err(Error::msg(
-                "Offer has no finite nonnegative hourly price; no instance created.",
-            ));
-        }
-        let request = vast::run_request(&offer, flags.disk, cfg, deadline, label)
-            .and_then(|request| vast::argv(&request).map(|_| Value::List(request)));
-        Ok(RunPlan {
-            gpu: offer.get("gpu_name").cloned().unwrap_or(Value::Null),
-            rate,
-            request,
-        })
-    }
-
-    fn launch(
-        &mut self,
-        ctx: &Ctx,
-        request: &Value,
-        deadline: Timestamp,
-        timeout: f64,
-        created: &mut dyn FnMut(&str) -> Result<()>,
-    ) -> Result<String> {
-        ctx.set_interrupt_notice(Some(format!(
-            "Vast may have created an instance; boot expiry is {deadline}. Check: gpu ls"
-        )));
-        ctx.result("created", Value::Null);
-        let request = request
-            .as_list()
-            .ok_or_else(|| Error::msg("Invalid Vast run request."))?;
-        let reply = Vast::new(ctx).create(request).inspect_err(|_| {
-            if let Some(notice) = ctx.interrupt_notice() {
-                let _ = ctx.eprintln(&notice);
-            }
-        })?;
-        crate::launch::created_summary(reply.as_ref()).inspect_err(|_| {
-            ctx.result("created", Value::Bool(false));
-            ctx.set_interrupt_notice(None);
-        })?;
-        let id = reply.as_ref().and_then(crate::launch::created_id).ok_or_else(|| Error::status(ExitCode::CleanupUnverified, "Create response has no instance ID; cleanup cannot be verified. Check: gpu ls, then gpu down ID --yes"))?;
-        ctx.result("id", Value::str(&id));
-        ctx.result("created", Value::Bool(true));
-        ctx.set_interrupt_notice(Some(format!("Instance {id} may still be running; it self-destroys at {deadline}. Check: gpu ls, gpu down {id} --yes")));
-        created(&id)?;
-        ctx.check_cancelled()?;
-        let remaining =
-            (deadline.as_second() - DOWNLOAD_RESERVE - ctx.clock.now().as_second()) as f64;
-        let wait_timeout = timeout.min(remaining.max(0.0));
-        let cap = if remaining < timeout {
-            let message = format!("SSH wait limited to {}s by --expire (requested --timeout {}s; 10m reserved for results). Use a longer --expire to allow more boot time.", crate::pyfmt::general(wait_timeout), crate::pyfmt::general(timeout));
-            ctx.eprintln(&message)?;
-            message + " "
-        } else {
-            String::new()
-        };
-        let hint = format!(
-            "{cap}Next: retry gpu run with a longer --expire/--timeout or another --offer."
-        );
-        let (alias, _) = crate::commands::wait_for_ssh_with_hint(ctx, &id, wait_timeout, &hint)?;
-        crate::expiry::manage_expiry(ctx, &alias, &id, "arm", Some(deadline))?;
-        self.alias = alias;
-        ctx.result("expiry_armed", Value::Bool(true));
-        Ok(id)
-    }
-
-    fn remote(&self, command: &str, timeout: f64) -> Cmd {
-        ssh(&self.alias, command, timeout)
-    }
-
-    fn lost(&self, ctx: &Ctx, id: &str) -> bool {
-        let live = vast::list_instances(ctx, Some(15.0)).ok();
-        live.as_ref().is_some_and(|live| {
-            vast::find_instance(live, id).is_none_or(|i| {
-                matches!(
-                    i.get("actual_status").and_then(Value::as_str),
-                    Some("stopped" | "exited" | "destroyed")
-                )
-            })
-        })
-    }
-
-    fn restore_expiry(&self, ctx: &Ctx, id: &str, deadline: Timestamp) -> Result<()> {
-        crate::expiry::manage_expiry(ctx, &self.alias, id, "arm", Some(deadline)).map(|_| ())
-    }
-
-    fn hook(&self, id: &str) -> String {
-        format!("#!/bin/bash\nroot=\"${{HOME:-/root}}/.local/state/gpu-expire\"\nGPU_EXPIRE_SOURCE=$(cat \"$root/runner.sh\")\nexport GPU_EXPIRE_SOURCE\nexec bash \"$root/runner.sh\" arm {id} \"$1\"\n")
-    }
-
-    fn wait_for_startup(&self) -> bool {
-        true
-    }
-
-    fn destroy(&self, ctx: &Ctx, id: &str) -> Result<()> {
-        destroy(ctx, id)
-    }
 }
 
 fn control(root: &str, token: &str, action: &str) -> String {
@@ -277,15 +184,14 @@ fn setup(flags: &RunFlags, cwd: &Path) -> String {
 fn duration(text: &str, now: Timestamp) -> Result<i64> {
     crate::expiry::parse_deadline_duration(text, now)
         .map(|at| at.as_second() - now.as_second())
-        .map_err(Error::Usage)
+        .map_err(Error::usage)
 }
 
 fn run_duration(text: &str, now: Timestamp) -> Result<i64> {
     let seconds = duration(text, now)?;
     if seconds <= DOWNLOAD_RESERVE {
-        return Err(Error::Usage(
-            "gpu run needs --expire longer than 10m to reserve time for downloading results."
-                .into(),
+        return Err(Error::usage(
+            "gpu run needs --expire longer than 10m to reserve time for downloading results.",
         ));
     }
     Ok(seconds)
@@ -307,21 +213,24 @@ fn expiry_screen(now: Timestamp) -> crate::picker::Screen<String, String> {
     .back_clears_input(false)
 }
 
-fn args(flags: &RunFlags) -> UpArgs {
-    UpArgs {
-        repo: Some(crate::repos::Repo::NoRepo),
-        mode: Some("container".into()),
-        gpu: flags.gpu.clone(),
-        num_gpus: flags.num_gpus,
-        max_price: flags.max_price,
-        offer: flags.offer,
-        disk: flags.disk,
-        yes: flags.yes || flags.dry_run,
-        dry_run: flags.dry_run,
-        expire: flags.expire.clone(),
-        reliability: flags.reliability,
-        unverified: flags.unverified,
-        interruptible: false,
+/// A run is a container launch without a repository.
+impl From<&RunFlags> for UpArgs {
+    fn from(flags: &RunFlags) -> UpArgs {
+        UpArgs {
+            repo: Some(crate::repos::Repo::NoRepo),
+            mode: Some("container".into()),
+            gpu: flags.gpu.clone(),
+            num_gpus: flags.num_gpus,
+            max_price: flags.max_price,
+            offer: flags.offer,
+            disk: flags.disk,
+            yes: flags.yes || flags.dry_run,
+            dry_run: flags.dry_run,
+            expire: flags.expire.clone(),
+            reliability: flags.reliability,
+            unverified: flags.unverified,
+            interruptible: false,
+        }
     }
 }
 
@@ -332,13 +241,13 @@ enum Selection {
 
 fn choose(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, args: &UpArgs) -> Result<Selection> {
     if ctx.interactive() {
-        let modal_only = flags.provider.as_deref() == Some("modal");
+        let modal_only = flags.provider == Some(Provider::Modal);
         let search = if modal_only {
             None
         } else {
             Some(OfferSearch::new(Vast::new(ctx), args, cfg)?)
         };
-        let modal = if flags.dry_run && flags.provider.as_deref() != Some("vast") {
+        let modal = if flags.provider != Some(Provider::Vast) {
             let worker = ctx.clone();
             let (cpu, memory) = crate::modal::resources(flags)?;
             let rates =
@@ -350,24 +259,21 @@ fn choose(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, args: &UpArgs) -> Result<Sele
         let wizard = crate::wizard::LaunchWizard::new(
             &ctx.env,
             crate::wizard::WizardOptions {
-                repos: Job::new(|| Ok(Vec::new())),
                 search: search
                     .clone()
                     .map(|s| Arc::new(s) as Arc<dyn crate::wizard::Search>),
                 models: if modal_only {
                     Vec::new()
                 } else {
-                    crate::offers::known_gpu_models(&ctx.env)
+                    crate::vast::offers::known_gpu_models(&ctx.env)
                 },
                 recent_gpus: crate::history::recent_picks(&ctx.env, "gpu"),
                 choose_offer: !flags.yes && flags.offer.is_none(),
-                owner: String::new(),
-                tpu_setup_error: Some("gpu run phase 1 supports Vast GPUs only.".into()),
-                tpu_transition: None,
-                tpu_prices: None,
-                tpu_cached_prices: None,
-                tpu_types: Vec::new(),
-                tpu_catalog: None,
+                tpu: crate::wizard::TpuOptions {
+                    setup_error: Some(NO_TPU.into()),
+                    ..Default::default()
+                },
+                ..Default::default()
             },
         )
         .with_modal(modal.clone(), modal_only);
@@ -386,12 +292,12 @@ fn choose(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, args: &UpArgs) -> Result<Sele
             ));
         }
         if picks.tpu.is_some() {
-            return Err(Error::Usage("gpu run supports Vast GPUs only.".into()));
+            return Err(Error::usage(NO_TPU));
         }
         if let Some(offer) = picks.offer {
             return Ok(Selection::Vast(offer));
         }
-        let search = search.ok_or_else(|| Error::Usage("Modal requires --gpu MODEL.".into()))?;
+        let search = search.ok_or_else(|| Error::usage("Modal requires --gpu MODEL."))?;
         return crate::launch::select_offer(
             ctx,
             search.offers("container", picks.gpu.as_deref())?,
@@ -413,87 +319,134 @@ pub fn run(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> {
 
 fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> {
     let started = ctx.clock.monotonic();
+    let job = prepare(ctx, flags, cfg, cwd)?;
+    let phase = Phase::start(ctx, "launch");
+    report_plan(ctx, flags, &job);
+    let (mut backend, selected) = select_backend(ctx, flags, &job)?;
+    let Some(request) = approve(ctx, flags, &selected, &job, backend.as_ref())? else {
+        return Ok(());
+    };
+    let (results, staging) = stage_results(ctx, cwd)?;
+    // Before create, Ctrl-C cancels at once: nothing has been rented yet.
+    ctx.begin_run();
+    let mut session = Session {
+        created_id: None,
+        run_id: String::new(),
+        local: results.clone(),
+        paths: None,
+        launched: false,
+    };
+    let outcome = execute(
+        &phase,
+        flags,
+        &job,
+        backend.as_mut(),
+        &request,
+        (&results, staging.path()),
+        &mut session,
+    );
+    // A create failure without an ID cannot be cleaned up, just as before.
+    let Some(id) = session.created_id.clone() else {
+        return outcome;
+    };
+    let owned = Owned {
+        phase: &phase,
+        flags,
+        job: &job,
+        backend: backend.as_ref(),
+        session: &session,
+        id: &id,
+    };
+    settle(&owned, outcome, started)
+}
+
+/// Everything `gpu run` checks and builds locally before choosing hardware.
+struct Prepared {
+    now: Timestamp,
+    expire: String,
+    seconds: i64,
+    deadline: Timestamp,
+    linger: i64,
+    /// `export NAME=value` lines for the forwarded `--env` variables.
+    env: String,
+    args: UpArgs,
+    upload: run_files::Upload,
+    setup: String,
+    cfg: Dict,
+}
+
+/// What a run owns once a paid instance may exist.
+struct Session {
+    created_id: Option<String>,
+    run_id: String,
+    local: PathBuf,
+    /// The remote state root and job directory, once known.
+    paths: Option<(String, String)>,
+    /// Whether the job start request went out.
+    launched: bool,
+}
+
+/// A created instance's run, as the phases after the job see it.
+struct Owned<'a> {
+    phase: &'a Phase<'a>,
+    flags: &'a RunFlags,
+    job: &'a Prepared,
+    backend: &'a dyn RunBackend,
+    session: &'a Session,
+    id: &'a str,
+}
+
+/// Validate flags and config, then pack the upload. Nothing remote happens.
+fn prepare(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<Prepared> {
     let now = ctx.clock.now();
-    let prompted_expire;
     let expire = flags
         .expire
         .as_deref()
         .filter(|s| !s.is_empty())
         .or_else(|| cfg.get("default_expire").and_then(Value::as_str));
     let expire = match expire {
-        Some(expire) => expire,
-        None if ctx.interactive() => {
-            prompted_expire = crate::picker::pick(ctx, expiry_screen(now))?;
-            prompted_expire.trim()
-        }
+        Some(expire) => expire.to_string(),
+        None if ctx.interactive() => crate::picker::pick(ctx, expiry_screen(now))?
+            .trim()
+            .to_string(),
         None => {
-            return Err(Error::Usage(
-                "gpu run requires --expire DURATION or default_expire in config.json.".into(),
+            return Err(Error::usage(
+                "gpu run requires --expire DURATION or default_expire in config.json.",
             ));
         }
     };
-    let seconds = run_duration(expire, now)?;
-    if flags.provider.as_deref() == Some("modal") {
+    let seconds = run_duration(&expire, now)?;
+    if flags.provider == Some(Provider::Modal) {
         crate::modal::validate(flags, seconds)?;
-        if !flags.dry_run {
-            return Err(Error::Usage(crate::modal::NOT_LIVE.into()));
-        }
     } else if flags.cpu.is_some() || flags.memory.is_some() {
-        return Err(Error::Usage(
-            "--cpu and --memory require --provider modal.".into(),
-        ));
+        return Err(Error::usage("--cpu and --memory require --provider modal."));
     }
     let deadline = Timestamp::from_second(now.as_second() + seconds)
-        .map_err(|_| Error::Usage("Expiry out of range.".into()))?;
+        .map_err(|_| Error::usage("Expiry out of range."))?;
     let linger = if flags.linger == "0" {
         0
     } else {
         duration(&flags.linger, now)?
     };
     if !run_files::relative(Path::new(&flags.outputs)) {
-        return Err(Error::Usage(
-            "--outputs must be a relative directory without . or .. components.".into(),
+        return Err(Error::usage(
+            "--outputs must be a relative directory without . or .. components.",
         ));
     }
     if !ctx.interactive() && flags.gpu.is_none() {
-        return Err(Error::Usage(
-            "Non-terminal gpu run requires --gpu MODEL.".into(),
-        ));
+        return Err(Error::usage("Non-terminal gpu run requires --gpu MODEL."));
     }
     if !ctx.interactive() && !flags.yes && !flags.dry_run {
-        return Err(Error::Usage(
-            "Non-terminal gpu run requires --yes; use --dry-run to inspect without renting.".into(),
+        return Err(Error::usage(
+            "Non-terminal gpu run requires --yes; use --dry-run to inspect without renting.",
         ));
     }
     if flags.image.as_deref().is_some_and(str::is_empty) {
-        return Err(Error::Usage("--image must not be empty.".into()));
+        return Err(Error::usage("--image must not be empty."));
     }
-    let mut env = String::new();
-    for key in &flags.env {
-        if key.is_empty()
-            || !key
-                .bytes()
-                .enumerate()
-                .all(|(i, b)| b == b'_' || b.is_ascii_alphabetic() || (i > 0 && b.is_ascii_digit()))
-        {
-            return Err(Error::Usage(format!(
-                "Invalid --env name: {key}. Pass a variable NAME, not NAME=value."
-            )));
-        }
-        let value = ctx
-            .env
-            .get(key)
-            .ok_or_else(|| Error::Usage(format!("Local variable {key} is not set.")))?;
-        if value.contains('\0') {
-            return Err(Error::Usage(format!(
-                "Local variable {key} contains a NUL."
-            )));
-        }
-        ctx.protect_secret(value);
-        env.push_str(&format!("export {key}={}\n", shell_quote(value)));
-    }
-    let args = args(flags);
-    crate::launch::validate_launch_args(&args).map_err(|e| Error::Usage(e.text().into()))?;
+    let env = forwarded_env(ctx, flags)?;
+    let args = UpArgs::from(flags);
+    crate::launch::validate_launch_args(&args).map_err(|e| Error::usage(e.text()))?;
     let upload = run_files::prepare(ctx, cwd, run_files::max_bytes(&flags.max_upload)?)?;
     let secrets: Vec<_> = upload
         .files
@@ -507,7 +460,9 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
             .collect::<Vec<_>>()
             .join(", ");
         if !flags.allow_secrets {
-            return Err(Error::Usage(format!("Refusing secret-looking upload files: {names}. Ignore them in .gitignore or explicitly pass --allow-secrets.")));
+            return Err(Error::usage(format!(
+                "Refusing secret-looking upload files: {names}. Ignore them in .gitignore or explicitly pass --allow-secrets."
+            )));
         }
         ctx.eprintln(&format!(
             "WARNING: uploading secret-looking files allowed by --allow-secrets: {names}."
@@ -519,20 +474,63 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
         cfg.insert("container_image", Value::str(image));
     }
     // Vast startup/config do not apply to Modal's default Debian image.
-    if flags.provider.as_deref() != Some("modal") {
-        crate::startup::run_script(deadline)?;
+    if flags.provider != Some(Provider::Modal) {
+        crate::vast::startup::run_script(deadline)?;
     }
-    if flags.provider.as_deref() != Some("modal")
+    if flags.provider != Some(Provider::Modal)
         && !matches!(cfg.get("container_image"), Some(Value::Str(image)) if !image.is_empty())
     {
-        return Err(Error::Usage(
-            "container_image must be a non-empty string.".into(),
-        ));
+        return Err(Error::usage("container_image must be a non-empty string."));
     }
-    phase(ctx, "launch");
+    Ok(Prepared {
+        now,
+        expire,
+        seconds,
+        deadline,
+        linger,
+        env,
+        args,
+        upload,
+        setup,
+        cfg,
+    })
+}
+
+/// `export` lines for each `--env NAME`, read from the local environment and
+/// protected from every later diagnostic.
+fn forwarded_env(ctx: &Ctx, flags: &RunFlags) -> Result<String> {
+    let mut env = String::new();
+    for key in &flags.env {
+        if key.is_empty()
+            || !key
+                .bytes()
+                .enumerate()
+                .all(|(i, b)| b == b'_' || b.is_ascii_alphabetic() || (i > 0 && b.is_ascii_digit()))
+        {
+            return Err(Error::usage(format!(
+                "Invalid --env name: {key}. Pass a variable NAME, not NAME=value."
+            )));
+        }
+        let value = ctx
+            .env
+            .get(key)
+            .ok_or_else(|| Error::usage(format!("Local variable {key} is not set.")))?;
+        if value.contains('\0') {
+            return Err(Error::usage(format!(
+                "Local variable {key} contains a NUL."
+            )));
+        }
+        ctx.protect_secret(value);
+        env.push_str(&format!("export {key}={}\n", shell_quote(value)));
+    }
+    Ok(env)
+}
+
+/// Every `gpu run` result field, in contract order, before hardware is chosen.
+fn report_plan(ctx: &Ctx, flags: &RunFlags, job: &Prepared) {
     ctx.result(
         "provider",
-        Value::str(flags.provider.as_deref().unwrap_or("vast")),
+        Value::str(flags.provider.unwrap_or(Provider::Vast).key()),
     );
     ctx.result("dry_run", Value::Bool(flags.dry_run));
     ctx.result("created", Value::Bool(false));
@@ -549,13 +547,13 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
     ] {
         ctx.result(key, Value::Null);
     }
-    ctx.result("expires_at", Value::str(deadline.to_string()));
-    ctx.result("uploaded_files", Value::Int(upload.files.len() as i64));
+    ctx.result("expires_at", Value::str(job.deadline.to_string()));
+    ctx.result("uploaded_files", Value::Int(job.upload.files.len() as i64));
     if flags.dry_run {
         ctx.result(
             "files",
             Value::List(
-                upload
+                job.upload
                     .files
                     .iter()
                     .map(|p| Value::str(p.to_string_lossy()))
@@ -563,80 +561,111 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
             ),
         );
     }
-    ctx.result("uploaded_bytes", Value::Int(upload.bytes as i64));
+    ctx.result("uploaded_bytes", Value::Int(job.upload.bytes as i64));
     ctx.result(
         "setup",
-        if setup.is_empty() {
+        if job.setup.is_empty() {
             Value::Null
         } else {
-            Value::str(&setup)
+            Value::str(&job.setup)
         },
     );
-    let label = upload
+}
+
+/// The backend for the chosen hardware, and the flags as that choice
+/// completed them.
+fn select_backend(
+    ctx: &Ctx,
+    flags: &RunFlags,
+    job: &Prepared,
+) -> Result<(Box<dyn RunBackend>, RunFlags)> {
+    let mut selected = flags.clone();
+    let backend: Box<dyn RunBackend> =
+        if flags.provider == Some(Provider::Modal) && (flags.gpu.is_some() || !ctx.interactive()) {
+            Box::new(crate::modal::ModalBackend::new(None))
+        } else {
+            match choose(ctx, flags, &job.cfg, &job.args)? {
+                Selection::Vast(offer) => Box::new(crate::vast::run::VastBackend::new(offer)),
+                Selection::Modal(name, rates) => {
+                    selected.provider = Some(Provider::Modal);
+                    selected.gpu = Some(name);
+                    ctx.result("provider", Value::str(Provider::Modal.key()));
+                    crate::modal::validate(&selected, job.seconds)?;
+                    Box::new(crate::modal::ModalBackend::new(rates))
+                }
+            }
+        };
+    ctx.result("provider", Value::str(backend.provider().key()));
+    Ok((backend, selected))
+}
+
+/// Price the plan against the spending limits, then end a dry run or ask for
+/// confirmation. `None` when nothing should be rented.
+fn approve(
+    ctx: &Ctx,
+    flags: &RunFlags,
+    selected: &RunFlags,
+    job: &Prepared,
+    backend: &dyn RunBackend,
+) -> Result<Option<Value>> {
+    let label = job
+        .upload
         .root
         .file_name()
         .unwrap_or_default()
         .to_string_lossy()
         .to_string();
-    let mut selected_flags = flags.clone();
-    let mut backend: Box<dyn RunBackend> = if flags.provider.as_deref() == Some("modal")
-        && (flags.gpu.is_some() || !ctx.interactive())
-    {
-        Box::new(crate::modal::ModalBackend { rates: None })
-    } else {
-        match choose(ctx, flags, &cfg, &args)? {
-            Selection::Vast(offer) => Box::new(VastBackend {
-                offer: Some(offer),
-                ..VastBackend::default()
-            }),
-            Selection::Modal(name, rates) => {
-                selected_flags.provider = Some("modal".into());
-                selected_flags.gpu = Some(name);
-                ctx.result("provider", Value::str("modal"));
-                crate::modal::validate(&selected_flags, seconds)?;
-                Box::new(crate::modal::ModalBackend { rates })
-            }
-        }
-    };
-    ctx.result("provider", Value::str(backend.provider()));
-    let plan = backend.plan(ctx, &selected_flags, &cfg, deadline, label)?;
+    let plan = backend.plan(ctx, selected, &job.cfg, job.deadline, label)?;
     let rate = plan.rate;
-    crate::guardrails::spending(ctx, &cfg, Some(rate), Some(deadline))?;
-    let estimate = rate * seconds as f64 / 3600.0;
+    crate::guardrails::spending(ctx, &job.cfg, Some(rate), Some(job.deadline))?;
+    let estimate = rate * job.seconds as f64 / 3600.0;
     ctx.result("estimated_spend", Value::Float(estimate));
     ctx.result("price_per_hour", Value::Float(rate));
     ctx.result("gpu", plan.gpu);
     let request = plan.request?;
     if flags.dry_run {
         ctx.result("request", request);
-        ctx.println(&format!("DRY RUN: {} files, {} bytes; setup: {}; maximum compute estimate ${}. No instance created.", upload.files.len(), upload.bytes, setup, crate::pyfmt::fixed(estimate, 3)))?;
-        return Ok(());
+        ctx.println(&format!(
+            "DRY RUN: {} files, {} bytes; setup: {}; maximum compute estimate ${}. No instance created.",
+            job.upload.files.len(),
+            job.upload.bytes,
+            job.setup,
+            crate::pyfmt::fixed(estimate, 3)
+        ))?;
+        return Ok(None);
     }
     if !flags.yes
         && !crate::prompt::confirm(
             ctx,
-            &format!(
-                "Run {} ({} files, {} bytes) at ${}/hr, at most {expire} (up to ${})? Type 'yes': ",
+            Some(&format!(
+                "Run {} ({} files, {} bytes) at ${}/hr, at most {} (up to ${})?",
                 shell_join(&flags.command),
-                upload.files.len(),
-                upload.bytes,
+                job.upload.files.len(),
+                job.upload.bytes,
                 crate::pyfmt::fixed(rate, 3),
+                job.expire,
                 crate::pyfmt::fixed(estimate, 3)
-            ),
+            )),
         )?
     {
         return Err(Error::Cancelled(130));
     }
-    if ctx.clock.now().as_second() >= deadline.as_second() - DOWNLOAD_RESERVE {
-        return Err(Error::Usage(
-            "Not enough time remains before expiry; choose a longer --expire.".into(),
+    if ctx.clock.now().as_second() >= job.deadline.as_second() - DOWNLOAD_RESERVE {
+        return Err(Error::usage(
+            "Not enough time remains before expiry; choose a longer --expire.",
         ));
     }
-    // Prove the destination is writable before spending anything. Keep a unique
-    // staging directory on the same filesystem, then rename once the ID is known.
-    let results = cwd.join("gpu-runs");
+    Ok(Some(request))
+}
+
+/// Prove the destination is writable before spending anything. Keep a unique
+/// staging directory on the same filesystem, renamed once the ID is known.
+fn stage_results(ctx: &Ctx, cwd: &Path) -> Result<(PathBuf, tempfile::TempDir)> {
+    let results = cwd.join(RESULTS_DIR);
     if !results.exists() {
-        ctx.eprintln("Results go in gpu-runs/; add gpu-runs/ to .gitignore.")?;
+        ctx.eprintln(&format!(
+            "Results go in {RESULTS_DIR}/; add {RESULTS_DIR}/ to .gitignore."
+        ))?;
     }
     fs::create_dir_all(&results).map_err(|e| crate::error::os_error(&e, &results))?;
     let staging = tempfile::Builder::new()
@@ -645,181 +674,157 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
         .map_err(|e| crate::error::os_error(&e, &results))?;
     fs::write(staging.path().join("log.txt"), b"")
         .map_err(|e| crate::error::os_error(&e, &staging.path().join("log.txt")))?;
-    // Before create, Ctrl-C cancels at once: nothing has been rented yet.
-    ctx.begin_run();
-    let mut created_id = None;
-    let mut run_id = String::new();
-    let mut local = cwd.join("gpu-runs");
-    let mut paths = None;
-    let mut launched = false;
-    let job = (|| {
-        let id = backend.launch(ctx, &request, deadline, flags.timeout, &mut |id| {
+    Ok((results, staging))
+}
+
+/// Create, upload, start and follow the job. `session` records ownership as
+/// soon as an instance exists, whatever fails afterwards.
+fn execute(
+    phase: &Phase,
+    flags: &RunFlags,
+    job: &Prepared,
+    backend: &mut dyn RunBackend,
+    request: &Value,
+    (results, staging): (&Path, &Path),
+    session: &mut Session,
+) -> Result<()> {
+    let ctx = phase.ctx;
+    let id = backend.launch(
+        ctx,
+        request,
+        job.deadline,
+        flags.timeout,
+        &mut |id, named| {
             // Record ownership before any local I/O can fail. Launch readiness
             // failures must still reach provider-state-verified destruction.
-            created_id = Some(id.to_string());
-            run_id = format!("{}-{id}", now.strftime("%Y%m%dT%H%M%SZ"));
-            local = cwd.join("gpu-runs").join(&run_id);
-            fs::rename(staging.path(), &local).map_err(|e| crate::error::os_error(&e, &local))?;
-            ctx.result("run_id", Value::str(&run_id));
+            session.created_id = Some(id.to_string());
+            session.run_id = match named {
+                Some(named) => named.into(),
+                None => format!("{}-{id}", job.now.strftime("%Y%m%dT%H%M%SZ")),
+            };
+            session.local = results.join(&session.run_id);
+            fs::rename(staging, &session.local)
+                .map_err(|e| crate::error::os_error(&e, &session.local))?;
+            ctx.result("run_id", Value::str(&session.run_id));
             ctx.result(
                 "log_path",
-                Value::str(local.join("log.txt").to_string_lossy()),
+                Value::str(session.local.join("log.txt").to_string_lossy()),
             );
             Ok(())
-        })?;
-        let target = format!("/workspace/gpu-run-{run_id}");
-        let jobdir = if upload.relative.as_os_str().is_empty() {
-            target.clone()
-        } else {
-            format!("{target}/{}", upload.relative.to_string_lossy())
-        };
-        let root = format!("/root/.local/state/gpu-run/{run_id}");
-        paths = Some((root.clone(), jobdir.clone()));
-        ctx.check_cancelled()?;
-        phase(ctx, "upload");
-        let command = format!(
-            "mkdir -p {} && tar -xzf - --no-same-owner -C {}",
-            shell_quote(&target),
-            shell_quote(&target)
-        );
-        let remaining =
-            (deadline.as_second() - DOWNLOAD_RESERVE - ctx.clock.now().as_second()).max(1) as f64;
-        checked_transfer(
-            ctx,
-            &backend
-                .remote(&command, remaining)
-                .stdin(Input::File(upload.archive.path().into())),
-            1,
-            "Upload failed; instance will be destroyed.",
-        )?;
-        ctx.check_cancelled()?;
-        let mut config = format!("FORWARDED={}\n", shell_quote(&env));
-        for (key, value) in [
-            ("JOBDIR", jobdir),
-            ("OUTPUTS", flags.outputs.clone()),
-            ("SETUP", setup.clone()),
-            ("COMMAND", shell_join(&flags.command)),
-            ("DEADLINE", deadline.as_second().to_string()),
-            (
-                "JOB_DEADLINE",
-                (deadline.as_second() - DOWNLOAD_RESERVE).to_string(),
-            ),
-            ("LINGER", linger.to_string()),
-            (
-                "WAIT_FOR_STARTUP",
-                if backend.wait_for_startup() { "1" } else { "0" }.into(),
-            ),
-        ] {
-            config.push_str(&format!("{key}={}\n", shell_quote(&value)));
-        }
-        let hook = backend.hook(&id);
-        let payload = format!(
-            "GPU_RUN_SOURCE={}\nGPU_RUN_CONFIG={}\nGPU_RUN_HOOK={}\n{REMOTE_SOURCE}",
-            shell_quote(REMOTE_SOURCE),
-            shell_quote(&config),
-            shell_quote(&hook)
-        );
-        let start = format!(
-            "bash -s -- start {} {}",
-            shell_quote(&root),
-            shell_quote(&run_id)
-        );
-        launched = true;
-        checked(
-            ctx,
-            &backend.remote(&start, 30.0).stdin(Input::Text(payload)),
-            "Job startup unverified; instance will be destroyed.",
-        )?;
-        follow(ctx, backend.as_ref(), &id, &root, &run_id, deadline, &local)
-    })();
-    // A create failure without an ID cannot be cleaned up, just as before.
-    let Some(id) = created_id else {
-        return job;
+        },
+    )?;
+    let run_id = session.run_id.clone();
+    let target = format!("/workspace/gpu-run-{run_id}");
+    let jobdir = if job.upload.relative.as_os_str().is_empty() {
+        target.clone()
+    } else {
+        format!("{target}/{}", job.upload.relative.to_string_lossy())
     };
-    let mut outcome = job;
-    let mut failure_phase = ctx
-        .result_snapshot()
-        .get("phase")
-        .cloned()
-        .unwrap_or(Value::str("launch"));
+    let root = format!("/root/.local/state/gpu-run/{run_id}");
+    session.paths = Some((root.clone(), jobdir.clone()));
+    ctx.check_cancelled()?;
+    phase.set("upload");
+    let command = backend.upload(format!(
+        "mkdir -p {} && tar -xzf - --no-same-owner -C {}",
+        shell_quote(&target),
+        shell_quote(&target)
+    ));
+    let remaining =
+        (job.deadline.as_second() - DOWNLOAD_RESERVE - ctx.clock.now().as_second()).max(1) as f64;
+    checked_transfer(
+        ctx,
+        backend,
+        &backend
+            .remote(&command, remaining)
+            .stdin(Input::File(job.upload.archive.path().into())),
+        1,
+        "Upload failed; instance will be destroyed.",
+    )?;
+    ctx.check_cancelled()?;
+    let mut config = format!("FORWARDED={}\n", shell_quote(&job.env));
+    for (key, value) in [
+        ("JOBDIR", jobdir),
+        ("OUTPUTS", flags.outputs.clone()),
+        ("SETUP", job.setup.clone()),
+        ("COMMAND", shell_join(&flags.command)),
+        ("DEADLINE", job.deadline.as_second().to_string()),
+        (
+            "JOB_DEADLINE",
+            (job.deadline.as_second() - DOWNLOAD_RESERVE).to_string(),
+        ),
+        ("LINGER", job.linger.to_string()),
+        (
+            "WAIT_FOR_STARTUP",
+            if backend.wait_for_startup() { "1" } else { "0" }.into(),
+        ),
+    ] {
+        config.push_str(&format!("{key}={}\n", shell_quote(&value)));
+    }
+    let hook = backend.hook(&id);
+    let payload = format!(
+        "{}GPU_RUN_SOURCE={}\nGPU_RUN_CONFIG={}\nGPU_RUN_HOOK={}\n{REMOTE_SOURCE}",
+        backend.start_prelude(),
+        shell_quote(REMOTE_SOURCE),
+        shell_quote(&config),
+        shell_quote(&hook)
+    );
+    let start = format!(
+        "bash -s -- start {} {}",
+        shell_quote(&root),
+        shell_quote(&run_id)
+    );
+    session.launched = true;
+    checked(
+        ctx,
+        backend,
+        &backend.remote(&start, 30.0).stdin(Input::Text(payload)),
+        "Job startup unverified; instance will be destroyed.",
+    )?;
+    follow(
+        phase,
+        backend,
+        &id,
+        &root,
+        &run_id,
+        job.deadline,
+        &session.local,
+    )
+}
+
+/// After a created instance's job ends, however it ended: recover the log
+/// and outputs, destroy the instance, and write `result.json`.
+fn settle(owned: &Owned, mut outcome: Result<()>, started: f64) -> Result<()> {
+    let Owned {
+        phase,
+        backend,
+        session,
+        id,
+        ..
+    } = *owned;
+    let ctx = phase.ctx;
+    let mut failure_phase = Value::str(phase.get());
     // Cancellation is cooperative, including a setup/start SSH error caused by SIGINT.
     if ctx.interrupts() > 0 {
         outcome = Err(Error::Cancelled(130));
     }
-    if let Some((root, jobdir)) = paths {
-        let response = || {
-            checked(
-                ctx,
-                &backend.remote(&control(&root, &run_id, "status"), 5.0),
-                "Status unavailable.",
-            )
-            .ok()
-        };
-        let status = || response().and_then(|out| parse_status(&out.stdout));
-        let mut last = None;
-        if outcome.is_err() && launched {
-            let _ = checked(
-                ctx,
-                &backend.remote(&control(&root, &run_id, "stop"), 10.0),
-                "Stop unverified.",
-            );
-            // The supervisor runs the linger hook before publishing the final
-            // status; wait through transient SSH failures until it is seen.
-            let until = ctx.clock.monotonic() + 35.0;
-            while ctx.interrupts() < 2 && ctx.clock.monotonic() < until {
-                let out = response();
-                if out.as_ref().is_some_and(|o| o.stdout.trim() == "lost") {
-                    break;
-                }
-                if let Some(s) = out
-                    .and_then(|o| parse_status(&o.stdout))
-                    .filter(|s| s.exit.is_some())
-                {
-                    last = Some(s);
-                    break;
-                }
-                ctx.clock.sleep(1.0);
-            }
-        }
-        if ctx.interrupts() < 2 {
-            // Fetch bytes written during cancellation/TERM grace, too.
-            if let Some(status) = last.or_else(status) {
-                let _ = finish_log(ctx, backend.as_ref(), &root, &local, status.size);
-            }
-            // The finished job shortened expiry to linger; an attached
-            // download keeps the original deadline.
-            if backend.restore_expiry(ctx, &id, deadline).is_err() {
-                let _ = ctx.eprintln(&format!(
-                    "Could not restore expiry to {deadline}; downloading anyway."
-                ));
-            }
-            phase(ctx, "download");
-            let downloaded = download(
-                ctx,
-                backend.as_ref(),
-                &root,
-                &jobdir,
-                &flags.outputs,
-                &local,
-                deadline,
-            );
-            if let Err(error) = downloaded {
-                let _ = ctx.eprintln(&format!("Could not fetch results: {}", error.text()));
-                if outcome.is_ok()
-                    || matches!(
-                        outcome,
-                        Err(Error::Remote(_)
-                            | Error::Status(ExitCode::JobTimeout | ExitCode::InstanceLost, _))
-                    )
-                {
-                    outcome = Err(error);
-                    failure_phase = Value::str("download");
-                }
-            }
+    // Ephemeral Modal files cannot be recovered once the sandbox is lost.
+    // Do not replace exit 18 with the inevitable download transport failure.
+    let modal_lost = backend.provider() == Provider::Modal
+        && (matches!(outcome, Err(Error::Status(ExitCode::InstanceLost, _)))
+            || (outcome.is_err() && backend.lost(ctx, id)));
+    if modal_lost && ctx.interrupts() == 0 {
+        outcome = Err(Error::status(
+            ExitCode::InstanceLost,
+            "Modal sandbox ended while the job was running (possibly preempted); ephemeral outputs are lost.",
+        ));
+    }
+    if let Some(paths) = session.paths.as_ref().filter(|_| !modal_lost) {
+        if recover(owned, paths, &mut outcome) {
+            failure_phase = Value::str("download");
         }
     }
-    phase(ctx, "cleanup");
-    let cleaned = backend.destroy(ctx, &id);
+    phase.set("cleanup");
+    let cleaned = backend.destroy(ctx, id);
     if let Err(error) = cleaned {
         outcome = Err(error);
         failure_phase = Value::str("cleanup");
@@ -827,7 +832,7 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
         ctx.result("destroyed", Value::Bool(true));
         ctx.set_interrupt_notice(None);
         if let Err(Error::Status(ExitCode::WaitTimeout, message)) = &mut outcome {
-            *message = format!("Instance {id} was destroyed. {message}");
+            *message = format!("Instance {id} was destroyed. {message}").into();
         }
         if ctx.interrupts() > 0 {
             outcome = Err(Error::Cancelled(130));
@@ -837,6 +842,7 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
         "duration_seconds",
         Value::Float(ctx.clock.monotonic() - started),
     );
+    let local = &session.local;
     ctx.result(
         "log_tail",
         run_files::tail(&local.join("log.txt"))
@@ -844,7 +850,7 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
             .unwrap_or(Value::Null),
     );
     if outcome.is_ok() {
-        phase(ctx, "done");
+        phase.set("done");
     } else {
         ctx.result("phase", failure_phase);
     }
@@ -858,6 +864,104 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
         let _ = ctx.eprintln(&format!("Results: {}", local.display()));
     }
     outcome
+}
+
+/// Stop a failed job, fetch the rest of its log and download its outputs
+/// under the original deadline. True when a download failure replaced
+/// `outcome`.
+fn recover(owned: &Owned, (root, jobdir): &(String, String), outcome: &mut Result<()>) -> bool {
+    let Owned {
+        phase,
+        flags,
+        job,
+        backend,
+        session,
+        id,
+    } = *owned;
+    let ctx = phase.ctx;
+    let run_id = &session.run_id;
+    let deadline = job.deadline;
+    let response = || {
+        checked(
+            ctx,
+            backend,
+            &backend.remote(&control(root, run_id, "status"), 5.0),
+            "Status unavailable.",
+        )
+        .ok()
+    };
+    let status = || response().and_then(|out| parse_status(&out.stdout));
+    let mut last = None;
+    if outcome.is_err() && session.launched {
+        let _ = checked(
+            ctx,
+            backend,
+            &backend.remote(&control(root, run_id, "stop"), 10.0),
+            "Stop unverified.",
+        );
+        // The supervisor runs the linger hook before publishing the final
+        // status; wait through transient SSH failures until it is seen.
+        let poll = ctx.polling(35.0, 1.0);
+        while ctx.interrupts() < 2 && !poll.expired() {
+            let out = response();
+            if out.as_ref().is_some_and(|o| o.stdout.trim() == "lost") {
+                break;
+            }
+            if let Some(s) = out
+                .and_then(|o| parse_status(&o.stdout))
+                .filter(|s| s.exit.is_some())
+            {
+                last = Some(s);
+                break;
+            }
+            poll.pause();
+        }
+    }
+    if ctx.interrupts() >= 2 {
+        return false;
+    }
+    // Fetch bytes written during cancellation/TERM grace, too.
+    if let Some(status) = last.or_else(status) {
+        let _ = finish_log(ctx, backend, root, &session.local, status.size);
+    }
+    // The finished job shortened expiry to linger; an attached
+    // download keeps the original deadline.
+    if backend.restore_expiry(ctx, id, deadline).is_err() {
+        let _ = ctx.eprintln(&format!(
+            "Could not restore expiry to {deadline}; downloading anyway."
+        ));
+    }
+    phase.set("download");
+    let downloaded = download(
+        ctx,
+        backend,
+        root,
+        jobdir,
+        &flags.outputs,
+        &session.local,
+        deadline,
+    );
+    let Err(error) = downloaded else {
+        return false;
+    };
+    let _ = ctx.eprintln(&format!("Could not fetch results: {}", error.text()));
+    if outcome.is_ok()
+        || matches!(
+            outcome,
+            Err(Error::Remote(_) | Error::Status(ExitCode::JobTimeout | ExitCode::InstanceLost, _))
+        )
+    {
+        *outcome = if backend.provider() == Provider::Modal && backend.lost(ctx, id) {
+            Err(Error::status(
+                ExitCode::InstanceLost,
+                "Modal sandbox ended during download; ephemeral outputs are lost.",
+            ))
+        } else {
+            Err(error)
+        };
+        return true;
+    }
+    false
 }
 
 struct Status {
@@ -884,7 +988,7 @@ fn parse_status(text: &str) -> Option<Status> {
 }
 
 fn follow(
-    ctx: &Ctx,
+    phase: &Phase,
     backend: &dyn RunBackend,
     id: &str,
     root: &str,
@@ -892,6 +996,7 @@ fn follow(
     deadline: Timestamp,
     local: &Path,
 ) -> Result<()> {
+    let ctx = phase.ctx;
     let mut offset = 0u64;
     let mut retry = 1.0f64;
     let chunk = tempfile::NamedTempFile::new()?;
@@ -908,10 +1013,19 @@ fn follow(
         }
         let response = checked(
             ctx,
+            backend,
             &backend.remote(&control(root, token, "status"), 15.0),
             "Job status unavailable.",
-        )
-        .ok();
+        );
+        let response = match response {
+            Err(
+                error @ Error::Status(
+                    ExitCode::NotSetup | ExitCode::AuthExpired | ExitCode::CommandTimeout,
+                    _,
+                ),
+            ) if backend.provider() == Provider::Modal => return Err(error),
+            response => response.ok(),
+        };
         if response.as_ref().is_some_and(|o| o.stdout.trim() == "lost") {
             return Err(Error::status(
                 ExitCode::InstanceLost,
@@ -933,35 +1047,30 @@ fn follow(
             retry = (retry * 2.0).min(15.0);
             continue;
         };
-        phase(ctx, &status.phase);
+        phase.set(&status.phase);
         let amount = status.size.saturating_sub(offset).min(CHUNK);
         if amount > 0 {
-            let command = format!(
-                "dd if={} bs=64K iflag=skip_bytes,count_bytes skip={offset} count={amount} status=none",
-                shell_quote(&format!("{root}/log"))
-            );
-            if checked(
+            if let Err(error) = checked(
                 ctx,
-                &backend.remote(&command, 15.0).stdout_file(chunk.path()),
+                backend,
+                &log_chunk(backend, root, offset, amount, chunk.path()),
                 "Log connection interrupted.",
-            )
-            .is_err()
-            {
+            ) {
+                if backend.provider() == Provider::Modal
+                    && matches!(
+                        error,
+                        Error::Status(
+                            ExitCode::NotSetup | ExitCode::AuthExpired | ExitCode::CommandTimeout,
+                            _
+                        )
+                    )
+                {
+                    return Err(error);
+                }
                 ctx.clock.sleep(1.0);
                 continue;
             }
-            let bytes = fs::read(chunk.path())?;
-            if bytes.len() as u64 != amount {
-                return Err(Error::msg(
-                    "Remote log truncated; refusing to lose or duplicate bytes.",
-                ));
-            }
-            log.write_all(&bytes)?;
-            if ctx.json() {
-                ctx.console.write_err_bytes(&bytes)?;
-            } else {
-                ctx.console.write_out_bytes(&bytes)?;
-            }
+            append_chunk(ctx, &mut log, chunk.path(), amount)?;
             offset += amount;
         }
         retry = 1.0;
@@ -985,6 +1094,33 @@ fn follow(
     }
 }
 
+/// The remote command writing `amount` log bytes from `offset` to `into`.
+fn log_chunk(backend: &dyn RunBackend, root: &str, offset: u64, amount: u64, into: &Path) -> Cmd {
+    let command = format!(
+        "dd if={} bs=64K iflag=skip_bytes,count_bytes skip={offset} count={amount} status=none",
+        shell_quote(&format!("{root}/log"))
+    );
+    backend.remote(&command, 15.0).stdout_file(into)
+}
+
+/// Append a fetched chunk to the local log and echo it: to stderr under
+/// `--json`, so stdout stays one JSON document.
+fn append_chunk(ctx: &Ctx, log: &mut fs::File, chunk: &Path, amount: u64) -> Result<()> {
+    let bytes = fs::read(chunk)?;
+    if bytes.len() as u64 != amount {
+        return Err(Error::msg(
+            "Remote log truncated; refusing to lose or duplicate bytes.",
+        ));
+    }
+    log.write_all(&bytes)?;
+    if ctx.json() {
+        ctx.console.write_err_bytes(&bytes)?;
+    } else {
+        ctx.console.write_out_bytes(&bytes)?;
+    }
+    Ok(())
+}
+
 fn finish_log(
     ctx: &Ctx,
     backend: &dyn RunBackend,
@@ -998,26 +1134,14 @@ fn finish_log(
     let chunk = tempfile::NamedTempFile::new()?;
     while offset < size && ctx.interrupts() < 2 {
         let amount = (size - offset).min(CHUNK);
-        let command = format!(
-            "dd if={} bs=64K iflag=skip_bytes,count_bytes skip={offset} count={amount} status=none",
-            shell_quote(&format!("{root}/log"))
-        );
         checked_transfer(
             ctx,
-            &backend.remote(&command, 15.0).stdout_file(chunk.path()),
+            backend,
+            &log_chunk(backend, root, offset, amount, chunk.path()),
             2,
             "Final log fetch interrupted.",
         )?;
-        let bytes = fs::read(chunk.path())?;
-        if bytes.len() as u64 != amount {
-            return Err(Error::msg("Remote log truncated."));
-        }
-        log.write_all(&bytes)?;
-        if ctx.json() {
-            ctx.console.write_err_bytes(&bytes)?;
-        } else {
-            ctx.console.write_out_bytes(&bytes)?;
-        }
+        append_chunk(ctx, &mut log, chunk.path(), amount)?;
         offset += amount;
     }
     Ok(())
@@ -1026,8 +1150,6 @@ fn finish_log(
 /// Only SSH transport failures are retried, a few times; a remote tar error
 /// or an exhausted budget proceeds straight to destroy.
 const DOWNLOAD_RETRY_DELAYS: [f64; 3] = [5.0, 15.0, 30.0];
-const DESTROY_ATTEMPTS: usize = 3;
-const DESTROY_VERIFY_SECONDS: f64 = 60.0;
 
 fn download(
     ctx: &Ctx,
@@ -1046,7 +1168,7 @@ fn download(
         shell_quote(outputs),
         shell_quote(&format!("{root}/attached"))
     );
-    let end = ctx.clock.monotonic() + seconds;
+    let poll = ctx.polling(seconds, 0.0);
     let message = "Results download failed; instance will still be destroyed.";
     for delay in DOWNLOAD_RETRY_DELAYS
         .iter()
@@ -1054,7 +1176,7 @@ fn download(
         .map(Some)
         .chain([None])
     {
-        let remaining = (end - ctx.clock.monotonic()).max(0.1);
+        let remaining = poll.remaining().max(0.1);
         let result = ctx.transfer(
             &backend
                 .remote(&command, remaining)
@@ -1062,17 +1184,17 @@ fn download(
             2,
         );
         let transport = matches!(result, Ok(Output { code: 255, .. }));
-        let error = match step_result(ctx, result, message) {
+        let error = match backend.remote_result(ctx, result, message) {
             Ok(_) => break,
             Err(error) => error,
         };
-        let Some(delay) = delay.filter(|delay| {
-            transport && ctx.interrupts() < 2 && ctx.clock.monotonic() + delay < end
-        }) else {
+        let Some(delay) =
+            delay.filter(|delay| transport && ctx.interrupts() < 2 && *delay < poll.remaining())
+        else {
             return Err(error);
         };
         ctx.eprintln(&format!("{} Retrying download.", error.text()))?;
-        ctx.clock.sleep(delay);
+        poll.pause_for(delay);
     }
     let bytes = run_files::unpack(ctx, archive.path(), local, Path::new(outputs))?;
     ctx.result("downloaded_bytes", Value::Int(bytes as i64));
@@ -1081,89 +1203,4 @@ fn download(
         Value::str(local.join(outputs).to_string_lossy()),
     );
     Ok(())
-}
-
-/// Only ever called with the ID this invocation just created. A successful
-/// mutation is not enough: verify disappearance. Always remove the local alias.
-fn destroy(ctx: &Ctx, id: &str) -> Result<()> {
-    let cleanup = || -> Result<()> {
-        // This invocation owns the freshly created ID. A lagging or broken
-        // inventory must never suppress the paid-resource cleanup request.
-        let mut verified = Ok(());
-        for _ in 0..DESTROY_ATTEMPTS {
-            let sent = crate::process::run(
-                ctx,
-                &["vastai", "destroy", "instance", id, "--yes"],
-                Some(30.0),
-            );
-            if let Err(error) = sent {
-                // A failed/timeout reply does not prove the mutation was rejected.
-                // A definite absence after the request still verifies completion.
-                let _ = ctx.eprintln(&format!(
-                    "Destroy request completion uncertain: {}",
-                    ctx.safe_diagnostic(error.text())
-                ));
-            }
-            verified = crate::commands::wait_for_lifecycle(
-                ctx,
-                id,
-                "destroy",
-                DESTROY_VERIFY_SECONDS / DESTROY_ATTEMPTS as f64,
-            );
-            if verified.is_ok() {
-                break;
-            }
-        }
-        verified
-    };
-    let outcome = cleanup();
-    let _ = crate::ssh_config::remove_host(&ctx.env, id);
-    outcome.map_err(|_| Error::status(ExitCode::CleanupUnverified, format!("Instance {id}: destruction unverified; billing may continue. Next: gpu down {id} --yes")))
-}
-
-#[cfg(test)]
-mod expiry_prompt_tests {
-    use super::*;
-    use crate::picker::{
-        testing::{drive, BACKSPACE, ENTER},
-        Outcome,
-    };
-
-    #[test]
-    fn expiry_prompt_accepts_duration() {
-        let result = drive(expiry_screen(Timestamp::now()), |keys| {
-            keys.type_text("1h30m");
-            keys.press(ENTER);
-        });
-        assert_eq!(result, Outcome::Done("1h30m".into()));
-    }
-
-    #[test]
-    fn expiry_prompt_rejects_invalid_and_short_values() {
-        let result = drive(
-            expiry_screen(Timestamp::new(1_700_000_000, 500_000_000).unwrap()),
-            |keys| {
-                keys.type_text("bad");
-                keys.press(ENTER);
-                keys.wait(|s| s.body.iter().any(|line| line.contains("Use a duration")));
-                keys.press(BACKSPACE);
-                keys.press(BACKSPACE);
-                keys.press(BACKSPACE);
-                keys.type_text("10m");
-                keys.press(ENTER);
-                keys.wait(|s| s.body.iter().any(|line| line.contains("longer than 10m")));
-                keys.press(BACKSPACE);
-                keys.press(BACKSPACE);
-                keys.press(BACKSPACE);
-                keys.type_text("30m");
-                keys.press(ENTER);
-            },
-        );
-        assert_eq!(result, Outcome::Done("30m".into()));
-        let now = Timestamp::new(1_700_000_000, 500_000_000).unwrap();
-        for text in ["", "bad", "5m", "10m"] {
-            assert!(run_duration(text, now).is_err());
-        }
-        assert_eq!(run_duration("11m", now).unwrap(), 660);
-    }
 }

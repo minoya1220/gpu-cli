@@ -1,5 +1,4 @@
 //! Setup/undo and opt-in safety tests: all cloud requests terminate here.
-#[path = "setup_automation.rs"]
 mod automation;
 use std::sync::{Arc, Mutex};
 
@@ -90,6 +89,7 @@ fn fixture() -> (TestEnv, Ctx, Arc<FakeRunner>, Arc<Mutex<State>>) {
     let state = Arc::new(Mutex::new(State::default()));
     let shared = state.clone();
     let config = env.config.join("gpu/config.json");
+    let rest_state = state.clone();
     let native = move |cmd: &Cmd| {
         let a = strs(&cmd.argv);
         if a == ["vastai", "show", "instances", "--raw"] {
@@ -192,24 +192,6 @@ fn fixture() -> (TestEnv, Ctx, Arc<FakeRunner>, Arc<Mutex<State>>) {
                     ok("")
                 }
             }
-            ["compute", "tpus", "tpu-vm", "accelerator-types", "list", _zone] => {
-                ok(r#"[{"type":"v6e-1"}]"#)
-            }
-            ["compute", "tpus", "locations", "list"] => {
-                ok(r#"[{"locationId":"us-east5-b"},{"locationId":"us-central1-a"}]"#)
-            }
-            ["compute", "tpus", "tpu-vm", "list", zone]
-                if ["--zone=us-east5-b", "--zone=us-central1-a", "--zone=-"].contains(zone) =>
-            {
-                // Outside default zone: undo must not overlook it.
-                if s.owned_tpu && ["--zone=us-central1-a", "--zone=-"].contains(zone) {
-                    ok(
-                        r#"[{"name":"projects/test-project/locations/us-central1-a/nodes/test-tpu","labels":{"gpu-cli":"true"}}]"#,
-                    )
-                } else {
-                    ok("[]")
-                }
-            }
             ["tasks", "list", "--location=us-central1", "--queue=gpu-expiry"] => {
                 if s.tasks {
                     ok(r#"[{"name":"pending-task"}]"#)
@@ -237,25 +219,27 @@ fn fixture() -> (TestEnv, Ctx, Arc<FakeRunner>, Arc<Mutex<State>>) {
         }
     };
     let runner = FakeRunner::new(move |cmd| {
-        if cmd.program() == "curl" {
-            if let crate::process::Input::Text(config) = &cmd.stdin {
-                if config.contains("https://cloudbilling.googleapis.com/v1/services")
-                    || cmd
-                        .argv
-                        .iter()
-                        .any(|a| a.starts_with("https://cloudbilling.googleapis.com/v1/services"))
-                {
-                    return super::gcp_transport::curl(cmd, |url| {
-                        if url.contains("/skus?") {
-                            (200, r#"{"skus":[{"skuId":"test-sku","description":"TPU v6e chip","category":{"usageType":"OnDemand","resourceGroup":"TPU"},"serviceRegions":["us-east5"]}]}"#.into())
-                        } else {
-                            (200, r#"{"services":[{"name":"services/test-service","displayName":"Cloud TPU"}]}"#.into())
-                        }
-                    }).unwrap();
-                }
-            }
+        if cmd.program() == "gcloud" && cmd.argv.get(1).is_some_and(|a| a == "auth") {
+            return ok("test-oauth-token");
         }
-        super::gcp_transport::adapt(cmd, &native).unwrap_or_else(|| native(cmd))
+        super::gcp_transport::curl(cmd, |url| {
+            let state = rest_state.lock().unwrap();
+            if url.starts_with("https://cloudbilling.googleapis.com/") {
+                return (200, if url.contains("/skus?") {
+                    r#"{"skus":[{"skuId":"test-sku","description":"TPU v6e chip","category":{"usageType":"OnDemand","resourceGroup":"TPU"},"serviceRegions":["us-east5"]}]}"#.into()
+                } else { r#"{"services":[{"name":"services/test-service","displayName":"Cloud TPU"}]}"#.into() });
+            }
+            assert!(url.contains("/projects/test-project/locations"));
+            if url.contains("/acceleratorTypes?") { return (200, r#"{"acceleratorTypes":[{"type":"v6e-1"}]}"#.into()); }
+            if url.contains("/locations?") { return (200, r#"{"locations":[{"locationId":"us-east5-b"},{"locationId":"us-central1-a"}]}"#.into()); }
+            if url.contains("/nodes?") {
+                return (200, if state.owned_tpu && (url.contains("/locations/-/") || url.contains("/locations/us-central1-a/")) {
+                    r#"{"nodes":[{"name":"projects/test-project/locations/us-central1-a/nodes/test-tpu","labels":{"gpu-cli":"true"}}]}"#.into()
+                } else { r#"{"nodes":[]}"#.into() });
+            }
+            if url.contains("/queues/gpu-expiry/tasks?") { return (200, if state.tasks { r#"{"tasks":[{"name":"pending-task"}]}"#.into() } else { r#"{"tasks":[]}"#.into() }); }
+            panic!("unexpected setup REST request: {url}")
+        }).unwrap_or_else(|| native(cmd))
     });
     let ctx = env.ctx().runner(&runner).build();
     (env, ctx, runner, state)
@@ -311,7 +295,7 @@ fn setup_creates_only_one_queue_preserves_config_and_is_idempotent() {
         .apis
         .retain(|s| s != "cloudtasks.googleapis.com");
     assert_eq!(main(&ctx, APPLY), 0, "{}", err(&ctx));
-    assert!(crate::setup::gcp_ready(&cfg(&env)));
+    assert!(crate::gcp::setup::gcp_ready(&cfg(&env)));
     assert_eq!(cfg(&env).get("owner"), Some(&Value::str("me")));
     assert_eq!(
         cfg(&env).get("custom"),
@@ -445,7 +429,7 @@ fn default_identity_without_delete_grant_does_not_create_queue_or_change_iam() {
     state.lock().unwrap().grant = false;
     assert_eq!(main(&ctx, APPLY), 1);
     assert!(err(&ctx).contains("tpu.nodes.delete"));
-    assert!(!crate::setup::gcp_ready(&cfg(&env)));
+    assert!(!crate::gcp::setup::gcp_ready(&cfg(&env)));
     assert!(mutations(&runner).is_empty());
     // The partial journal is undoable even though completion was never recorded.
     assert_eq!(main(&ctx, REMOVE), 0, "{}", err(&ctx));
@@ -552,7 +536,7 @@ fn partial_enable_and_create_are_journaled_and_resumable() {
         }
         assert_eq!(main(&ctx, APPLY), 1);
         assert!(!err(&ctx).contains("secret"));
-        assert!(!crate::setup::gcp_ready(&cfg(&env)));
+        assert!(!crate::gcp::setup::gcp_ready(&cfg(&env)));
         {
             let mut s = state.lock().unwrap();
             s.fail_enable = false;
@@ -583,7 +567,7 @@ fn partial_removal_retains_journal_and_can_resume() {
             s.fail_disable = !fail_delete;
         }
         assert_eq!(main(&ctx, REMOVE), 1);
-        assert!(!crate::setup::gcp_ready(&cfg(&env)));
+        assert!(!crate::gcp::setup::gcp_ready(&cfg(&env)));
         assert!(cfg(&env).get("gcp").is_some());
         {
             let mut s = state.lock().unwrap();
@@ -644,13 +628,21 @@ fn missing_identity_and_failed_inventory_never_authorize_removal() {
     assert!(mutations(&runner).is_empty());
     state.lock().unwrap().identity = true;
     assert_eq!(main(&ctx, APPLY), 0, "{}", err(&ctx));
-    let inventory_fail = super::gcp_transport::runner(|cmd| {
-        assert_eq!(cmd.program(), "gcloud");
-        if cmd.argv[1..3] == ["services", "list"] {
-            return ok(&names(&APIS.map(String::from)));
+    let inventory_fail = FakeRunner::new(|cmd| {
+        if cmd.program() == "gcloud" && cmd.argv.get(1).is_some_and(|a| a == "auth") {
+            return ok("test-oauth-token");
         }
-        assert_eq!(cmd.argv[1..5], ["compute", "tpus", "tpu-vm", "list"]);
-        Ok(Output::failed(1, "permission denied secret"))
+        if let Some(reply) = super::gcp_transport::curl(cmd, |url| {
+            assert!(url.starts_with(
+                "https://tpu.googleapis.com/v2/projects/test-project/locations/-/nodes?"
+            ));
+            (403, r#"{"error":{"status":"PERMISSION_DENIED"}}"#.into())
+        }) {
+            return reply;
+        }
+        assert_eq!(cmd.program(), "gcloud");
+        assert_eq!(cmd.argv[1..3], ["services", "list"]);
+        ok(&names(&APIS.map(String::from)))
     });
     let ctx = env.ctx().runner(&inventory_fail).build();
     assert_eq!(main(&ctx, REMOVE), 1);
@@ -710,7 +702,7 @@ fn unset_up_cloud_is_blocked_at_the_single_process_boundary_for_all_commands() {
         let env = TestEnv::new();
         std::fs::create_dir(env.config.join("gpu")).unwrap();
         std::fs::write(env.config.join("gpu/config.json"), config).unwrap();
-        let runner = super::gcp_transport::runner(|cmd| {
+        let runner = FakeRunner::new(|cmd| {
             assert_eq!(
                 cmd.program(),
                 "vastai",
@@ -738,7 +730,6 @@ fn unset_up_cloud_is_blocked_at_the_single_process_boundary_for_all_commands() {
             vec!["ssh", ID],
             vec!["ssh", ID, "--exec"],
             vec!["edit", ID],
-            vec!["cursor", ID],
             vec!["stop", ID],
             vec!["down", ID, "--yes"],
             vec!["expire", ID, "show"],
@@ -777,12 +768,12 @@ fn setup_needs_no_zone_and_populates_types_zones_and_sku_cache() {
         .is_none());
     assert!(runner.calls().iter().any(|c| c.program() == "curl"));
     assert_eq!(
-        crate::gcp_facts::known_types(&ctx, "test-project", Some("us-east5-b")),
+        crate::gcp::facts::known_types(&ctx, "test-project", Some("us-east5-b")),
         ["v6e-1"]
     );
-    assert_eq!(crate::gcp_facts::skus(&ctx).len(), 1);
+    assert_eq!(crate::gcp::facts::skus(&ctx).len(), 1);
     assert_eq!(
-        crate::gcp::text(&crate::gcp_facts::skus(&ctx)[0], "id"),
+        crate::gcp::text(&crate::gcp::facts::skus(&ctx)[0], "id"),
         Some("test-sku")
     );
 }
@@ -800,7 +791,7 @@ fn setup_zone_flag_is_rejected_without_cloud_calls() {
 fn provider_status_picker_real_keys_never_probes_gcloud() {
     use crate::picker::testing::*;
     let env = TestEnv::new();
-    let runner = super::gcp_transport::runner(|cmd| {
+    let runner = FakeRunner::new(|cmd| {
         assert_eq!(cmd.program(), "vastai");
         ok("[]")
     });
@@ -816,4 +807,20 @@ fn provider_status_picker_real_keys_never_probes_gcloud() {
     });
     assert_eq!(result, crate::picker::Outcome::Done("gcp".to_string()));
     assert!(runner.argvs().iter().all(|a| a[0] == "vastai"));
+}
+
+#[test]
+fn quitting_the_confirmation_is_a_cancellation_not_a_setup_failure() {
+    let (env, _ctx, runner, _state) = fixture();
+    let ctx = env
+        .ctx()
+        .runner(&runner)
+        .interactive(true)
+        .pickers(&["\x03"])
+        .build();
+    let code = main(&ctx, &APPLY[..5]);
+    assert_ne!(code, 1, "{}", err(&ctx));
+    assert!(out(&ctx).contains("Cancelled."), "{}", out(&ctx));
+    assert!(!err(&ctx).contains("Next: gpu setup"), "{}", err(&ctx));
+    assert!(mutations(&runner).is_empty());
 }

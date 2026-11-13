@@ -85,9 +85,25 @@ passed=$((passed+1))
 # Setup waits for onstart (uv install) to finish, bounded by the job deadline.
 launch notready 'echo ran'
 wait_startup_log notready
-launch neverready 'echo ran' '' 1
+# A one-second wall-clock deadline can kill the task before it even logs the
+# startup wait. Freeze this run's clock until that observable handshake, then
+# expire it explicitly. The clock is inherited only by this launch's processes.
+mkdir -p "$TMP/clock-bin"
+cat >"$TMP/clock-bin/date" <<'CLOCK'
+#!/usr/bin/env bash
+[ "$#" = 1 ] && [ "$1" = +%s ] || exit 1
+cat "$GPU_RUN_TEST_CLOCK"
+CLOCK
+chmod +x "$TMP/clock-bin/date"
+printf '2000000000\n' >"$TMP/clock"
+PATH="$TMP/clock-bin:$PATH" GPU_RUN_TEST_CLOCK="$TMP/clock" launch neverready 'echo ran'
+wait_startup_log neverready
+printf '2000000061\n' >"$TMP/clock.next"
+mv "$TMP/clock.next" "$TMP/clock"
 status=$(wait_done neverready)
+check test "$(printf '%s' "$status" | cut -f1)" = setup
 check test "$(printf '%s' "$status" | cut -f2)" = 17
+check test "$(printf '%s' "$status" | cut -f3)" = 1
 check test "$(cat "$TMP/state/neverready/log")" = 'Waiting for instance startup to finish.'
 touch "$HOME/.works"
 status=$(wait_done notready)

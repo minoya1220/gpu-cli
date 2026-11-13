@@ -153,9 +153,9 @@ pub(crate) trait RunBackend {
     fn outputs_hook(&self) -> &str {
         ""
     }
-    /// The tar operand that archives the live outputs directory.
-    fn archive_operand(&self, outputs: &str) -> String {
-        outputs.into()
+    /// Shell-quoted tar arguments that archive the live outputs directory.
+    fn archive_args(&self, outputs: &str) -> String {
+        format!("-- {}", shell_quote(outputs))
     }
     /// Persistent providers can fetch committed outputs after the host is lost.
     fn output_archive(&self, _outputs: &str, _timeout: f64) -> Option<Cmd> {
@@ -1218,9 +1218,9 @@ fn download(
     let archive = tempfile::NamedTempFile::new()?;
     let seconds = (deadline.as_second() - ctx.clock.now().as_second()).max(1) as f64;
     let command = format!(
-        "tar -C {} -cf - -- {} & p=$!; while kill -0 $p 2>/dev/null; do date +%s >{}; sleep 5; done; wait $p",
+        "tar -C {} -cf - {} & p=$!; while kill -0 $p 2>/dev/null; do date +%s >{}; sleep 5; done; wait $p",
         shell_quote(jobdir),
-        shell_quote(&backend.archive_operand(outputs)),
+        backend.archive_args(outputs),
         shell_quote(&format!("{root}/attached"))
     );
     let poll = ctx.polling(seconds, 0.0);

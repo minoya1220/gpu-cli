@@ -68,6 +68,10 @@ class Volume:
     def iterdir(self, path, recursive):
         self.load()
         return [SimpleNamespace(path=os.getenv('VOLUME_PATH', 'checkpoint.bin'), type=1)]
+    def listdir(self, path):
+        assert path == '/'
+        self.load()
+        return [SimpleNamespace(path='.gpu-cli-claimed', type=1)] if os.getenv('CLAIMED') == self.name else []
     def read_file(self, path): yield b'checkpoint\x00\xff'
     def info(self):
         from datetime import datetime, timezone
@@ -148,8 +152,9 @@ class Sandbox:
         return Sandbox()
     @staticmethod
     def list(**kw):
+        # Like modal 1.6.3, which lists with include_finished=False.
         assert kw["tags"]["gpu-cli"] == "true"
-        return [Sandbox()]
+        return [] if os.getenv("FINISHED") else [Sandbox()]
     def poll(self): return 137 if os.getenv("FINISHED") else None
     def terminate(self, **kw):
         assert kw["wait"] is True
@@ -255,11 +260,12 @@ class HelperTest(unittest.TestCase):
         (self.state / 'unrelated').touch()
         # Unclaimed and young: its create may still be waiting for capacity.
         self.assertEqual(json.loads(self.call('list').stdout)['volumes'], [])
-        # Claimed by a Sandbox that has finished: an orphan immediately.
-        rows = json.loads(self.call('list', RUN_VOLUME=name, FINISHED='1').stdout)['volumes']
+        # Killed client: the job started (claim committed), then the keeper
+        # ended the Sandbox, which Sandbox.list no longer returns.
+        self.assertEqual(json.loads(self.call('list', RUN_VOLUME=name, CLAIMED=name).stdout)['volumes'], [])
+        rows = json.loads(self.call('list', RUN_VOLUME=name, CLAIMED=name, FINISHED='1').stdout)['volumes']
         self.assertEqual(rows, [{'name': name}])
-        # Mounted by a running Sandbox: never an orphan.
-        self.assertEqual(json.loads(self.call('list', RUN_VOLUME=name).stdout)['volumes'], [])
+        self.assertEqual(json.loads(self.call('list', RUN_VOLUME=name, FINISHED='1').stdout)['volumes'], [])
         old = time.time() - 16 * 60
         for path in self.state.iterdir():
             os.utime(path, (old, old))
@@ -271,6 +277,9 @@ class HelperTest(unittest.TestCase):
         self.assertEqual(out.returncode, 0, out.stderr)
         with tarfile.open(fileobj=io.BytesIO(out.stdout)) as archive:
             self.assertEqual(archive.extractfile('results/checkpoints/checkpoint.bin').read(), b'checkpoint\x00\xff')
+        out = self.call('volume-get', name, 'outputs', VOLUME_PATH='/.gpu-cli-claimed')
+        with tarfile.open(fileobj=io.BytesIO(out.stdout)) as archive:
+            self.assertEqual(archive.getnames(), ['outputs'])
         out = self.call('volume-get', name, 'outputs', VOLUME_PATH='../escape')
         self.assertEqual(out.returncode, 255)
         self.assertEqual(json.loads(out.stderr)['error']['kind'], 'ValueError')

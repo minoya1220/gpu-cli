@@ -25,6 +25,8 @@ import tempfile
 
 VOLUME_PREFIX = "gpu-cli-run-"
 OUTPUT_MOUNT = "/gpu-outputs"
+# The supervisor writes and commits this marker when its job starts.
+CLAIM_MARKER = ".gpu-cli-claimed"
 # A create makes the Volume, then waits up to --timeout (default 600s) for a
 # Sandbox. An unclaimed Volume this young may belong to a run still starting.
 PENDING_CREATE = timedelta(minutes=15)
@@ -220,6 +222,8 @@ def volume_archive(modal, name, prefix, destination):
         archive.addfile(root)
         for entry in volume.iterdir("/", recursive=True):
             path = safe_relative(entry.path.lstrip("/"))
+            if str(path) == CLAIM_MARKER:
+                continue
             info = tarfile.TarInfo(str(prefix / path))
             info.mode = 0o700 if int(entry.type) == 2 else 0o600
             if int(entry.type) == 2:
@@ -407,17 +411,23 @@ def dispatch(modal, args):
         if len(args) != 1:
             raise ValueError()
         rows = []
-        mounted, claimed = set(), set()
+        mounted = set()
         for sandbox in modal.Sandbox.list(tags={"gpu-cli": "true"}):
-            tags = sandbox.get_tags()
-            claimed.add(tags.get("volume"))
             if sandbox.poll() is None:
+                tags = sandbox.get_tags()
                 mounted.add(tags.get("volume"))
                 rows.append({"id": sandbox.object_id, "tags": tags})
         cutoff = datetime.now(timezone.utc) - PENDING_CREATE
-        volumes = [{"name": volume.name} for volume in modal.Volume.objects.list()
-                   if volume.name and volume.name.startswith(VOLUME_PREFIX) and volume.name not in mounted
-                   and (volume.name in claimed or volume.info().created_at < cutoff)]
+        def orphan(volume):
+            if not (volume.name and volume.name.startswith(VOLUME_PREFIX)) or volume.name in mounted:
+                return False
+            if volume.info().created_at < cutoff:
+                return True
+            try:
+                return any(entry.path.lstrip("/") == CLAIM_MARKER for entry in volume.listdir("/"))
+            except modal.exception.NotFoundError:
+                return False
+        volumes = [{"name": volume.name} for volume in modal.Volume.objects.list() if orphan(volume)]
         emit({"sandboxes": rows, "volumes": volumes})
     else:
         raise ValueError()

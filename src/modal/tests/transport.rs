@@ -214,6 +214,7 @@ fn output_paths_write_through_to_the_volume_and_keep_uploaded_results() {
         &work.to_string_lossy(),
         "results/checkpoints",
         &mount.to_string_lossy(),
+        "gpu-cli-run-test",
     );
     assert!(std::process::Command::new("bash")
         .args(["-c", &command])
@@ -221,18 +222,25 @@ fn output_paths_write_through_to_the_volume_and_keep_uploaded_results() {
         .unwrap()
         .success());
     assert_eq!(fs::read(mount.join("seed")).unwrap(), b"initial");
+    assert_eq!(
+        fs::read(mount.join(".gpu-cli-claimed")).unwrap(),
+        b"gpu-cli-run-test\n"
+    );
     fs::write(work.join("results/checkpoints/checkpoint"), b"next").unwrap();
     assert_eq!(fs::read(mount.join("checkpoint")).unwrap(), b"next");
-    let operand =
-        crate::run::RunBackend::archive_operand(&ModalBackend::default(), "results/checkpoints");
+    let args =
+        crate::run::RunBackend::archive_args(&ModalBackend::default(), "results/checkpoints");
     let archive = t.root.join("live.tar");
-    assert!(std::process::Command::new("tar")
+    assert!(std::process::Command::new("bash")
         .env("COPYFILE_DISABLE", "1")
-        .arg("-C")
-        .arg(&work)
-        .args(["-cf"])
-        .arg(&archive)
-        .args(["--", &operand])
+        .args([
+            "-c",
+            &format!(
+                "tar -C {} -cf {} {args}",
+                crate::pyfmt::shell_quote(&work.to_string_lossy()),
+                crate::pyfmt::shell_quote(&archive.to_string_lossy())
+            ),
+        ])
         .status()
         .unwrap()
         .success());
@@ -250,6 +258,7 @@ fn output_paths_write_through_to_the_volume_and_keep_uploaded_results() {
         fs::read(local.join("results/checkpoints/checkpoint")).unwrap(),
         b"next"
     );
+    assert!(!local.join("results/checkpoints/.gpu-cli-claimed").exists());
     assert!(!std::process::Command::new("bash")
         .args(["-c", &command])
         .status()

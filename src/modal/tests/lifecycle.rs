@@ -128,7 +128,8 @@ fn shared_run_flow_over_modal_exec() {
                         return testing::ok("");
                     }
                     if remote.starts_with("tar -C ") {
-                        assert!(remote.contains(" -cf - -- outputs/. "));
+                        assert!(remote
+                            .contains(" -cf - --exclude=outputs/./.gpu-cli-claimed -- outputs/. "));
                         if matches!(end, End::DownloadFailure | End::LostDuringDownload) {
                             return testing::status(255);
                         }

@@ -545,7 +545,7 @@ impl RunBackend for ModalBackend {
     fn start_prelude(&self, jobdir: &str, outputs: &str) -> String {
         // All job writes (including relative outputs/) go straight to the
         // Volume, not to ephemeral disk copied only when the job finishes.
-        let prepare = prepare_outputs(jobdir, outputs, OUTPUT_MOUNT);
+        let prepare = prepare_outputs(jobdir, outputs, OUTPUT_MOUNT, &self.volume);
         format!(
             "{prepare}\nmkdir -p {KEEPER_ROOT}\ntrap '[ \"$?\" != 0 ] || touch {KEEPER_ROOT}/started' EXIT\n"
         )
@@ -553,8 +553,12 @@ impl RunBackend for ModalBackend {
     fn outputs_hook(&self) -> &str {
         OUTPUTS_HOOK
     }
-    fn archive_operand(&self, outputs: &str) -> String {
-        format!("{outputs}/.")
+    fn archive_args(&self, outputs: &str) -> String {
+        format!(
+            "--exclude={} -- {}",
+            crate::pyfmt::shell_quote(&format!("{outputs}/./{CLAIM_MARKER}")),
+            crate::pyfmt::shell_quote(&format!("{outputs}/."))
+        )
     }
     fn output_archive(&self, outputs: &str, timeout: f64) -> Option<Cmd> {
         let mut cmd = self.helper.as_ref()?.command("volume-get");
@@ -578,10 +582,16 @@ impl RunBackend for ModalBackend {
     }
 }
 
-fn prepare_outputs(jobdir: &str, outputs: &str, mount: &str) -> String {
+/// Marks the Volume as claimed by a started job, so `gpu ls` can tell a
+/// finished run's orphan from a Volume whose create may still be pending.
+const CLAIM_MARKER: &str = ".gpu-cli-claimed";
+
+fn prepare_outputs(jobdir: &str, outputs: &str, mount: &str, volume: &str) -> String {
     let output = crate::pyfmt::shell_quote(&format!("{jobdir}/{outputs}"));
+    let marker = crate::pyfmt::shell_quote(&format!("{mount}/{CLAIM_MARKER}"));
+    let volume = crate::pyfmt::shell_quote(volume);
     let mount = crate::pyfmt::shell_quote(mount);
-    format!("out={output}\nmkdir -p -- \"$(dirname -- \"$out\")\" || exit\n[ ! -L \"$out\" ] || exit 1\nif [ -e \"$out\" ]; then\n [ -d \"$out\" ] && cp -a -- \"$out/.\" {mount}/ && rm -rf -- \"$out\" || exit 1\nfi\nln -s -- {mount} \"$out\" || exit\n")
+    format!("out={output}\nmkdir -p -- \"$(dirname -- \"$out\")\" || exit\n[ ! -L \"$out\" ] || exit 1\nif [ -e \"$out\" ]; then\n [ -d \"$out\" ] && cp -a -- \"$out/.\" {mount}/ && rm -rf -- \"$out\" || exit 1\nfi\nln -s -- {mount} \"$out\" || exit\nprintf '%s\\n' {volume} >{marker} || exit\nsync -f {mount} 2>/dev/null || sync {mount} 2>/dev/null || :\n")
 }
 
 /// Refresh the keeper's start grace only as archive records arrive, so a slow

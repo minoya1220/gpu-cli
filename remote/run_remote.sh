@@ -118,7 +118,7 @@ task() {
 }
 
 main() {
-    local action=${1:-} pid='' phase=launch rc=- timed=0 count=0
+    local action=${1:-} pid='' phase=launch rc=- timed=0 count=0 live_phase=''
     ROOT=${2:-} TOKEN=${3:-}
     case $TOKEN in ''|*[!a-zA-Z0-9-]*) exit 1;; esac
     case $action in
@@ -145,6 +145,13 @@ main() {
             date +%s >"$ROOT/attached"
             [ -f "$ROOT/status" ] || exit 1
             IFS=$'\t' read -r phase rc timed <"$ROOT/status"
+            # The supervisor publishes completion atomically, but the task
+            # updates its phase before setup/job execution. Read that live
+            # phase while running instead of reporting initial setup forever.
+            if [ "$rc" = - ] && [ -f "$ROOT/phase" ]; then
+                read -r live_phase <"$ROOT/phase" || true
+                case $live_phase in setup|job) phase=$live_phase;; esac
+            fi
             read -r pid <"$ROOT/pid"
             count=$(wc -c <"$ROOT/log")
             if [ "$rc" = - ] && ! identity "$pid" "$TOKEN"; then

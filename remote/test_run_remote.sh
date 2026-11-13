@@ -111,6 +111,30 @@ check test "$(printf '%s' "$status" | cut -f2)" = 0
 check test "$(tail -n 1 "$TMP/state/notready/log")" = ran
 passed=$((passed+2))
 
+# Status must show the currently executing stage, not initial setup until exit.
+launch livephase 'touch running; while [ ! -f finish ]; do sleep 0.1; done' \
+    'touch setting-up; while [ ! -f ready ]; do sleep 0.1; done'
+for marker in setting-up running; do
+    count=0
+    while [ ! -f "$TMP/work/livephase/$marker" ] && [ "$count" -lt 100 ]; do
+        sleep 0.1; count=$((count+1))
+    done
+    check test -f "$TMP/work/livephase/$marker"
+    status=$(status_of livephase)
+    check test "$(printf '%s' "$status" | cut -f2)" = -
+    if [ "$marker" = setting-up ]; then
+        check test "$(printf '%s' "$status" | cut -f1)" = setup
+        touch "$TMP/work/livephase/ready"
+    else
+        check test "$(printf '%s' "$status" | cut -f1)" = job
+    fi
+done
+touch "$TMP/work/livephase/finish"
+status=$(wait_done livephase)
+check test "$(printf '%s' "$status" | cut -f1)" = job
+check test "$(printf '%s' "$status" | cut -f2)" = 0
+passed=$((passed+1))
+
 launch success 'printf "%s\n" "$TEST_SECRET"; printf result >"$GPU_RUN_OUTPUTS/result"'
 status=$(wait_done success)
 check test "$(printf '%s' "$status" | cut -f2)" = 0
@@ -196,6 +220,19 @@ touch "$TMP/work/commits/finish"
 status=$(wait_done commits)
 check test "$(printf '%s' "$status" | cut -f2)" = 0
 check test "$(wc -l <"$TMP/commits")" -ge 2
+unset GPU_RUN_OUTPUTS_HOOK
+passed=$((passed+1))
+
+# A job can hit its earlier deadline while the hard instance deadline still
+# has download reserve remaining. Even without a client, flush its final
+# partial checkpoint before publication and the unattended expiry hook.
+GPU_RUN_OUTPUTS_HOOK=$(printf 'cp %q %q\n' "$TMP/work/deadline-checkpoint/outputs/checkpoint" "$TMP/flushed-checkpoint")
+launch deadline-checkpoint 'i=0; while :; do i=$((i+1)); printf "%s" "$i" >"$GPU_RUN_OUTPUTS/checkpoint"; sleep 0.1; done' '' 2
+printf '0\n' >"$TMP/state/deadline-checkpoint/attached"
+status=$(wait_done deadline-checkpoint)
+check test "$(printf '%s' "$status" | cut -f2)" = 17
+check test "$(cat "$TMP/flushed-checkpoint")" = "$(cat "$TMP/work/deadline-checkpoint/outputs/checkpoint")"
+wait_hook deadline-checkpoint
 unset GPU_RUN_OUTPUTS_HOOK
 passed=$((passed+1))
 

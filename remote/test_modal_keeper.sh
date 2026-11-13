@@ -35,6 +35,7 @@ run() {
     echo 1000 >"$CLOCK"
     case $SCENARIO in
         deadline) touch "$STATE/started";;
+        detached) touch "$STATE/started"; echo 0 >"$STATE/attached";;
         cap) echo 2000 >"$STATE/end";;
         invalid) echo invalid >"$STATE/end";;
     esac
@@ -53,4 +54,7 @@ run invalid 2000 1000 1
 run upload 2000 1005 0
 run upload-start 2000 1008 0
 run bad-beat 2000 1003 0
-echo '9 passed, 0 failed'
+# A stale attachment never stops a running job; only its end hook or the hard
+# deadline can stop a keeper whose job already started.
+run detached 1010 1010 0
+echo '10 passed, 0 failed'

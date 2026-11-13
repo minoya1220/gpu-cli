@@ -15,7 +15,7 @@ create) cat >"$HOME/create-spec"; echo '{"id":"sb-offline"}' ;;
 list) echo '{"sandboxes":[{"id":"sb-offline","tags":{"gpu-cli":"true","gpu":"T4","label":"source","run_id":"recovery"}}]}' ;;
 status)
  if [ "${MODE:-}" = missing ]; then echo '{"error":{"kind":"NotFoundError","message":"gone"}}'; exit 1; fi
- if [ "${MODE:-}" = lost ] || [ -f "$HOME/destroyed" ]; then echo '{"running":false,"returncode":137}';
+ if [ "${MODE:-}" = lost ] || { [ "${MODE:-}" = lost-after-job ] && [ -f "$HOME/seen-job" ]; } || [ -f "$HOME/destroyed" ]; then echo '{"running":false,"returncode":137}';
  else echo '{"running":true,"returncode":null}'; fi ;;
 volume-delete) touch "$HOME/volume-deleted"; echo '{"finished":true}' ;;
 volume-get)
@@ -36,6 +36,10 @@ exec)
  *' status '*)
   touch "$HOME/following"
   if [ "${MODE:-}" = lost ]; then exit 255; fi
+  if [ "${MODE:-}" = lost-after-job ]; then
+   [ ! -f "$HOME/seen-job" ] || exit 255
+   touch "$HOME/seen-job"; printf 'job\t-\t0\t4\n'; exit 0
+  fi
   if [ "${MODE:-}" = follow ] && [ ! -f "$HOME/stopped" ]; then printf 'job\t-\t0\t4\n';
   else printf 'job\t%s\t0\t4\n' "${JOB_EXIT:-0}"; fi ;;
  'dd '*) printf 'hi\r\n' ;;
@@ -88,7 +92,12 @@ fn result(out: &std::process::Output) -> Value {
 
 #[test]
 fn live_success_failure_and_preemption() {
-    for (mode, exit) in [("success", 0), ("failure", 7), ("lost", 18)] {
+    for (mode, exit) in [
+        ("success", 0),
+        ("failure", 7),
+        ("lost", 18),
+        ("lost-after-job", 18),
+    ] {
         let s = sandbox();
         let out = command(&s)
             .env("MODE", mode)
@@ -106,6 +115,9 @@ fn live_success_failure_and_preemption() {
         assert_eq!(result.get("provider"), Some(&Value::str("modal")));
         assert_eq!(result.get("id"), Some(&Value::str("modal:sb-offline")));
         assert_eq!(result.get("destroyed"), Some(&Value::Bool(true)));
+        if mode == "lost-after-job" {
+            assert_eq!(result.get("phase"), Some(&Value::str("job")));
+        }
         let local = s
             .root
             .join("source/gpu-runs")

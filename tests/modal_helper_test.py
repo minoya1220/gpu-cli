@@ -182,8 +182,11 @@ class HelperTest(unittest.TestCase):
         (package / "config.py").write_text('import os\nclass Config:\n def get(self, key): return None if os.getenv("NO_TOKEN") else {"token_id":"test-id", "token_secret":"private-canary"}.get(key)\nconfig=Config()\n')
         self.state = Path(self.temp.name) / 'state'
         self.state.mkdir()
+        # EXEC_LOCAL runs the host tar in place of the Sandbox's Linux tar;
+        # stop macOS bsdtar adding AppleDouble "._*" members it never sends.
         self.env = {"PATH": os.environ.get("PATH", ""), "PYTHONPATH": self.temp.name,
-                    "PYTHONDONTWRITEBYTECODE": "1", "STATE": str(self.state)}
+                    "PYTHONDONTWRITEBYTECODE": "1", "STATE": str(self.state),
+                    "COPYFILE_DISABLE": "1"}
 
     def tearDown(self):
         self.temp.cleanup()

@@ -69,7 +69,7 @@ class Volume:
         assert path == '/outputs'
         self.load()
         if os.getenv('NO_OUTPUTS'): raise NotFoundError('private-canary')
-        return [SimpleNamespace(path=os.getenv('VOLUME_PATH', 'outputs/checkpoint.bin'), type=1)]
+        yield SimpleNamespace(path=os.getenv('VOLUME_PATH', 'outputs/checkpoint.bin'), type=1)
     def listdir(self, path):
         assert path == '/'
         self.load()
@@ -280,6 +280,7 @@ class HelperTest(unittest.TestCase):
         with tarfile.open(fileobj=io.BytesIO(out.stdout)) as archive:
             self.assertEqual(archive.extractfile('results/checkpoints/checkpoint.bin').read(), b'checkpoint\x00\xff')
         out = self.call('volume-get', name, 'outputs', NO_OUTPUTS='1')
+        self.assertEqual(out.returncode, 0, out.stderr)
         with tarfile.open(fileobj=io.BytesIO(out.stdout)) as archive:
             self.assertEqual(archive.getnames(), ['outputs'])
         out = self.call('volume-get', name, 'outputs', VOLUME_PATH='outputs/../escape')

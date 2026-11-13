@@ -224,7 +224,7 @@ def volume_archive(modal, name, prefix, destination):
         archive.addfile(root)
         volume.hydrate()
         try:
-            entries = volume.iterdir(f"/{OUTPUT_DIR}", recursive=True)
+            entries = list(volume.iterdir(f"/{OUTPUT_DIR}", recursive=True))
         except modal.exception.NotFoundError:
             entries = []
         for entry in entries:

@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import time
 import tomllib
 import unittest
 
@@ -50,8 +51,8 @@ class Call:
     def __call__(self, *a, **kw): return self.fn(*a, **kw)
     async def aio(self, *a, **kw): return self.fn(*a, **kw)
 class Volume:
-    def __init__(self, name, create=False):
-        self.name, self.create = name, create
+    def __init__(self, name, create=False, version=None):
+        self.name, self.create, self.version = name, create, version
         self.hydrate = Call(self.load)
     def load(self):
         path = Path(os.environ['STATE']) / self.name
@@ -59,7 +60,7 @@ class Volume:
         if not path.exists(): raise NotFoundError('private-canary')
         return self
     @staticmethod
-    def from_name(name, create_if_missing=False): return Volume(name, create_if_missing)
+    def from_name(name, create_if_missing=False, version=None): return Volume(name, create_if_missing, version)
     @staticmethod
     def delete(name, allow_missing=False):
         if not os.getenv('STUCK_VOLUME'):
@@ -68,7 +69,8 @@ class Volume:
         self.load()
         return [SimpleNamespace(path=os.getenv('VOLUME_PATH', 'checkpoint.bin'), type=1)]
     def read_file(self, path): yield b'checkpoint\x00\xff'
-Volume.objects = SimpleNamespace(delete=Volume.delete, list=lambda: [Volume(p.name) for p in Path(os.environ['STATE']).iterdir()])
+Volume.objects = SimpleNamespace(delete=Volume.delete, list=lambda created_before: [
+    Volume(p.name) for p in Path(os.environ['STATE']).iterdir() if p.stat().st_mtime < created_before.timestamp()])
 exception = SimpleNamespace(NotFoundError=NotFoundError)
 class App:
     pass
@@ -125,6 +127,7 @@ class Sandbox:
         if kw['volumes']:
             volume = kw['volumes']['/gpu-outputs']
             assert volume.load() is volume
+            assert volume.version == 2
             assert kw['tags']['volume'] == volume.name
         if os.getenv("SLOW_CREATE"):
             import asyncio
@@ -247,6 +250,10 @@ class HelperTest(unittest.TestCase):
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
         self.assertTrue((self.state / name).exists())
         (self.state / 'unrelated').touch()
+        self.assertEqual(json.loads(self.call('list').stdout)['volumes'], [])
+        old = time.time() - 26 * 3600
+        for path in self.state.iterdir():
+            os.utime(path, (old, old))
         rows = json.loads(self.call('list').stdout)['volumes']
         self.assertEqual(rows, [{'name': name}])
         self.assertEqual(json.loads(self.call('list', RUN_VOLUME=name).stdout)['volumes'], [])

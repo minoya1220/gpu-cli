@@ -19,7 +19,7 @@ pub const HELPER: &str = include_str!("../remote/modal_helper.py");
 pub const KEEPER: &str = include_str!("../remote/modal_keeper.sh");
 const KEEPER_ROOT: &str = "/tmp/gpu-modal-keeper";
 const OUTPUT_MOUNT: &str = "/gpu-outputs";
-const OUTPUTS_HOOK: &str = "#!/bin/bash\n# syncfs is available in the default Debian image. Background commits remain\n# enabled by the SDK; custom images without sync keep that best-effort fallback.\nif command -v sync >/dev/null 2>&1; then\n    sync -f /gpu-outputs 2>/dev/null || sync /gpu-outputs 2>/dev/null || echo 'WARNING: output Volume flush failed; only prior commits may survive preemption.' >&2\nelse\n    echo 'WARNING: sync unavailable; output durability relies on Modal background commits.' >&2\nfi\n";
+const OUTPUTS_HOOK: &str = "#!/bin/bash\n# On a VolumeFS v2 mount, syncfs commits. Without sync, writes commit only when\n# the Sandbox terminates gracefully, which preemption may skip.\nif command -v sync >/dev/null 2>&1; then\n    sync -f /gpu-outputs 2>/dev/null || sync /gpu-outputs 2>/dev/null || echo 'WARNING: output Volume flush failed; only prior commits may survive preemption.' >&2\nelse\n    echo 'WARNING: sync unavailable; outputs commit only when the Sandbox ends, so preemption may lose them.' >&2\nfi\n";
 
 fn client_version() -> &'static str {
     HELPER
@@ -442,8 +442,7 @@ impl RunBackend for ModalBackend {
                     .argv
                     .extend(["--tag".into(), format!("run_id={run_id}")]);
                 let stopped = confirmed(helper.call_command(ctx, &cleanup, false));
-                let deleted = delete_volume(ctx, &self.volume).is_ok();
-                if !stopped || !deleted {
+                if !stopped || delete_volume(ctx, &self.volume).is_err() {
                     return Err(cleanup_error(&format!(
                         "run_id={run_id}, modal:volume:{}",
                         self.volume
@@ -554,6 +553,9 @@ impl RunBackend for ModalBackend {
     fn outputs_hook(&self) -> &str {
         OUTPUTS_HOOK
     }
+    fn archive_operand(&self, outputs: &str) -> String {
+        format!("{outputs}/.")
+    }
     fn output_archive(&self, outputs: &str, timeout: f64) -> Option<Cmd> {
         let mut cmd = self.helper.as_ref()?.command("volume-get");
         cmd.argv.extend([self.volume.clone(), outputs.into()]);
@@ -566,11 +568,9 @@ impl RunBackend for ModalBackend {
         false
     }
     fn destroy(&self, ctx: &Ctx, id: &str) -> Result<()> {
-        // Try both cleanups even when one fails. A stopped sandbox is not proof
-        // that persistent storage was deleted, and vice versa.
-        let stopped = terminate(ctx, id);
-        let deleted = delete_volume(ctx, &self.volume);
-        if stopped.is_err() || deleted.is_err() {
+        // A Sandbox that may still be running keeps its Volume. A stopped
+        // Sandbox is not proof that persistent storage was deleted.
+        if terminate(ctx, id).is_err() || delete_volume(ctx, &self.volume).is_err() {
             return Err(Error::status(ExitCode::CleanupUnverified, format!(
                 "Cleanup unverified; billing may continue. Next: gpu down {id} --yes; gpu down modal:volume:{} --yes", self.volume)));
         }
@@ -710,12 +710,12 @@ pub fn down(ctx: &Ctx, id: &str, yes: bool) -> Result<()> {
     {
         return Err(Error::Cancelled(130));
     }
-    let stopped = terminate(ctx, id);
+    terminate(ctx, id)?;
     // Preserve the tag before termination: Sandbox metadata may disappear
     // between the status read and the mutation/retry.
-    let deleted = volume.map_or(Ok(()), |name| delete_volume(ctx, name));
-    stopped?;
-    deleted?;
+    if let Some(name) = volume {
+        delete_volume(ctx, name)?;
+    }
     ctx.result("destroyed", Value::Bool(true));
     ctx.println(&format!("Sandbox {id} terminated (verified)."))
 }

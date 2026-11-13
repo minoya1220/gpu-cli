@@ -9,6 +9,7 @@ The Rust caller supplies bounded subprocess deadlines and redacts diagnostics.
 """
 import asyncio
 import contextlib
+from datetime import datetime, timedelta, timezone
 import errno
 import io
 import json
@@ -24,6 +25,9 @@ import tempfile
 
 VOLUME_PREFIX = "gpu-cli-run-"
 OUTPUT_MOUNT = "/gpu-outputs"
+# A create (Volume first, then Sandbox) may wait up to the 24h scheduling cap.
+# Younger untagged Volumes may belong to a run that is still starting.
+PENDING_CREATE = timedelta(hours=25)
 
 
 def volume_name(name):
@@ -72,7 +76,8 @@ async def create(modal, spec, timeout):
         app = await modal.App.lookup.aio("gpu-cli", create_if_missing=True)
         volumes = {}
         if spec.get("volume"):
-            volume = modal.Volume.from_name(volume_name(spec["volume"]), create_if_missing=True)
+            # VolumeFS v2: an in-Sandbox sync commits, so checkpoints survive preemption.
+            volume = modal.Volume.from_name(volume_name(spec["volume"]), create_if_missing=True, version=2)
             await volume.hydrate.aio()
             volumes[OUTPUT_MOUNT] = volume
         return await modal.Sandbox.create.aio(
@@ -408,7 +413,8 @@ def dispatch(modal, args):
                 tags = sandbox.get_tags()
                 mounted.add(tags.get("volume"))
                 rows.append({"id": sandbox.object_id, "tags": tags})
-        volumes = [{"name": volume.name} for volume in modal.Volume.objects.list()
+        cutoff = datetime.now(timezone.utc) - PENDING_CREATE
+        volumes = [{"name": volume.name} for volume in modal.Volume.objects.list(created_before=cutoff)
                    if volume.name and volume.name.startswith(VOLUME_PREFIX) and volume.name not in mounted]
         emit({"sandboxes": rows, "volumes": volumes})
     else:

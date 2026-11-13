@@ -153,7 +153,11 @@ pub(crate) trait RunBackend {
     fn outputs_hook(&self) -> &str {
         ""
     }
-    /// Persistent providers can fetch an archive even after the host is lost.
+    /// The tar operand that archives the live outputs directory.
+    fn archive_operand(&self, outputs: &str) -> String {
+        outputs.into()
+    }
+    /// Persistent providers can fetch committed outputs after the host is lost.
     fn output_archive(&self, _outputs: &str, _timeout: f64) -> Option<Cmd> {
         None
     }
@@ -833,11 +837,11 @@ fn settle(owned: &Owned, mut outcome: Result<()>, started: f64) -> Result<()> {
                 if let Err(error) = download(
                     ctx,
                     backend,
-                    &paths.0,
-                    &paths.1,
+                    paths,
                     &owned.flags.outputs,
                     &session.local,
                     owned.job.deadline,
+                    true,
                 ) {
                     let _ = ctx.eprintln(&format!(
                         "Could not fetch committed outputs: {}",
@@ -895,7 +899,7 @@ fn settle(owned: &Owned, mut outcome: Result<()>, started: f64) -> Result<()> {
 /// Stop a failed job, fetch the rest of its log and download its outputs
 /// under the original deadline. True when a download failure replaced
 /// `outcome`.
-fn recover(owned: &Owned, (root, jobdir): &(String, String), outcome: &mut Result<()>) -> bool {
+fn recover(owned: &Owned, paths: &(String, String), outcome: &mut Result<()>) -> bool {
     let Owned {
         phase,
         flags,
@@ -905,6 +909,7 @@ fn recover(owned: &Owned, (root, jobdir): &(String, String), outcome: &mut Resul
         id,
     } = *owned;
     let ctx = phase.ctx;
+    let root = &paths.0;
     let run_id = &session.run_id;
     let deadline = job.deadline;
     let response = || {
@@ -961,23 +966,47 @@ fn recover(owned: &Owned, (root, jobdir): &(String, String), outcome: &mut Resul
     let downloaded = download(
         ctx,
         backend,
-        root,
-        jobdir,
+        paths,
         &flags.outputs,
         &session.local,
         deadline,
+        false,
     );
     let Err(error) = downloaded else {
         return false;
     };
     let _ = ctx.eprintln(&format!("Could not fetch results: {}", error.text()));
+    let lost = backend.provider() == Provider::Modal && backend.lost(ctx, id);
+    let committed = lost
+        && ctx.interrupts() < 2
+        && download(
+            ctx,
+            backend,
+            paths,
+            &flags.outputs,
+            &session.local,
+            deadline,
+            true,
+        )
+        .inspect_err(|error| {
+            let _ = ctx.eprintln(&format!(
+                "Could not fetch committed outputs: {}",
+                error.text()
+            ));
+        })
+        .is_ok();
     if outcome.is_ok()
         || matches!(
             outcome,
             Err(Error::Remote(_) | Error::Status(ExitCode::JobTimeout | ExitCode::InstanceLost, _))
         )
     {
-        *outcome = if backend.provider() == Provider::Modal && backend.lost(ctx, id) {
+        *outcome = if committed {
+            Err(Error::status(
+                ExitCode::InstanceLost,
+                "Modal sandbox ended during download; fetched its last committed outputs.",
+            ))
+        } else if lost {
             Err(Error::status(
                 ExitCode::InstanceLost,
                 "Modal sandbox ended during download; could not fetch its last committed outputs.",
@@ -1180,18 +1209,18 @@ const DOWNLOAD_RETRY_DELAYS: [f64; 3] = [5.0, 15.0, 30.0];
 fn download(
     ctx: &Ctx,
     backend: &dyn RunBackend,
-    root: &str,
-    jobdir: &str,
+    (root, jobdir): &(String, String),
     outputs: &str,
     local: &Path,
     deadline: Timestamp,
+    committed: bool,
 ) -> Result<()> {
     let archive = tempfile::NamedTempFile::new()?;
     let seconds = (deadline.as_second() - ctx.clock.now().as_second()).max(1) as f64;
     let command = format!(
         "tar -C {} -cf - -- {} & p=$!; while kill -0 $p 2>/dev/null; do date +%s >{}; sleep 5; done; wait $p",
         shell_quote(jobdir),
-        shell_quote(outputs),
+        shell_quote(&backend.archive_operand(outputs)),
         shell_quote(&format!("{root}/attached"))
     );
     let poll = ctx.polling(seconds, 0.0);
@@ -1203,8 +1232,9 @@ fn download(
         .chain([None])
     {
         let remaining = poll.remaining().max(0.1);
-        let cmd = backend
-            .output_archive(outputs, remaining)
+        let cmd = committed
+            .then(|| backend.output_archive(outputs, remaining))
+            .flatten()
             .unwrap_or_else(|| backend.remote(&command, remaining));
         let result = ctx.transfer(&cmd.stdout_file(archive.path()), 2);
         let transport = matches!(result, Ok(Output { code: 255, .. }));

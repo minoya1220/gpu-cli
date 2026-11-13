@@ -24,6 +24,19 @@ enum End {
     Cancel,
     CancelTwice,
     DownloadFailure,
+    LostDuringDownload,
+}
+
+fn write_outputs(path: &std::path::Path) -> std::result::Result<Output, RunError> {
+    let mut tar = tar::Builder::new(std::fs::File::create(path).unwrap());
+    let mut header = tar::Header::new_gnu();
+    header.set_size(3);
+    header.set_mode(0o600);
+    header.set_cksum();
+    tar.append_data(&mut header, "outputs/result", &b"ok\n"[..])
+        .unwrap();
+    tar.finish().unwrap();
+    testing::ok("")
 }
 
 #[test]
@@ -39,6 +52,7 @@ fn shared_run_flow_over_modal_exec() {
         End::Cancel,
         End::CancelTwice,
         End::DownloadFailure,
+        End::LostDuringDownload,
     ] {
         let t = TestEnv::new();
         let cwd = t.root.join("source");
@@ -113,6 +127,13 @@ fn shared_run_flow_over_modal_exec() {
                     if remote.contains(" stop ") || remote.starts_with("printf ") {
                         return testing::ok("");
                     }
+                    if remote.starts_with("tar -C ") {
+                        assert!(remote.contains(" -cf - -- outputs/. "));
+                        if matches!(end, End::DownloadFailure | End::LostDuringDownload) {
+                            return testing::status(255);
+                        }
+                        return write_outputs(cmd.stdout_file.as_ref().unwrap());
+                    }
                     if remote.starts_with("dd ") {
                         std::fs::write(cmd.stdout_file.as_ref().unwrap(), b"hi\r\n").unwrap();
                         return testing::ok("");
@@ -120,24 +141,13 @@ fn shared_run_flow_over_modal_exec() {
                     panic!("unexpected exec {cmd:?}");
                 }
                 "volume-get" => {
+                    assert!(matches!(end, End::Lost | End::LostDuringDownload));
                     assert!(cmd.argv[6].starts_with("gpu-cli-run-"));
                     assert_eq!(cmd.argv[7], "outputs");
-                    if matches!(end, End::DownloadFailure) {
-                        return testing::status(255);
-                    }
-                    let mut tar = tar::Builder::new(
-                        std::fs::File::create(cmd.stdout_file.as_ref().unwrap()).unwrap(),
-                    );
-                    let mut header = tar::Header::new_gnu();
-                    header.set_size(3);
-                    header.set_mode(0o600);
-                    header.set_cksum();
-                    tar.append_data(&mut header, "outputs/result", &b"ok\n"[..])
-                        .unwrap();
-                    tar.finish().unwrap();
-                    testing::ok("")
+                    write_outputs(cmd.stdout_file.as_ref().unwrap())
                 }
                 "volume-delete" => {
+                    assert!(!matches!(end, End::CleanupFailure));
                     assert!(cmd.argv[6].starts_with("gpu-cli-run-"));
                     testing::ok(if matches!(end, End::VolumeCleanupFailure) {
                         r#"{"finished":false}"#
@@ -145,7 +155,7 @@ fn shared_run_flow_over_modal_exec() {
                         r#"{"finished":true}"#
                     })
                 }
-                "status" => testing::ok(if matches!(end, End::Lost) {
+                "status" => testing::ok(if matches!(end, End::Lost | End::LostDuringDownload) {
                     r#"{"running":false,"returncode":137}"#
                 } else {
                     r#"{"running":true,"returncode":null}"#
@@ -170,7 +180,7 @@ fn shared_run_flow_over_modal_exec() {
                 End::Success => 0,
                 End::Failure => 7,
                 End::Timeout => 17,
-                End::Lost => 18,
+                End::Lost | End::LostDuringDownload => 18,
                 End::CleanupFailure | End::VolumeCleanupFailure => 19,
                 End::Cancel | End::CancelTwice => 130,
                 _ => 1,
@@ -204,6 +214,12 @@ fn shared_run_flow_over_modal_exec() {
                 b"ok\n"
             );
             assert_eq!(std::fs::read(local.join("log.txt")).unwrap(), b"hi\r\n");
+        }
+        if matches!(end, End::LostDuringDownload) {
+            assert_eq!(
+                std::fs::read(local.join("outputs/result")).unwrap(),
+                b"ok\n"
+            );
         }
         if matches!(end, End::Lost) {
             assert_eq!(

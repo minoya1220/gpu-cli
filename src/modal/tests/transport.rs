@@ -185,6 +185,23 @@ fn down_cleans_the_recorded_volume_even_if_sandbox_metadata_disappears() {
 }
 
 #[test]
+fn down_keeps_the_volume_while_termination_is_unverified() {
+    let runner = FakeRunner::new(|cmd| match cmd.argv[5].as_str() {
+        "status" => testing::ok(r#"{"running":true,"volume":"gpu-cli-run-live"}"#),
+        "terminate" => testing::ok(r#"{"finished":false}"#),
+        _ => panic!("{cmd:?}"),
+    });
+    let t = TestEnv::new();
+    let ctx = t.ctx().runner(&runner).build().for_command(true);
+    let error = down(&ctx, "modal:sb-live", true).unwrap_err();
+    assert_eq!(error.exit_code(), 19);
+    assert_eq!(
+        ctx.result_snapshot().get("destroyed"),
+        Some(&Value::Bool(false))
+    );
+}
+
+#[test]
 fn output_paths_write_through_to_the_volume_and_keep_uploaded_results() {
     use std::fs;
     let t = TestEnv::new();
@@ -206,6 +223,33 @@ fn output_paths_write_through_to_the_volume_and_keep_uploaded_results() {
     assert_eq!(fs::read(mount.join("seed")).unwrap(), b"initial");
     fs::write(work.join("results/checkpoints/checkpoint"), b"next").unwrap();
     assert_eq!(fs::read(mount.join("checkpoint")).unwrap(), b"next");
+    let operand =
+        crate::run::RunBackend::archive_operand(&ModalBackend::default(), "results/checkpoints");
+    let archive = t.root.join("live.tar");
+    assert!(std::process::Command::new("tar")
+        .env("COPYFILE_DISABLE", "1")
+        .arg("-C")
+        .arg(&work)
+        .args(["-cf"])
+        .arg(&archive)
+        .args(["--", &operand])
+        .status()
+        .unwrap()
+        .success());
+    let local = t.root.join("download");
+    fs::create_dir(&local).unwrap();
+    let ctx = t.ctx().build();
+    crate::run_files::unpack(
+        &ctx,
+        &archive,
+        &local,
+        std::path::Path::new("results/checkpoints"),
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read(local.join("results/checkpoints/checkpoint")).unwrap(),
+        b"next"
+    );
     assert!(!std::process::Command::new("bash")
         .args(["-c", &command])
         .status()

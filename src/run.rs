@@ -147,8 +147,15 @@ pub(crate) trait RunBackend {
     fn upload(&self, extract: String) -> String {
         extract
     }
-    fn start_prelude(&self) -> String {
+    fn start_prelude(&self, _jobdir: &str, _outputs: &str) -> String {
         String::new()
+    }
+    fn outputs_hook(&self) -> &str {
+        ""
+    }
+    /// Persistent providers can fetch an archive even after the host is lost.
+    fn output_archive(&self, _outputs: &str, _timeout: f64) -> Option<Cmd> {
+        None
     }
     fn wait_for_startup(&self) -> bool;
     fn destroy(&self, ctx: &Ctx, id: &str) -> Result<()>;
@@ -743,7 +750,7 @@ fn execute(
     ctx.check_cancelled()?;
     let mut config = format!("FORWARDED={}\n", shell_quote(&job.env));
     for (key, value) in [
-        ("JOBDIR", jobdir),
+        ("JOBDIR", jobdir.clone()),
         ("OUTPUTS", flags.outputs.clone()),
         ("SETUP", job.setup.clone()),
         ("COMMAND", shell_join(&flags.command)),
@@ -762,11 +769,12 @@ fn execute(
     }
     let hook = backend.hook(&id);
     let payload = format!(
-        "{}GPU_RUN_SOURCE={}\nGPU_RUN_CONFIG={}\nGPU_RUN_HOOK={}\n{REMOTE_SOURCE}",
-        backend.start_prelude(),
+        "{}GPU_RUN_SOURCE={}\nGPU_RUN_CONFIG={}\nGPU_RUN_HOOK={}\nGPU_RUN_OUTPUTS_HOOK={}\n{REMOTE_SOURCE}",
+        backend.start_prelude(&jobdir, &flags.outputs),
         shell_quote(REMOTE_SOURCE),
         shell_quote(&config),
-        shell_quote(&hook)
+        shell_quote(&hook),
+        shell_quote(backend.outputs_hook())
     );
     let start = format!(
         "bash -s -- start {} {}",
@@ -807,19 +815,37 @@ fn settle(owned: &Owned, mut outcome: Result<()>, started: f64) -> Result<()> {
     if ctx.interrupts() > 0 {
         outcome = Err(Error::Cancelled(130));
     }
-    // Ephemeral Modal files cannot be recovered once the sandbox is lost.
-    // Do not replace exit 18 with the inevitable download transport failure.
+    // Logs and supervisor state are ephemeral, but Modal outputs survive in a
+    // run-scoped Volume. Preserve exit 18 while recovering its last commit.
     let modal_lost = backend.provider() == Provider::Modal
         && (matches!(outcome, Err(Error::Status(ExitCode::InstanceLost, _)))
             || (outcome.is_err() && backend.lost(ctx, id)));
     if modal_lost && ctx.interrupts() == 0 {
         outcome = Err(Error::status(
             ExitCode::InstanceLost,
-            "Modal sandbox ended while the job was running (possibly preempted); ephemeral outputs are lost.",
+            "Modal sandbox ended while the job was running (possibly preempted); recovering the last committed outputs.",
         ));
     }
-    if let Some(paths) = session.paths.as_ref().filter(|_| !modal_lost) {
-        if recover(owned, paths, &mut outcome) {
+    if let Some(paths) = session.paths.as_ref() {
+        if modal_lost {
+            if ctx.interrupts() < 2 {
+                phase.set("download");
+                if let Err(error) = download(
+                    ctx,
+                    backend,
+                    &paths.0,
+                    &paths.1,
+                    &owned.flags.outputs,
+                    &session.local,
+                    owned.job.deadline,
+                ) {
+                    let _ = ctx.eprintln(&format!(
+                        "Could not fetch committed outputs: {}",
+                        error.text()
+                    ));
+                }
+            }
+        } else if recover(owned, paths, &mut outcome) {
             failure_phase = Value::str("download");
         }
     }
@@ -954,7 +980,7 @@ fn recover(owned: &Owned, (root, jobdir): &(String, String), outcome: &mut Resul
         *outcome = if backend.provider() == Provider::Modal && backend.lost(ctx, id) {
             Err(Error::status(
                 ExitCode::InstanceLost,
-                "Modal sandbox ended during download; ephemeral outputs are lost.",
+                "Modal sandbox ended during download; could not fetch its last committed outputs.",
             ))
         } else {
             Err(error)
@@ -1177,12 +1203,10 @@ fn download(
         .chain([None])
     {
         let remaining = poll.remaining().max(0.1);
-        let result = ctx.transfer(
-            &backend
-                .remote(&command, remaining)
-                .stdout_file(archive.path()),
-            2,
-        );
+        let cmd = backend
+            .output_archive(outputs, remaining)
+            .unwrap_or_else(|| backend.remote(&command, remaining));
+        let result = ctx.transfer(&cmd.stdout_file(archive.path()), 2);
         let transport = matches!(result, Ok(Output { code: 255, .. }));
         let error = match backend.remote_result(ctx, result, message) {
             Ok(_) => break,

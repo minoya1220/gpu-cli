@@ -102,11 +102,38 @@ In a terminal, the `run` GPU screen lists Modal rows with live prices; type `mod
 - Use Modal's GPU names (any case; spaces become hyphens), not Vast's. `--num-gpus`, `--cpu` (cores, default 4) and `--memory` (GiB, default 16) set the size. `gpu` refuses `--offer`, `--disk`, `--reliability` and `--unverified`.
 - `--expire` must be over 10 minutes and at most 24 hours. `--timeout` limits image build and scheduling.
 - The default image is Debian slim with Python 3.13. An `--image` from a registry does not need Python; `gpu` adds uv.
-- `--max-price` and `max_session_spend` check the estimate: GPU × count + CPU + memory at Sandbox rates (CPU and memory cost 3× Function rates). It leaves out image builds and egress, and is not a billing cap. Modal bills setup, idle and download time too. If a rate is missing, the run stops before launch.
-- **GPU Sandboxes can be preempted.** The run then exits 18 and loses its outputs; `gpu` never reruns it. Use Vast if you need a host that stays up.
-- The Sandbox exits if no job starts within five minutes of startup or the last upload progress, at the deadline, or `--linger` after the job ends. A run deletes the Sandbox after the download and exits 19 if it cannot confirm that. The `gpu-cli` App and its cached image remain; no volumes, secrets or warm functions do.
+- `--max-price` and `max_session_spend` check the estimate: GPU × count + CPU + memory at Sandbox rates (CPU and memory cost 3× Function rates). It leaves out image builds, egress and output Volume storage, and is not a billing cap. Modal bills setup, idle and download time too. If a rate is missing, the run stops before launch.
+- The job must finish by the expiry minus a 10-minute results reserve, counting build, scheduling, upload and setup: `--expire 12m` leaves at most two minutes for all of it. The job is stopped then and its outputs flushed.
+- The Sandbox exits if no job starts within five minutes of startup or the last upload progress, at the deadline, or `--linger` after the job ends. A run downloads outputs, then deletes the Sandbox and its output Volume, and exits 19 if it cannot confirm both. The Volume is kept while the Sandbox deletion is unconfirmed. The `gpu-cli` App and its cached image remain; no secrets or warm functions do.
+- `gpu ls` lists running Modal Sandboxes and leftover output Volumes. `gpu down modal:sb-... --yes` deletes the Sandbox and its Volume.
 - Modal rejections of the request or account (bad GPU or image, billing, no payment method) exit 2. Image build failures exit 1; see the build log in the Modal dashboard.
-- Modal has no `up`, `ssh`, `exec`, `cp`, `edit`, `stop` or `expire`.
+- Modal has no `up`, `edit`, `stop` or `expire`.
+
+#### Debug a live Modal job
+
+```sh
+gpu exec modal:sb-... -- nvidia-smi
+gpu cp modal:sb-... ./input.bin :/workspace/input.bin
+gpu cp modal:sb-... :/gpu-volume/outputs ./checkpoint --recursive
+gpu ssh modal:sb-...          # print the reconnect command
+gpu ssh modal:sb-... --exec   # a terminal through the helper; no sshd or keys
+```
+
+These work only while the Sandbox runs, including an unattended `--linger` window; an attached `gpu run` still downloads and deletes it when the job ends. `exec` and `cp` return the command's exit code and support `--json` and `--command-timeout`; `ssh --exec` cannot use `--json`. JSON results keep `ssh_alias` and `setup_done` null. `cp` copies files and, with `--recursive`, folders; it refuses remote archives with links or special files.
+
+#### Preemption and output Volumes
+
+**GPU Sandboxes can be preempted.** `gpu` never reruns the job. Use Vast if you need a host that stays up.
+
+- Each run mounts a Volume at `/gpu-volume`, and `outputs/` (or `--outputs`, also in `GPU_RUN_OUTPUTS`) links to `/gpu-volume/outputs`. Write inside it, and do not replace the link. Only outputs persist, not source, environments or logs. An output path that is itself a link is refused.
+- `gpu` syncs the Volume every 30 seconds and when the job ends. Preemption keeps only the last sync, so checkpoint and close your files. Images without `sync` commit only when the Sandbox ends, which preemption may skip.
+- If the Sandbox ends during a job, the run exits 18, downloads the last synced outputs from the Volume, and deletes it. Download failure does not keep the Volume.
+- If the CLI dies, the laptop disconnects, or you press Ctrl-C three times, the Sandbox still ends by its deadline but **the Volume keeps billing storage** until you delete it. `gpu ls --provider modal` shows it as `outputs-only`. A Volume whose job never started stays hidden for 15 minutes, while its create may still wait for capacity.
+
+```sh
+gpu cp modal:volume:gpu-cli-run-<run-id> :/ ./recovered --recursive
+gpu down modal:volume:gpu-cli-run-<run-id> --yes
+```
 
 ## Connect and edit
 
@@ -258,6 +285,7 @@ gpu cp 12345678 :/workspace/results ./results
 - `exec` passes arguments as-is (use `sh -c` for shell syntax), gives no terminal or stdin, and returns the remote exit code.
 - `cp` needs exactly one `:/absolute/path`, `-r` for folders, and `scp -s` support.
 - Neither bypasses SSH host-key checks.
+- `exec` and `cp` also accept Modal IDs; see [Debug a live Modal job](#debug-a-live-modal-job).
 
 With `--json`, each command except `ls` prints one object:
 

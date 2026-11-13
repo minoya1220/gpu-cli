@@ -34,7 +34,7 @@ launch() {
     fi
     GPU_RUN_HOOK=$(printf 'printf "%%s" "$1" >%q\n' "$TMP/hook-$token")
     # Feed a separate bash, just like SSH stdin; it exits immediately after start.
-    { printf 'GPU_RUN_SOURCE=%q\nGPU_RUN_CONFIG=%q\nGPU_RUN_HOOK=%q\n' "$GPU_RUN_SOURCE" "$GPU_RUN_CONFIG" "$GPU_RUN_HOOK"; cat "$SOURCE"; } |
+    { printf 'GPU_RUN_SOURCE=%q\nGPU_RUN_CONFIG=%q\nGPU_RUN_HOOK=%q\nGPU_RUN_OUTPUTS_HOOK=%q\n' "$GPU_RUN_SOURCE" "$GPU_RUN_CONFIG" "$GPU_RUN_HOOK" "${GPU_RUN_OUTPUTS_HOOK:-}"; cat "$SOURCE"; } |
         env GPU_RUN_LIBRARY=0 bash -s -- start "$TMP/state/$token" "$token" >/dev/null
 }
 wait_done() {
@@ -178,6 +178,25 @@ check test "$(printf '%s' "$status" | cut -f1)" = job
 check test "$(printf '%s' "$status" | cut -f2)" = 0
 check test "$(cat "$TMP/work/overlap/outputs/seen")" = clobbered
 check test "$(cat "$TMP/work/overlap/setup-seen")" = clobbered
+passed=$((passed+1))
+
+# Output flushes run periodically while a task is alive and once more before
+# completion is published. The hook is optional: earlier tests have none.
+GPU_RUN_OUTPUTS_HOOK=$(printf 'printf "commit\\n" >>%q\n' "$TMP/commits")
+launch commits 'while [ ! -f finish ]; do sleep 0.1; done; echo finished'
+count=0
+while [ ! -s "$TMP/commits" ] && [ "$count" -lt 350 ]; do
+    check test "$(status_of commits | cut -f2)" = -
+    sleep 0.1
+    count=$((count+1))
+done
+check test -s "$TMP/commits"
+check test "$(status_of commits | cut -f2)" = -
+touch "$TMP/work/commits/finish"
+status=$(wait_done commits)
+check test "$(printf '%s' "$status" | cut -f2)" = 0
+check test "$(wc -l <"$TMP/commits")" -ge 2
+unset GPU_RUN_OUTPUTS_HOOK
 passed=$((passed+1))
 
 # A second start with the same run ID must not launch duplicate work.

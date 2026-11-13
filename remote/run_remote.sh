@@ -22,7 +22,7 @@ publish() {
 supervise() {
     source "$ROOT/config"
     export PATH="$HOME/.local/bin:$PATH"
-    local stopped=0 timed=0 child='' phase=setup rc=0 end now
+    local stopped=0 timed=0 child='' phase=setup rc=0 end now last_commit=$SECONDS
     trap 'stopped=1' TERM INT HUP
     printf '%s\n' "$$" >"$ROOT/pid"
     publish setup - 0
@@ -42,9 +42,18 @@ supervise() {
             fi
             break
         fi
+        if [ -f "$ROOT/outputs-hook.sh" ] && [ $((SECONDS - last_commit)) -ge 30 ]; then
+            bash "$ROOT/outputs-hook.sh" >>"$ROOT/log" 2>&1 || true
+            last_commit=$SECONDS
+        fi
         sleep 1 & wait $! || true
     done
     wait "$child" || rc=$?
+    # Best effort flush at job end, before publishing completion. A preemption
+    # can bypass this; only the last durable checkpoint is recoverable.
+    if [ -f "$ROOT/outputs-hook.sh" ]; then
+        bash "$ROOT/outputs-hook.sh" >>"$ROOT/log" 2>&1 || true
+    fi
     [ -f "$ROOT/phase" ] && read -r phase <"$ROOT/phase"
     [ "$timed" = 1 ] && rc=17
     end=$(( $(date +%s) + LINGER ))
@@ -120,6 +129,9 @@ main() {
             printf '%s' "$GPU_RUN_SOURCE" >"$ROOT/runner.sh"
             printf '%s' "$GPU_RUN_CONFIG" >"$ROOT/config"
             printf '%s' "$GPU_RUN_HOOK" >"$ROOT/expiry-hook.sh"
+            if [ -n "${GPU_RUN_OUTPUTS_HOOK:-}" ]; then
+                printf '%s' "$GPU_RUN_OUTPUTS_HOOK" >"$ROOT/outputs-hook.sh"
+            fi
             : >"$ROOT/log"
             date +%s >"$ROOT/attached"
             setsid bash "$ROOT/runner.sh" supervise "$ROOT" "$TOKEN" </dev/null >/dev/null 2>&1 &

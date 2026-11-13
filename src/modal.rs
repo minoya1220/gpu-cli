@@ -1,6 +1,8 @@
 //! Modal Sandbox planning and the pinned, private Python helper protocol.
 #[cfg(test)]
 mod tests;
+mod transport;
+pub use transport::{copy, exec, ssh};
 
 use std::io::Write;
 
@@ -16,6 +18,8 @@ use crate::run::{RunBackend, RunPlan};
 pub const HELPER: &str = include_str!("../remote/modal_helper.py");
 pub const KEEPER: &str = include_str!("../remote/modal_keeper.sh");
 const KEEPER_ROOT: &str = "/tmp/gpu-modal-keeper";
+const OUTPUT_MOUNT: &str = "/gpu-outputs";
+const OUTPUTS_HOOK: &str = "#!/bin/bash\n# syncfs is available in the default Debian image. Background commits remain\n# enabled by the SDK; custom images without sync keep that best-effort fallback.\nif command -v sync >/dev/null 2>&1; then\n    sync -f /gpu-outputs 2>/dev/null || sync /gpu-outputs 2>/dev/null || echo 'WARNING: output Volume flush failed; only prior commits may survive preemption.' >&2\nelse\n    echo 'WARNING: sync unavailable; output durability relies on Modal background commits.' >&2\nfi\n";
 
 fn client_version() -> &'static str {
     HELPER
@@ -277,6 +281,7 @@ pub struct ModalBackend {
     pub rates: Option<Rates>,
     helper: Option<Helper>,
     id: String,
+    volume: String,
 }
 impl ModalBackend {
     pub fn new(rates: Option<Rates>) -> Self {
@@ -335,6 +340,7 @@ impl RunBackend for ModalBackend {
         request.insert("cpu", Value::Float(cpu));
         request.insert("memory", Value::Int((memory * 1024.0) as i64));
         request.insert("timeout", Value::Int(seconds));
+        request.insert("volume", Value::str("gpu-cli-run-<run-id>"));
         request.insert(
             "command",
             Value::List(
@@ -407,10 +413,13 @@ impl RunBackend for ModalBackend {
             .unwrap_or_default();
         tags.insert("run_id", Value::str(&run_id));
         tags.insert("gpu", spec.get("gpu").cloned().unwrap_or(Value::Null));
+        self.volume = format!("gpu-cli-run-{run_id}");
+        tags.insert("volume", Value::str(&self.volume));
         spec.insert("tags", Value::Dict(tags));
+        spec.insert("volume", Value::str(&self.volume));
         ctx.result("run_id", Value::str(&run_id));
         ctx.result("created", Value::Null);
-        ctx.set_interrupt_notice(Some(format!("Modal create may be pending (run_id {run_id}); hard deadline {deadline}. Check: gpu ls --provider modal")));
+        ctx.set_interrupt_notice(Some(format!("Modal create may be pending (run_id {run_id}); hard deadline {deadline}. Check: gpu ls --provider modal. Leftover outputs: gpu down modal:volume:{} --yes", self.volume)));
         let wait = timeout.min((remaining - 600) as f64);
         let mut cmd = helper.command("create");
         cmd.argv.push(crate::pyfmt::float_repr(wait));
@@ -432,8 +441,13 @@ impl RunBackend for ModalBackend {
                 cleanup
                     .argv
                     .extend(["--tag".into(), format!("run_id={run_id}")]);
-                if !confirmed(helper.call_command(ctx, &cleanup, false)) {
-                    return Err(cleanup_error(&format!("run_id={run_id}")));
+                let stopped = confirmed(helper.call_command(ctx, &cleanup, false));
+                let deleted = delete_volume(ctx, &self.volume).is_ok();
+                if !stopped || !deleted {
+                    return Err(cleanup_error(&format!(
+                        "run_id={run_id}, modal:volume:{}",
+                        self.volume
+                    )));
                 }
                 ctx.result("destroyed", Value::Bool(true));
                 ctx.set_interrupt_notice(None);
@@ -448,7 +462,7 @@ impl RunBackend for ModalBackend {
         ctx.result("id", Value::str(&id));
         ctx.result("created", Value::Bool(true));
         ctx.result("expiry_armed", Value::Bool(true));
-        ctx.set_interrupt_notice(Some(format!("Sandbox {id} may still be running; hard deadline {deadline}. Next: gpu down {id} --yes")));
+        ctx.set_interrupt_notice(Some(format!("Sandbox {id} may still be running; hard deadline {deadline}. Next: gpu down {id} --yes. Leftover outputs: gpu down modal:volume:{} --yes", self.volume)));
         created(&id, Some(&run_id))?;
         ctx.check_cancelled()?;
         Ok(id)
@@ -529,12 +543,21 @@ impl RunBackend for ModalBackend {
     fn upload(&self, extract: String) -> String {
         upload(KEEPER_ROOT, &extract)
     }
-    fn start_prelude(&self) -> String {
-        // Mark a job as started only after the supervisor has published its
-        // status. A failed start must still be covered by the keeper's grace.
+    fn start_prelude(&self, jobdir: &str, outputs: &str) -> String {
+        // All job writes (including relative outputs/) go straight to the
+        // Volume, not to ephemeral disk copied only when the job finishes.
+        let prepare = prepare_outputs(jobdir, outputs, OUTPUT_MOUNT);
         format!(
-            "mkdir -p {KEEPER_ROOT}\ntrap '[ \"$?\" != 0 ] || touch {KEEPER_ROOT}/started' EXIT\n"
+            "{prepare}\nmkdir -p {KEEPER_ROOT}\ntrap '[ \"$?\" != 0 ] || touch {KEEPER_ROOT}/started' EXIT\n"
         )
+    }
+    fn outputs_hook(&self) -> &str {
+        OUTPUTS_HOOK
+    }
+    fn output_archive(&self, outputs: &str, timeout: f64) -> Option<Cmd> {
+        let mut cmd = self.helper.as_ref()?.command("volume-get");
+        cmd.argv.extend([self.volume.clone(), outputs.into()]);
+        Some(cmd.timeout(Some(timeout.max(0.1))).raw_output())
     }
     fn hook(&self, _id: &str) -> String {
         format!("#!/bin/bash\nprintf '%s\\n' \"$1\" >{KEEPER_ROOT}/end.tmp && mv -f {KEEPER_ROOT}/end.tmp {KEEPER_ROOT}/end\n")
@@ -543,8 +566,22 @@ impl RunBackend for ModalBackend {
         false
     }
     fn destroy(&self, ctx: &Ctx, id: &str) -> Result<()> {
-        terminate(ctx, id)
+        // Try both cleanups even when one fails. A stopped sandbox is not proof
+        // that persistent storage was deleted, and vice versa.
+        let stopped = terminate(ctx, id);
+        let deleted = delete_volume(ctx, &self.volume);
+        if stopped.is_err() || deleted.is_err() {
+            return Err(Error::status(ExitCode::CleanupUnverified, format!(
+                "Cleanup unverified; billing may continue. Next: gpu down {id} --yes; gpu down modal:volume:{} --yes", self.volume)));
+        }
+        Ok(())
     }
+}
+
+fn prepare_outputs(jobdir: &str, outputs: &str, mount: &str) -> String {
+    let output = crate::pyfmt::shell_quote(&format!("{jobdir}/{outputs}"));
+    let mount = crate::pyfmt::shell_quote(mount);
+    format!("out={output}\nmkdir -p -- \"$(dirname -- \"$out\")\" || exit\n[ ! -L \"$out\" ] || exit 1\nif [ -e \"$out\" ]; then\n [ -d \"$out\" ] && cp -a -- \"$out/.\" {mount}/ && rm -rf -- \"$out\" || exit 1\nfi\nln -s -- {mount} \"$out\" || exit\n")
 }
 
 /// Refresh the keeper's start grace only as archive records arrive, so a slow
@@ -558,6 +595,47 @@ fn upload(root: &str, extract: &str) -> String {
 
 /// Qualified IDs are deliberately narrow: never pass malformed IDs to another
 /// provider or interpolate them into a shell command.
+pub fn volume_name(id: &str) -> Result<&str> {
+    id.strip_prefix("modal:volume:")
+        .filter(|name| {
+            name.starts_with("gpu-cli-run-")
+                && name.len() > 12
+                && name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
+        })
+        .ok_or_else(|| Error::usage("Invalid gpu Modal Volume ID").next("gpu ls --provider modal"))
+}
+
+pub fn delete_volume(ctx: &Ctx, name: &str) -> Result<()> {
+    volume_name(&format!("modal:volume:{name}"))?;
+    let helper = Helper::new()?;
+    for _ in 0..3 {
+        let mut cmd = helper.command("volume-delete").timeout(Some(20.0));
+        cmd.argv.push(name.into());
+        if confirmed(helper.call_command(ctx, &cmd, false)) {
+            return Ok(());
+        }
+    }
+    Err(Error::status(ExitCode::CleanupUnverified, format!("Volume deletion unverified; storage billing may continue. Next: gpu down modal:volume:{name} --yes")))
+}
+
+pub fn down_volume(ctx: &Ctx, id: &str, yes: bool) -> Result<()> {
+    let name = volume_name(id)?;
+    ctx.result("provider", Value::str("modal"));
+    ctx.result("id", Value::str(id));
+    ctx.result("destroyed", Value::Bool(false));
+    if !yes
+        && !crate::prompt::confirm(
+            ctx,
+            Some(&format!("Permanently delete output Volume {id}?")),
+        )?
+    {
+        return Err(Error::Cancelled(130));
+    }
+    delete_volume(ctx, name)?;
+    ctx.result("destroyed", Value::Bool(true));
+    ctx.println(&format!("Volume {id} deleted (verified)."))
+}
+
 pub fn sandbox_id(id: &str) -> Result<&str> {
     id.strip_prefix("modal:")
         .filter(|raw| {
@@ -607,11 +685,8 @@ pub fn terminate(ctx: &Ctx, id: &str) -> Result<()> {
             Err(Error::Status(ExitCode::NotFound, _)) => return Ok(()),
             _ => {}
         }
-        match status(ctx, id) {
-            Ok(reply) if reply.get("running") == Some(&Value::Bool(false)) => return Ok(()),
-            Err(Error::Status(ExitCode::NotFound, _)) => return Ok(()),
-            _ => {}
-        }
+        // Do not accept sandbox status as a fallback: it says nothing about
+        // the run Volume. Only the helper's combined confirmation is enough.
     }
     Err(cleanup_error(id))
 }
@@ -622,11 +697,25 @@ pub fn down(ctx: &Ctx, id: &str, yes: bool) -> Result<()> {
     ctx.result("destroyed", Value::Bool(false));
     // A missing sandbox requested by the user is exit 16; absence after our
     // own termination request, in contrast, verifies successful cleanup.
-    status(ctx, id)?;
-    if !yes && !crate::prompt::confirm(ctx, Some(&format!("Terminate sandbox {id}?")))? {
+    let before = status(ctx, id)?;
+    let volume = before.get("volume").and_then(Value::as_str);
+    if let Some(name) = volume {
+        volume_name(&format!("modal:volume:{name}"))?;
+    }
+    if !yes
+        && !crate::prompt::confirm(
+            ctx,
+            Some(&format!("Terminate sandbox {id} and delete its outputs?")),
+        )?
+    {
         return Err(Error::Cancelled(130));
     }
-    terminate(ctx, id)?;
+    let stopped = terminate(ctx, id);
+    // Preserve the tag before termination: Sandbox metadata may disappear
+    // between the status read and the mutation/retry.
+    let deleted = volume.map_or(Ok(()), |name| delete_volume(ctx, name));
+    stopped?;
+    deleted?;
     ctx.result("destroyed", Value::Bool(true));
     ctx.println(&format!("Sandbox {id} terminated (verified)."))
 }
@@ -656,7 +745,8 @@ pub fn list(ctx: &Ctx) -> Result<Vec<Dict>> {
         .get("sandboxes")
         .and_then(Value::as_list)
         .ok_or_else(|| Error::msg("Invalid Modal inventory response."))?;
-    rows.iter()
+    let mut items = rows
+        .iter()
         .map(|row| {
             let raw = row
                 .get("id")
@@ -681,9 +771,33 @@ pub fn list(ctx: &Ctx) -> Result<Vec<Dict>> {
             }
             Ok(item)
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    if let Some(volumes) = reply.get("volumes").and_then(Value::as_list) {
+        for volume in volumes {
+            let name = volume
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or_else(|| Error::msg("Invalid Modal Volume inventory response."))?;
+            let id = format!("modal:volume:{name}");
+            volume_name(&id)?;
+            let mut item = Dict::new();
+            item.insert("id", Value::str(id));
+            item.insert("provider", Value::str("modal"));
+            item.insert("actual_status", Value::str("outputs-only"));
+            item.insert(
+                "label",
+                Value::str("leftover outputs (storage billing); cp to recover, down to delete"),
+            );
+            item.insert(
+                "run_id",
+                Value::str(name.trim_start_matches("gpu-cli-run-")),
+            );
+            items.push(item);
+        }
+    }
+    Ok(items)
 }
 
 pub fn unsupported() -> Error {
-    Error::usage("Modal supports gpu run, gpu ls and gpu down only").next("gpu ls --provider modal")
+    Error::usage("Modal supports gpu run, exec, cp, ssh, ls and down; not up, editors, stop or expiry changes").next("gpu ls --provider modal")
 }

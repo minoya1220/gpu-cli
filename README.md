@@ -167,13 +167,13 @@ With `--json`, each command prints one object, `{"command":...,"ok":...,"result"
 | 14 | readiness timeout |
 | 15 | over `max_session_spend` |
 | 16 | ID not found |
-| 20 | `--command-timeout` |
+| 20 | `--command-timeout` or Modal helper timeout |
 
 A create timeout does not mean nothing was created: check `gpu ls` before retrying.
 
 ## Configuration
 
-`gpu setup` creates `~/.config/gpu/config.json`. Keys override the defaults in `src/config.rs`:
+`gpu setup` creates `~/.config/gpu/config.json` (or `$XDG_CONFIG_HOME/gpu/`). Keys override the defaults in `src/config.rs`:
 
 ```json
 {

@@ -15,8 +15,14 @@ create) cat >"$HOME/create-spec"; echo '{"id":"sb-offline"}' ;;
 list) echo '{"sandboxes":[{"id":"sb-offline","tags":{"gpu-cli":"true","gpu":"T4","label":"source","run_id":"recovery"}}]}' ;;
 status)
  if [ "${MODE:-}" = missing ]; then echo '{"error":{"kind":"NotFoundError","message":"gone"}}'; exit 1; fi
- if [ "${MODE:-}" = lost ] || [ -f "$HOME/destroyed" ]; then echo '{"running":false,"returncode":137}';
+ if [ "${MODE:-}" = lost ] || { [ "${MODE:-}" = lost-after-job ] && [ -f "$HOME/seen-job" ]; } || [ -f "$HOME/destroyed" ]; then echo '{"running":false,"returncode":137}';
  else echo '{"running":true,"returncode":null}'; fi ;;
+volume-delete) touch "$HOME/volume-deleted"; echo '{"finished":true}' ;;
+volume-get)
+ touch "$HOME/downloading"
+ if [ -f "$HOME/slow-download" ]; then exec sleep 120; fi
+ export COPYFILE_DISABLE=1
+ exec tar --format=ustar -C "$HOME" -cf - outputs ;;
 terminate)
  if [ -f "$HOME/slow-cleanup" ]; then echo $$ >"$HOME/cleanup-pid"; touch "$HOME/cleanup"; exec sleep 120; fi
  touch "$HOME/destroyed"; echo '{"finished":true}' ;;
@@ -30,6 +36,10 @@ exec)
  *' status '*)
   touch "$HOME/following"
   if [ "${MODE:-}" = lost ]; then exit 255; fi
+  if [ "${MODE:-}" = lost-after-job ]; then
+   [ ! -f "$HOME/seen-job" ] || exit 255
+   touch "$HOME/seen-job"; printf 'job\t-\t0\t4\n'; exit 0
+  fi
   if [ "${MODE:-}" = follow ] && [ ! -f "$HOME/stopped" ]; then printf 'job\t-\t0\t4\n';
   else printf 'job\t%s\t0\t4\n' "${JOB_EXIT:-0}"; fi ;;
  'dd '*) printf 'hi\r\n' ;;
@@ -82,7 +92,12 @@ fn result(out: &std::process::Output) -> Value {
 
 #[test]
 fn live_success_failure_and_preemption() {
-    for (mode, exit) in [("success", 0), ("failure", 7), ("lost", 18)] {
+    for (mode, exit) in [
+        ("success", 0),
+        ("failure", 7),
+        ("lost", 18),
+        ("lost-after-job", 18),
+    ] {
         let s = sandbox();
         let out = command(&s)
             .env("MODE", mode)
@@ -100,6 +115,9 @@ fn live_success_failure_and_preemption() {
         assert_eq!(result.get("provider"), Some(&Value::str("modal")));
         assert_eq!(result.get("id"), Some(&Value::str("modal:sb-offline")));
         assert_eq!(result.get("destroyed"), Some(&Value::Bool(true)));
+        if mode == "lost-after-job" {
+            assert_eq!(result.get("phase"), Some(&Value::str("job")));
+        }
         let local = s
             .root
             .join("source/gpu-runs")
@@ -111,14 +129,12 @@ fn live_success_failure_and_preemption() {
             result.get("run_id")
         );
         assert!(!pyjson::dumps(&spec, None).contains("private-canary"));
-        if mode == "lost" {
-            assert!(!local.join("outputs").exists());
-            assert!(!s.home.join("downloading").exists());
-        } else {
-            assert_eq!(
-                std::fs::read(local.join("outputs/result")).unwrap(),
-                b"ok\0\xff\r\n"
-            );
+        assert_eq!(
+            std::fs::read(local.join("outputs/result")).unwrap(),
+            b"ok\0\xff\r\n"
+        );
+        assert!(s.home.join("volume-deleted").exists());
+        if mode != "lost" {
             assert_eq!(std::fs::read(local.join("log.txt")).unwrap(), b"hi\r\n");
         }
         assert!(!String::from_utf8_lossy(&out.stdout).contains("private-canary"));
@@ -173,11 +189,8 @@ fn modal_ls_down_and_unsupported_commands_route_only_to_uv() {
     assert_eq!(out.status.code(), Some(16));
     assert!(s.calls().iter().all(|call| call[0] == "uv"));
     for args in [
-        vec!["ssh", "modal:sb-offline"],
-        vec!["exec", "modal:sb-offline", "--", "true"],
         vec!["stop", "modal:sb-offline"],
         vec!["wait", "modal:sb-offline"],
-        vec!["cp", "modal:sb-offline", ":/outputs", "."],
         vec!["expire", "modal:sb-offline", "30m"],
     ] {
         let out = s.command(&args).output().unwrap();
@@ -208,6 +221,149 @@ fn unconfigured_modal_never_breaks_vast_inventory() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(12));
+}
+
+#[test]
+fn modal_exec_copy_and_ssh_public_envelopes_and_plain_bytes() {
+    let s = sandbox();
+    s.stub(
+        "uv",
+        r#"#!/bin/sh
+set -eu
+printf 'uv\t%s\n' "$5" >> "$FAKE_CLI_LOG"
+case "$5" in
+status) echo '{"running":true,"returncode":null}' ;;
+exec)
+ if [ -f "$HOME/timeout-exec" ]; then exec sleep 120; fi
+ if [ "$7" = --copy ]; then exit 0; fi
+ [ "$7" = -- ] && [ "$8" = printf ] && [ "$9" = '%s' ] || exit 97
+ shift 9
+ [ "$1" = 'a b;$(no)' ] || exit 97
+ printf 'x\000\377\r\n'; printf 'remote stderr\r\n' >&2; exit 7 ;;
+*) exit 97 ;;
+esac
+"#,
+    );
+    for json in [false, true] {
+        let mut cmd = s.command(&["exec", "modal:sb-offline"]);
+        if json {
+            cmd.arg("--json");
+        }
+        let out = cmd
+            .args(["--", "printf", "%s", "a b;$(no)"])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(7));
+        if json {
+            let fields = result(&out);
+            assert_eq!(fields.get("exit_code"), Some(&Value::Int(7)));
+            assert_eq!(fields.get("ready"), Some(&Value::Bool(true)));
+            assert_eq!(fields.get("ssh_alias"), Some(&Value::Null));
+            assert_eq!(fields.get("stdout"), Some(&Value::str("x\0\u{fffd}\r\n")));
+            assert_eq!(fields.get("stderr"), Some(&Value::str("remote stderr\r\n")));
+            let envelope = pyjson::loads(&String::from_utf8_lossy(&out.stdout)).unwrap();
+            assert_eq!(
+                envelope.get("error").unwrap().get("code"),
+                Some(&Value::str("remote_exit"))
+            );
+        } else {
+            assert_eq!(out.stdout, b"x\0\xff\r\n");
+            assert_eq!(out.stderr, b"remote stderr\r\n");
+        }
+    }
+    let out = s
+        .command(&[
+            "cp",
+            "modal:sb-offline",
+            "./a b",
+            ":/workspace/a b",
+            "--recursive",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(result(&out).get("source"), Some(&Value::str("./a b")));
+    assert_eq!(result(&out).get("exit_code"), Some(&Value::Int(0)));
+    let out = s
+        .command(&["ssh", "modal:sb-offline", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(
+        result(&out).get("ssh_command"),
+        Some(&Value::str("gpu ssh modal:sb-offline --exec"))
+    );
+    let before = s.calls().len();
+    let out = s
+        .command(&["ssh", "modal:sb-offline", "--exec", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(s.calls().len(), before);
+    std::fs::write(s.home.join("timeout-exec"), "").unwrap();
+    let out = s
+        .command(&[
+            "exec",
+            "modal:sb-offline",
+            "--command-timeout",
+            "0.1",
+            "--json",
+            "--",
+            "true",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(20));
+    assert!(s.calls().iter().all(|call| call[0] == "uv"));
+}
+
+#[test]
+fn modal_orphan_inventory_recovery_and_deletion_use_public_volume_ids() {
+    let s = sandbox();
+    s.stub(
+        "uv",
+        r#"#!/bin/sh
+set -eu
+printf 'uv\t%s\n' "$5" >> "$FAKE_CLI_LOG"
+case "$5" in
+list) echo '{"sandboxes":[],"volumes":[{"name":"gpu-cli-run-orphan"}]}' ;;
+volume-copy) [ "$6" = gpu-cli-run-orphan ] && [ "$7" = ./recovered ] ;;
+volume-delete) [ "$6" = gpu-cli-run-orphan ]; echo '{"finished":true}' ;;
+*) exit 97 ;;
+esac
+"#,
+    );
+    let out = s
+        .command(&["ls", "--provider", "modal", "--json", "--envelope"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let fields = result(&out);
+    let item = &fields.get("instances").unwrap().as_list().unwrap()[0];
+    assert_eq!(
+        item.get("id"),
+        Some(&Value::str("modal:volume:gpu-cli-run-orphan"))
+    );
+    assert_eq!(item.get("actual_status"), Some(&Value::str("outputs-only")));
+    let out = s
+        .command(&[
+            "cp",
+            "modal:volume:gpu-cli-run-orphan",
+            ":/",
+            "./recovered",
+            "--recursive",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let out = s
+        .command(&["down", "modal:volume:gpu-cli-run-orphan", "--yes", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(result(&out).get("destroyed"), Some(&Value::Bool(true)));
 }
 
 fn wait_file(s: &Sandbox, name: &str, child: &mut Child) {

@@ -84,7 +84,7 @@ pub enum Command {
     },
     /// Execute a remote command without a terminal; preserve its exit code
     Exec {
-        /// Numeric Vast ID, gcp:PROJECT:ZONE:NAME, or unambiguous TPU name
+        /// Numeric Vast ID, gcp:PROJECT:ZONE:NAME, unambiguous TPU name, or modal:sb-ID
         id: String,
         /// Remote program and arguments after -- (use sh -c for shell syntax)
         #[arg(required = true, last = true, num_args = 1..)]
@@ -98,7 +98,7 @@ pub enum Command {
     },
     /// Copy files; prefix exactly one path with :/ to select the remote side
     Cp {
-        /// Numeric Vast ID, gcp:PROJECT:ZONE:NAME, or unambiguous TPU name
+        /// Numeric Vast ID, gcp:PROJECT:ZONE:NAME, unambiguous TPU name, modal:sb-ID, or modal:volume:NAME
         id: String,
         /// Local source path, or :/absolute/remote/path
         source: String,
@@ -116,7 +116,7 @@ pub enum Command {
     },
     /// Print or execute the SSH command
     Ssh {
-        /// Numeric Vast ID, full GCP ID, or short TPU name (picker if omitted)
+        /// Numeric Vast ID, full GCP ID, short TPU name, or modal:sb-ID (picker if omitted)
         id: Option<String>,
         /// Replace this process with an interactive SSH connection
         #[arg(long)]
@@ -140,7 +140,7 @@ pub enum Command {
     },
     /// Destroy an instance
     Down {
-        /// Vast ID, GCP ID/short TPU name, or modal:sb-ID (picker if omitted)
+        /// Vast ID, GCP ID/short TPU name, modal:sb-ID, or modal:volume:NAME (picker if omitted)
         id: Option<String>,
         /// Approve permanent destruction without a prompt (required without a terminal)
         #[arg(long)]

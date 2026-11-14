@@ -290,11 +290,11 @@ fn results_download_retries_then_unpacks_without_implicit_linger() {
     download(
         &ctx,
         &crate::vast::run::VastBackend::connected("vast-123"),
-        "/root/state",
-        "/workspace/job",
+        &("/root/state".into(), "/workspace/job".into()),
         "outputs",
         &local,
         ctx.clock.now() + jiff::Span::new().minutes(5),
+        false,
     )
     .unwrap();
     assert_eq!(fs::read(local.join("outputs/result")).unwrap(), b"ok");
@@ -309,11 +309,11 @@ fn download_with(runner: &Arc<FakeRunner>, clock: &Arc<FakeClock>, env: &TestEnv
     download(
         &ctx,
         &crate::vast::run::VastBackend::connected("vast-123"),
-        "/root/state",
-        "/workspace/job",
+        &("/root/state".into(), "/workspace/job".into()),
         "outputs",
         &local,
         ctx.clock.now() + jiff::Span::new().hours(2),
+        false,
     )
 }
 

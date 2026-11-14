@@ -22,7 +22,7 @@ publish() {
 supervise() {
     source "$ROOT/config"
     export PATH="$HOME/.local/bin:$PATH"
-    local stopped=0 timed=0 child='' phase=setup rc=0 end now
+    local stopped=0 timed=0 child='' phase=setup rc=0 end now last_commit=$SECONDS
     trap 'stopped=1' TERM INT HUP
     printf '%s\n' "$$" >"$ROOT/pid"
     publish setup - 0
@@ -42,9 +42,18 @@ supervise() {
             fi
             break
         fi
+        if [ -f "$ROOT/outputs-hook.sh" ] && [ $((SECONDS - last_commit)) -ge 30 ]; then
+            bash "$ROOT/outputs-hook.sh" >>"$ROOT/log" 2>&1 || true
+            last_commit=$SECONDS
+        fi
         sleep 1 & wait $! || true
     done
     wait "$child" || rc=$?
+    # Best effort flush at job end, before publishing completion. A preemption
+    # can bypass this; only the last durable checkpoint is recoverable.
+    if [ -f "$ROOT/outputs-hook.sh" ]; then
+        bash "$ROOT/outputs-hook.sh" >>"$ROOT/log" 2>&1 || true
+    fi
     [ -f "$ROOT/phase" ] && read -r phase <"$ROOT/phase"
     [ "$timed" = 1 ] && rc=17
     end=$(( $(date +%s) + LINGER ))
@@ -109,7 +118,7 @@ task() {
 }
 
 main() {
-    local action=${1:-} pid='' phase=launch rc=- timed=0 count=0
+    local action=${1:-} pid='' phase=launch rc=- timed=0 count=0 live_phase=''
     ROOT=${2:-} TOKEN=${3:-}
     case $TOKEN in ''|*[!a-zA-Z0-9-]*) exit 1;; esac
     case $action in
@@ -120,6 +129,9 @@ main() {
             printf '%s' "$GPU_RUN_SOURCE" >"$ROOT/runner.sh"
             printf '%s' "$GPU_RUN_CONFIG" >"$ROOT/config"
             printf '%s' "$GPU_RUN_HOOK" >"$ROOT/expiry-hook.sh"
+            if [ -n "${GPU_RUN_OUTPUTS_HOOK:-}" ]; then
+                printf '%s' "$GPU_RUN_OUTPUTS_HOOK" >"$ROOT/outputs-hook.sh"
+            fi
             : >"$ROOT/log"
             date +%s >"$ROOT/attached"
             setsid bash "$ROOT/runner.sh" supervise "$ROOT" "$TOKEN" </dev/null >/dev/null 2>&1 &
@@ -133,6 +145,13 @@ main() {
             date +%s >"$ROOT/attached"
             [ -f "$ROOT/status" ] || exit 1
             IFS=$'\t' read -r phase rc timed <"$ROOT/status"
+            # The supervisor publishes completion atomically, but the task
+            # updates its phase before setup/job execution. Read that live
+            # phase while running instead of reporting initial setup forever.
+            if [ "$rc" = - ] && [ -f "$ROOT/phase" ]; then
+                read -r live_phase <"$ROOT/phase" || true
+                case $live_phase in setup|job) phase=$live_phase;; esac
+            fi
             read -r pid <"$ROOT/pid"
             count=$(wc -c <"$ROOT/log")
             if [ "$rc" = - ] && ! identity "$pid" "$TOKEN"; then

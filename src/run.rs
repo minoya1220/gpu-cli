@@ -147,8 +147,19 @@ pub(crate) trait RunBackend {
     fn upload(&self, extract: String) -> String {
         extract
     }
-    fn start_prelude(&self) -> String {
+    fn start_prelude(&self, _jobdir: &str, _outputs: &str) -> String {
         String::new()
+    }
+    fn outputs_hook(&self) -> &str {
+        ""
+    }
+    /// The tar operand that archives the live outputs directory.
+    fn archive_operand(&self, outputs: &str) -> String {
+        outputs.into()
+    }
+    /// Persistent providers can fetch committed outputs after the host is lost.
+    fn output_archive(&self, _outputs: &str, _timeout: f64) -> Option<Cmd> {
+        None
     }
     fn wait_for_startup(&self) -> bool;
     fn destroy(&self, ctx: &Ctx, id: &str) -> Result<()>;
@@ -743,7 +754,7 @@ fn execute(
     ctx.check_cancelled()?;
     let mut config = format!("FORWARDED={}\n", shell_quote(&job.env));
     for (key, value) in [
-        ("JOBDIR", jobdir),
+        ("JOBDIR", jobdir.clone()),
         ("OUTPUTS", flags.outputs.clone()),
         ("SETUP", job.setup.clone()),
         ("COMMAND", shell_join(&flags.command)),
@@ -762,11 +773,12 @@ fn execute(
     }
     let hook = backend.hook(&id);
     let payload = format!(
-        "{}GPU_RUN_SOURCE={}\nGPU_RUN_CONFIG={}\nGPU_RUN_HOOK={}\n{REMOTE_SOURCE}",
-        backend.start_prelude(),
+        "{}GPU_RUN_SOURCE={}\nGPU_RUN_CONFIG={}\nGPU_RUN_HOOK={}\nGPU_RUN_OUTPUTS_HOOK={}\n{REMOTE_SOURCE}",
+        backend.start_prelude(&jobdir, &flags.outputs),
         shell_quote(REMOTE_SOURCE),
         shell_quote(&config),
-        shell_quote(&hook)
+        shell_quote(&hook),
+        shell_quote(backend.outputs_hook())
     );
     let start = format!(
         "bash -s -- start {} {}",
@@ -807,19 +819,37 @@ fn settle(owned: &Owned, mut outcome: Result<()>, started: f64) -> Result<()> {
     if ctx.interrupts() > 0 {
         outcome = Err(Error::Cancelled(130));
     }
-    // Ephemeral Modal files cannot be recovered once the sandbox is lost.
-    // Do not replace exit 18 with the inevitable download transport failure.
+    // Logs and supervisor state are ephemeral, but Modal outputs survive in a
+    // run-scoped Volume. Preserve exit 18 while recovering its last commit.
     let modal_lost = backend.provider() == Provider::Modal
         && (matches!(outcome, Err(Error::Status(ExitCode::InstanceLost, _)))
             || (outcome.is_err() && backend.lost(ctx, id)));
     if modal_lost && ctx.interrupts() == 0 {
         outcome = Err(Error::status(
             ExitCode::InstanceLost,
-            "Modal sandbox ended while the job was running (possibly preempted); ephemeral outputs are lost.",
+            "Modal sandbox ended while the job was running (possibly preempted); recovering the last committed outputs.",
         ));
     }
-    if let Some(paths) = session.paths.as_ref().filter(|_| !modal_lost) {
-        if recover(owned, paths, &mut outcome) {
+    if let Some(paths) = session.paths.as_ref() {
+        if modal_lost {
+            if ctx.interrupts() < 2 {
+                phase.set("download");
+                if let Err(error) = download(
+                    ctx,
+                    backend,
+                    paths,
+                    &owned.flags.outputs,
+                    &session.local,
+                    owned.job.deadline,
+                    true,
+                ) {
+                    let _ = ctx.eprintln(&format!(
+                        "Could not fetch committed outputs: {}",
+                        error.text()
+                    ));
+                }
+            }
+        } else if recover(owned, paths, &mut outcome) {
             failure_phase = Value::str("download");
         }
     }
@@ -869,7 +899,7 @@ fn settle(owned: &Owned, mut outcome: Result<()>, started: f64) -> Result<()> {
 /// Stop a failed job, fetch the rest of its log and download its outputs
 /// under the original deadline. True when a download failure replaced
 /// `outcome`.
-fn recover(owned: &Owned, (root, jobdir): &(String, String), outcome: &mut Result<()>) -> bool {
+fn recover(owned: &Owned, paths: &(String, String), outcome: &mut Result<()>) -> bool {
     let Owned {
         phase,
         flags,
@@ -879,6 +909,7 @@ fn recover(owned: &Owned, (root, jobdir): &(String, String), outcome: &mut Resul
         id,
     } = *owned;
     let ctx = phase.ctx;
+    let root = &paths.0;
     let run_id = &session.run_id;
     let deadline = job.deadline;
     let response = || {
@@ -935,26 +966,50 @@ fn recover(owned: &Owned, (root, jobdir): &(String, String), outcome: &mut Resul
     let downloaded = download(
         ctx,
         backend,
-        root,
-        jobdir,
+        paths,
         &flags.outputs,
         &session.local,
         deadline,
+        false,
     );
     let Err(error) = downloaded else {
         return false;
     };
     let _ = ctx.eprintln(&format!("Could not fetch results: {}", error.text()));
+    let lost = backend.provider() == Provider::Modal && backend.lost(ctx, id);
+    let committed = lost
+        && ctx.interrupts() < 2
+        && download(
+            ctx,
+            backend,
+            paths,
+            &flags.outputs,
+            &session.local,
+            deadline,
+            true,
+        )
+        .inspect_err(|error| {
+            let _ = ctx.eprintln(&format!(
+                "Could not fetch committed outputs: {}",
+                error.text()
+            ));
+        })
+        .is_ok();
     if outcome.is_ok()
         || matches!(
             outcome,
             Err(Error::Remote(_) | Error::Status(ExitCode::JobTimeout | ExitCode::InstanceLost, _))
         )
     {
-        *outcome = if backend.provider() == Provider::Modal && backend.lost(ctx, id) {
+        *outcome = if committed {
             Err(Error::status(
                 ExitCode::InstanceLost,
-                "Modal sandbox ended during download; ephemeral outputs are lost.",
+                "Modal sandbox ended during download; fetched its last committed outputs.",
+            ))
+        } else if lost {
+            Err(Error::status(
+                ExitCode::InstanceLost,
+                "Modal sandbox ended during download; could not fetch its last committed outputs.",
             ))
         } else {
             Err(error)
@@ -1154,18 +1209,18 @@ const DOWNLOAD_RETRY_DELAYS: [f64; 3] = [5.0, 15.0, 30.0];
 fn download(
     ctx: &Ctx,
     backend: &dyn RunBackend,
-    root: &str,
-    jobdir: &str,
+    (root, jobdir): &(String, String),
     outputs: &str,
     local: &Path,
     deadline: Timestamp,
+    committed: bool,
 ) -> Result<()> {
     let archive = tempfile::NamedTempFile::new()?;
     let seconds = (deadline.as_second() - ctx.clock.now().as_second()).max(1) as f64;
     let command = format!(
         "tar -C {} -cf - -- {} & p=$!; while kill -0 $p 2>/dev/null; do date +%s >{}; sleep 5; done; wait $p",
         shell_quote(jobdir),
-        shell_quote(outputs),
+        shell_quote(&backend.archive_operand(outputs)),
         shell_quote(&format!("{root}/attached"))
     );
     let poll = ctx.polling(seconds, 0.0);
@@ -1177,12 +1232,11 @@ fn download(
         .chain([None])
     {
         let remaining = poll.remaining().max(0.1);
-        let result = ctx.transfer(
-            &backend
-                .remote(&command, remaining)
-                .stdout_file(archive.path()),
-            2,
-        );
+        let cmd = committed
+            .then(|| backend.output_archive(outputs, remaining))
+            .flatten()
+            .unwrap_or_else(|| backend.remote(&command, remaining));
+        let result = ctx.transfer(&cmd.stdout_file(archive.path()), 2);
         let transport = matches!(result, Ok(Output { code: 255, .. }));
         let error = match backend.remote_result(ctx, result, message) {
             Ok(_) => break,

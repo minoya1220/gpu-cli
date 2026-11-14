@@ -135,6 +135,9 @@ fn completed(ctx: &Ctx, argv: &[String]) -> Result<()> {
 }
 
 pub fn exec(ctx: &Ctx, id: &str, command: &[String], timeout: f64) -> Result<()> {
+    if id.starts_with("modal:") {
+        return crate::modal::exec(ctx, id, command, timeout);
+    }
     let alias = wait(ctx, id, timeout)?;
     // OpenSSH joins command arguments without escaping. Quote each argument so
     // spaces and shell metacharacters remain data; use `sh -c SCRIPT` for shell.
@@ -176,6 +179,9 @@ pub fn copy(
     timeout: f64,
 ) -> Result<()> {
     validate_copy(source, destination)?;
+    if id.starts_with("modal:") {
+        return crate::modal::copy(ctx, id, source, destination, recursive, timeout);
+    }
     let alias = wait(ctx, id, timeout)?;
     let path = |s: &str| {
         if s.starts_with(":/") {

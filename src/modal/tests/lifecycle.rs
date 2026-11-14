@@ -20,9 +20,23 @@ enum End {
     Lost,
     UploadFailure,
     CleanupFailure,
+    VolumeCleanupFailure,
     Cancel,
     CancelTwice,
     DownloadFailure,
+    LostDuringDownload,
+}
+
+fn write_outputs(path: &std::path::Path) -> std::result::Result<Output, RunError> {
+    let mut tar = tar::Builder::new(std::fs::File::create(path).unwrap());
+    let mut header = tar::Header::new_gnu();
+    header.set_size(3);
+    header.set_mode(0o600);
+    header.set_cksum();
+    tar.append_data(&mut header, "outputs/result", &b"ok\n"[..])
+        .unwrap();
+    tar.finish().unwrap();
+    testing::ok("")
 }
 
 #[test]
@@ -34,9 +48,11 @@ fn shared_run_flow_over_modal_exec() {
         End::Lost,
         End::UploadFailure,
         End::CleanupFailure,
+        End::VolumeCleanupFailure,
         End::Cancel,
         End::CancelTwice,
         End::DownloadFailure,
+        End::LostDuringDownload,
     ] {
         let t = TestEnv::new();
         let cwd = t.root.join("source");
@@ -111,29 +127,35 @@ fn shared_run_flow_over_modal_exec() {
                     if remote.contains(" stop ") || remote.starts_with("printf ") {
                         return testing::ok("");
                     }
+                    if remote.starts_with("tar -C ") {
+                        assert!(remote.contains(" -cf - -- outputs/. "));
+                        if matches!(end, End::DownloadFailure | End::LostDuringDownload) {
+                            return testing::status(255);
+                        }
+                        return write_outputs(cmd.stdout_file.as_ref().unwrap());
+                    }
                     if remote.starts_with("dd ") {
                         std::fs::write(cmd.stdout_file.as_ref().unwrap(), b"hi\r\n").unwrap();
                         return testing::ok("");
                     }
-                    if remote.starts_with("tar -C ") {
-                        if matches!(end, End::DownloadFailure) {
-                            return testing::status(255);
-                        }
-                        let mut tar = tar::Builder::new(
-                            std::fs::File::create(cmd.stdout_file.as_ref().unwrap()).unwrap(),
-                        );
-                        let mut header = tar::Header::new_gnu();
-                        header.set_size(3);
-                        header.set_mode(0o600);
-                        header.set_cksum();
-                        tar.append_data(&mut header, "outputs/result", &b"ok\n"[..])
-                            .unwrap();
-                        tar.finish().unwrap();
-                        return testing::ok("");
-                    }
                     panic!("unexpected exec {cmd:?}");
                 }
-                "status" => testing::ok(if matches!(end, End::Lost) {
+                "volume-get" => {
+                    assert!(matches!(end, End::Lost | End::LostDuringDownload));
+                    assert!(cmd.argv[6].starts_with("gpu-cli-run-"));
+                    assert_eq!(cmd.argv[7], "outputs");
+                    write_outputs(cmd.stdout_file.as_ref().unwrap())
+                }
+                "volume-delete" => {
+                    assert!(!matches!(end, End::CleanupFailure));
+                    assert!(cmd.argv[6].starts_with("gpu-cli-run-"));
+                    testing::ok(if matches!(end, End::VolumeCleanupFailure) {
+                        r#"{"finished":false}"#
+                    } else {
+                        r#"{"finished":true}"#
+                    })
+                }
+                "status" => testing::ok(if matches!(end, End::Lost | End::LostDuringDownload) {
                     r#"{"running":false,"returncode":137}"#
                 } else {
                     r#"{"running":true,"returncode":null}"#
@@ -158,8 +180,8 @@ fn shared_run_flow_over_modal_exec() {
                 End::Success => 0,
                 End::Failure => 7,
                 End::Timeout => 17,
-                End::Lost => 18,
-                End::CleanupFailure => 19,
+                End::Lost | End::LostDuringDownload => 18,
+                End::CleanupFailure | End::VolumeCleanupFailure => 19,
                 End::Cancel | End::CancelTwice => 130,
                 _ => 1,
             },
@@ -170,7 +192,10 @@ fn shared_run_flow_over_modal_exec() {
         assert_eq!(result.get("expiry_armed"), Some(&Value::Bool(true)));
         assert_eq!(
             result.get("destroyed"),
-            Some(&Value::Bool(!matches!(end, End::CleanupFailure)))
+            Some(&Value::Bool(!matches!(
+                end,
+                End::CleanupFailure | End::VolumeCleanupFailure
+            )))
         );
         assert_eq!(
             result.get("run_id"),
@@ -190,7 +215,20 @@ fn shared_run_flow_over_modal_exec() {
             );
             assert_eq!(std::fs::read(local.join("log.txt")).unwrap(), b"hi\r\n");
         }
-        if matches!(end, End::Lost | End::CancelTwice) {
+        if matches!(end, End::LostDuringDownload) {
+            assert_eq!(
+                std::fs::read(local.join("outputs/result")).unwrap(),
+                b"ok\n"
+            );
+        }
+        if matches!(end, End::Lost) {
+            assert_eq!(
+                std::fs::read(local.join("outputs/result")).unwrap(),
+                b"ok\n"
+            );
+            assert_eq!(std::fs::read(local.join("log.txt")).unwrap(), b"");
+        }
+        if matches!(end, End::CancelTwice) {
             assert!(!local.join("outputs").exists());
             assert!(runner.calls().iter().all(|cmd| !cmd
                 .argv
@@ -240,6 +278,7 @@ fn lost_create_reply_reconciles_only_its_run_tag() {
                             r#"{"finished":false}"#
                         })
                     }
+                    "volume-delete" => testing::ok(r#"{"finished":true}"#),
                     _ => panic!("{cmd:?}"),
                 }
             });
@@ -276,10 +315,14 @@ fn lost_create_reply_reconciles_only_its_run_tag() {
 }
 
 #[test]
-fn termination_requires_a_finished_poll_not_just_a_successful_mutation() {
+fn termination_requires_combined_sandbox_and_volume_confirmation() {
     for (finished, expected) in [(true, 0), (false, 19)] {
         let runner = FakeRunner::new(move |cmd| match cmd.argv[5].as_str() {
-            "terminate" => testing::ok(r#"{"finished":false}"#),
+            "terminate" => testing::ok(if finished {
+                r#"{"finished":true}"#
+            } else {
+                r#"{"finished":false}"#
+            }),
             "status" => testing::ok(if finished {
                 r#"{"running":false,"returncode":0}"#
             } else {
@@ -296,7 +339,7 @@ fn termination_requires_a_finished_poll_not_just_a_successful_mutation() {
             expected
         );
         assert_eq!(runner.calls()[0].argv[5], "terminate");
-        assert_eq!(runner.calls().len(), if finished { 2 } else { 6 });
+        assert_eq!(runner.calls().len(), if finished { 1 } else { 3 });
     }
 }
 
@@ -329,7 +372,7 @@ fn exec_failures_keep_typed_exit_codes_and_redact_details() {
 fn cancelled_create_still_reconciles_before_returning_130() {
     let runner = FakeRunner::new(|cmd| match cmd.argv[5].as_str() {
         "create" => Err(RunError::TimedOut),
-        "terminate" => testing::ok(r#"{"finished":true}"#),
+        "terminate" | "volume-delete" => testing::ok(r#"{"finished":true}"#),
         _ => panic!(),
     });
     let t = TestEnv::new();
@@ -342,7 +385,7 @@ fn cancelled_create_still_reconciles_before_returning_130() {
         .launch(&ctx, &request, deadline, 120.0, &mut |_, _| panic!())
         .unwrap_err();
     assert_eq!(error.exit_code(), 130);
-    assert_eq!(runner.calls().last().unwrap().argv[5], "terminate");
+    assert_eq!(runner.calls().last().unwrap().argv[5], "volume-delete");
     ctx.end_run();
 }
 

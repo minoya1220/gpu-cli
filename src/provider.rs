@@ -230,13 +230,30 @@ impl Instance for SandboxId {
     fn unsupported(&self) -> Error {
         crate::modal::unsupported()
     }
+    fn ssh(&self, ctx: &Ctx, exec: bool) -> Result<()> {
+        crate::modal::ssh(ctx, &self.0, exec)
+    }
     fn down(&self, ctx: &Ctx, _cfg: &Dict, yes: bool) -> Result<()> {
         crate::modal::down(ctx, &self.0, yes)
     }
 }
 
+pub(crate) struct VolumeId(pub String);
+impl Instance for VolumeId {
+    fn provider(&self) -> Provider {
+        Provider::Modal
+    }
+    fn down(&self, ctx: &Ctx, _cfg: &Dict, yes: bool) -> Result<()> {
+        crate::modal::down_volume(ctx, &self.0, yes)
+    }
+}
+
 /// The instance an ID names, by its provider prefix.
 pub(crate) fn parse(id: &str) -> Result<Box<dyn Instance>> {
+    if id.starts_with("modal:volume:") {
+        crate::modal::volume_name(id)?;
+        return Ok(Box::new(VolumeId(id.into())));
+    }
     if id.starts_with("modal:") {
         crate::modal::sandbox_id(id)?;
         return Ok(Box::new(SandboxId(id.into())));

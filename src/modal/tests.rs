@@ -315,6 +315,7 @@ fn explicit_modal_provider_picker_lists_only_modal_rows_with_a_short_failure_rea
 }
 
 mod lifecycle;
+mod transport;
 
 fn archive(data: &[u8]) -> Vec<u8> {
     let mut archive = tar::Builder::new(flate2::write::GzEncoder::new(

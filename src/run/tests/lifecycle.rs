@@ -35,6 +35,14 @@ fn flow(end: End) -> (i32, Value, String, Vec<Cmd>) {
 }
 
 fn flow_with_flags(end: End, flags: RunFlags) -> (i32, Value, String, Vec<Cmd>) {
+    flow_with_statuses(end, flags, Vec::new())
+}
+
+fn flow_with_statuses(
+    end: End,
+    flags: RunFlags,
+    statuses: Vec<String>,
+) -> (i32, Value, String, Vec<Cmd>) {
     let env = TestEnv::new();
     let cwd = env.root.join("project");
     std::fs::create_dir(&cwd).unwrap();
@@ -130,6 +138,9 @@ fn flow_with_flags(end: End, flags: RunFlags) -> (i32, Value, String, Vec<Cmd>) 
                 if remote.contains(" status ") {
                     let mut n = status_calls.lock().unwrap();
                     *n += 1;
+                    if let Some(status) = statuses.get(*n - 1) {
+                        return testing::ok(status);
+                    }
                     if matches!(end, End::Lost) || (matches!(end, End::Reconnect) && *n == 1) {
                         // Lost is detected from the next provider inventory read.
                         if matches!(end, End::Lost) {
@@ -225,6 +236,44 @@ fn flow_with_flags(end: End, flags: RunFlags) -> (i32, Value, String, Vec<Cmd>) 
     let logs = testing::err(&ctx);
     assert!(!logs.contains("test-secret"));
     (code, result, logs, runner.calls())
+}
+
+// Generate legal setup -> job -> terminal traces, with malformed reads between
+// states. The real run loop must reconnect without changing the final outcome,
+// duplicating logs, or skipping download/verified cleanup (all tools are fakes).
+proptest::proptest! {
+    #![proptest_config(proptest::test_runner::Config::with_cases(16))]
+
+    #[test]
+    fn generated_run_transitions_preserve_outcome_and_cleanup(
+        setup in proptest::collection::vec(proptest::bool::ANY, 0..3),
+        job in proptest::collection::vec(proptest::bool::ANY, 0..3),
+        ending in 0u8..3
+    ) {
+        let mut statuses = Vec::new();
+        for (phase, reads) in [("setup", setup), ("job", job)] {
+            for malformed in reads {
+                if malformed {
+                    statuses.push("unavailable".into());
+                }
+                statuses.push(format!("{phase}\t-\t0\t0\n"));
+            }
+        }
+        let (end, expected) = match ending {
+            0 => (End::Success, 0),
+            1 => (End::Failure, 7),
+            _ => (End::Timeout, 17),
+        };
+        let (code, result, _, calls) = flow_with_statuses(end, flags(&["--env", "TOKEN"]), statuses);
+        proptest::prop_assert_eq!(code, expected);
+        let result = result.get("result").unwrap();
+        proptest::prop_assert_eq!(result.get("destroyed"), Some(&Value::Bool(true)));
+        proptest::prop_assert_eq!(result.get("phase"), Some(&Value::str(if expected == 0 { "done" } else { "job" })));
+        let download = calls.iter().position(|c| c.program() == "ssh" && c.argv.last().unwrap().starts_with("tar -C ")).unwrap();
+        let destroy = calls.iter().position(|c| c.argv.starts_with(&["vastai".into(), "destroy".into()])).unwrap();
+        proptest::prop_assert!(download < destroy);
+        proptest::prop_assert!(calls[destroy + 1..].iter().any(|c| c.argv.starts_with(&["vastai".into(), "show".into(), "instances".into()])));
+    }
 }
 
 #[test]

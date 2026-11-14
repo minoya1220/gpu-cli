@@ -12,6 +12,7 @@ mod lifecycle;
 mod listing;
 mod not_found;
 mod picker;
+mod properties;
 mod repo_cache;
 mod repos;
 mod setup;

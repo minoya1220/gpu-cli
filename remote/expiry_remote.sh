@@ -186,7 +186,7 @@ accepted() {
                     c=${body:i:1}
                     case $c in
                         '"') break ;;
-                        '\')
+                        \\)
                             key+=${body:i:2}
                             i=$((i + 2))
                             ;;
@@ -203,7 +203,7 @@ accepted() {
                     rest=${body:i+1}
                     rest=${rest#"${rest%%[![:space:]]*}"}
                     case $rest in
-                        true | true[[:space:],}]*) success=1 ;;
+                        true | true[[:space:]]* | true','* | true'}'*) success=1 ;;
                         *) success=0 ;;
                     esac
                 fi
@@ -264,20 +264,24 @@ worker() {
     done
 }
 
+# Replaces the current (sub)shell with the worker, giving it only the scoped
+# credentials, never ambient keys.
+exec_worker() {
+    local token=$1 instance_id=$2 key=$3 name
+    for name in $(compgen -e); do
+        unset "$name" 2>/dev/null
+    done
+    export HOME=$WORKER_HOME PATH=$WORKER_PATH
+    export CONTAINER_ID=$instance_id CONTAINER_API_KEY=$key
+    exec setsid bash "$ROOT/runner.sh" worker "$ROOT" "$token" "$instance_id" \
+        </dev/null >/dev/null 2>&1 9>&-
+}
+
 # Starts the detached worker and prints its PID once it reports ready.
 start_worker() {
     local token=$1 instance_id=$2 key=$3 ready="$ROOT/ready.$1" line='' tries=0 pid
     rm -f "$ready"
-    (
-        # Give the detached worker only the scoped credentials, never ambient keys.
-        for name in $(compgen -e); do
-            unset "$name" 2>/dev/null
-        done
-        export HOME=$WORKER_HOME PATH=$WORKER_PATH
-        export CONTAINER_ID=$instance_id CONTAINER_API_KEY=$key
-        exec setsid bash "$ROOT/runner.sh" worker "$ROOT" "$token" "$instance_id" \
-            </dev/null >/dev/null 2>&1 9>&-
-    ) &
+    (exec_worker "$token" "$instance_id" "$key") &
     while [ "$tries" -lt "$READY_TRIES" ]; do
         if [ -s "$ready" ]; then
             read -r line <"$ready"
@@ -371,7 +375,7 @@ main() {
     local action=${1:-} instance_id=${2:-}
     case $action in
         arm)
-            [ $# -eq 3 ] && is_digits "${3:-}" || fail remote
+            if [ $# -ne 3 ] || ! is_digits "${3:-}"; then fail remote; fi
             ;;
         show | cancel)
             [ $# -eq 2 ] || fail remote
@@ -381,7 +385,7 @@ main() {
     is_digits "$instance_id" || fail remote
     command -v flock >/dev/null 2>&1 || fail remote
     if [ "$action" = arm ]; then
-        command -v setsid >/dev/null 2>&1 && command -v curl >/dev/null 2>&1 || fail remote
+        if ! command -v setsid >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then fail remote; fi
     fi
     control "$action" "$instance_id" "${3:-}"
 }

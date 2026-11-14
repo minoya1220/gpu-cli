@@ -19,6 +19,7 @@ cleanup() {
 trap cleanup EXIT
 export GPU_RUN_LIBRARY=1
 GPU_RUN_SOURCE=$(<"$SOURCE")
+# shellcheck source=run_remote.sh
 source "$SOURCE"
 passed=0
 check() { if ! "$@"; then echo "FAIL: $*" >&2; exit 1; fi; }
@@ -32,6 +33,7 @@ launch() {
     if [ -n "${7:-}" ]; then
         GPU_RUN_CONFIG+=$'\n'"WAIT_FOR_STARTUP=$7"
     fi
+    # shellcheck disable=SC2016
     GPU_RUN_HOOK=$(printf 'printf "%%s" "$1" >%q\n' "$TMP/hook-$token")
     # Feed a separate bash, just like SSH stdin; it exits immediately after start.
     { printf 'GPU_RUN_SOURCE=%q\nGPU_RUN_CONFIG=%q\nGPU_RUN_HOOK=%q\nGPU_RUN_OUTPUTS_HOOK=%q\n' "$GPU_RUN_SOURCE" "$GPU_RUN_CONFIG" "$GPU_RUN_HOOK" "${GPU_RUN_OUTPUTS_HOOK:-}"; cat "$SOURCE"; } |
@@ -135,6 +137,7 @@ check test "$(printf '%s' "$status" | cut -f1)" = job
 check test "$(printf '%s' "$status" | cut -f2)" = 0
 passed=$((passed+1))
 
+# shellcheck disable=SC2016
 launch success 'printf "%s\n" "$TEST_SECRET"; printf result >"$GPU_RUN_OUTPUTS/result"'
 status=$(wait_done success)
 check test "$(printf '%s' "$status" | cut -f2)" = 0
@@ -167,6 +170,7 @@ check test "$(printf '%s' "$status" | cut -f2)" = 7
 check test "$(cat "$TMP/state/setupfailure/log")" = setupfailed
 passed=$((passed+1))
 
+# shellcheck disable=SC2016
 launch jobfailure 'echo partial >"$GPU_RUN_OUTPUTS/checkpoint"; exit 9'
 status=$(wait_done jobfailure)
 check test "$(printf '%s' "$status" | cut -f2)" = 9
@@ -186,6 +190,7 @@ check test "$(printf '%s' "$status" | cut -f2)" != 0
 passed=$((passed+1))
 
 # Forwarded values reach setup and the job via the environment, never argv.
+# shellcheck disable=SC2016
 scan='found=0; for f in /proc/[0-9]*/cmdline; do while IFS= read -r -d "" a; do case $a in *"$TEST_SECRET"*) found=1;; esac; done 2>/dev/null <"$f"; done; printf "%s:%s" "$found" "$TEST_SECRET"'
 launch argv "$scan >\"\$GPU_RUN_OUTPUTS/job\"" "$scan >\"\$GPU_RUN_OUTPUTS/setup\""
 status=$(wait_done argv)
@@ -195,6 +200,7 @@ check test "$(cat "$TMP/work/argv/outputs/job")" = '0:secret value'
 passed=$((passed+1))
 
 # Forwarded names that match runner internals do not change the runner.
+# shellcheck disable=SC2016
 launch overlap 'printf "%s" "$COMMAND" >"$GPU_RUN_OUTPUTS/seen"' 'printf "%s" "$SETUP" >setup-seen' 60 \
     "export COMMAND=clobbered SETUP=clobbered JOBDIR=/nonexistent ROOT=/nonexistent TOKEN=bad FORWARDED=bad"
 status=$(wait_done overlap)
@@ -227,6 +233,7 @@ passed=$((passed+1))
 # has download reserve remaining. Even without a client, flush its final
 # partial checkpoint before publication and the unattended expiry hook.
 GPU_RUN_OUTPUTS_HOOK=$(printf 'cp %q %q\n' "$TMP/work/deadline-checkpoint/outputs/checkpoint" "$TMP/flushed-checkpoint")
+# shellcheck disable=SC2016
 launch deadline-checkpoint 'i=0; while :; do i=$((i+1)); printf "%s" "$i" >"$GPU_RUN_OUTPUTS/checkpoint"; sleep 0.1; done' '' 2
 printf '0\n' >"$TMP/state/deadline-checkpoint/attached"
 status=$(wait_done deadline-checkpoint)

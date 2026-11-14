@@ -233,6 +233,7 @@ passed=$((passed+1))
 # has download reserve remaining. Even without a client, flush its final
 # partial checkpoint before publication and the unattended expiry hook.
 GPU_RUN_OUTPUTS_HOOK=$(printf 'cp %q %q\n' "$TMP/work/deadline-checkpoint/outputs/checkpoint" "$TMP/flushed-checkpoint")
+# shellcheck disable=SC2016
 launch deadline-checkpoint 'i=0; while :; do i=$((i+1)); printf "%s" "$i" >"$GPU_RUN_OUTPUTS/checkpoint"; sleep 0.1; done' '' 2
 printf '0\n' >"$TMP/state/deadline-checkpoint/attached"
 status=$(wait_done deadline-checkpoint)

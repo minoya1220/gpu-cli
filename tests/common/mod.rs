@@ -190,7 +190,7 @@ impl Sandbox {
 
     pub fn env(&self) -> Vec<(String, String)> {
         let path = |p: &Path| p.to_string_lossy().into_owned();
-        vec![
+        let mut env = vec![
             ("HOME".into(), path(&self.home)),
             ("XDG_CACHE_HOME".into(), path(&self.root.join("cache"))),
             ("XDG_CONFIG_HOME".into(), path(&self.root.join("config"))),
@@ -199,10 +199,16 @@ impl Sandbox {
             ("TZ".into(), "UTC".into()),
             ("TERM".into(), "xterm-256color".into()),
             ("FAKE_CLI_LOG".into(), path(&self.log)),
-        ]
+        ];
+        // Keep instrumented subprocess coverage in cargo-llvm-cov's collector,
+        // without inheriting any other host environment (especially credentials).
+        if let Ok(profile) = std::env::var("LLVM_PROFILE_FILE") {
+            env.push(("LLVM_PROFILE_FILE".into(), profile));
+        }
+        env
     }
 
-    /// The binary with only this sandbox's environment.
+    /// The binary with the sandbox environment and optional coverage output.
     pub fn command(&self, args: &[&str]) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_gpu"));
         command.args(args).env_clear().envs(self.env());

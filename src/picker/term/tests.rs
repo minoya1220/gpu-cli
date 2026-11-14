@@ -173,3 +173,28 @@ fn the_selection_stays_visible_with_a_line_of_margin() {
     assert_eq!(rows[1], "  item 39");
     assert_eq!(rows[2], "> item 40");
 }
+
+#[test]
+fn restore_terminal_without_active_picker_does_not_wait_for_stdout() {
+    assert!(!ACTIVE.load(Ordering::SeqCst));
+    let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
+        let _stdout = std::io::stdout().lock();
+        locked_tx.send(()).unwrap();
+        let _ = release_rx.recv_timeout(std::time::Duration::from_secs(10));
+    });
+    locked_rx.recv().unwrap();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        restore_terminal();
+        let _ = done_tx.send(());
+    });
+    let restored = done_rx.recv_timeout(std::time::Duration::from_secs(2));
+    release_tx.send(()).unwrap();
+    holder.join().unwrap();
+    assert!(
+        restored.is_ok(),
+        "restore_terminal blocked on stdout with no active picker"
+    );
+}

@@ -400,6 +400,9 @@ const LEAVE: &[u8] = b"\x1b[?2004l\x1b[?25h";
 /// Undo raw mode, bracketed paste and the hidden cursor; safe to call from
 /// any thread, any number of times (panic hook, SIGINT handler, normal exit).
 pub fn restore_terminal() {
+    if !ACTIVE.load(Ordering::SeqCst) {
+        return;
+    }
     // Serialize with TerminalIo::write: finish any in-flight draw, then prevent
     // subsequent draws before restoring the terminal (not after Cancelled).
     let mut stdout = std::io::stdout().lock();

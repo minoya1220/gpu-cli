@@ -353,6 +353,8 @@ cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
 ```
 
+Coverage (informational, no percentage gate): install `cargo-llvm-cov` 0.9.1 and `rustup component add llvm-tools-preview`, then run `cargo llvm-cov --locked --lcov --output-path coverage.lcov && cargo llvm-cov report --summary-only` (CI archives both reports).
+
 CI tests Rust **1.99.1** on Linux and macOS; action revisions are SHA-pinned in `.github/workflows/ci.yml`. Update those pins and the tested toolchain deliberately. CI also runs the following security and static checks (install the named tools first):
 
 ```sh

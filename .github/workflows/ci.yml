@@ -55,6 +55,37 @@ jobs:
       - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
       - run: cargo test --locked
 
+  # Execution visibility only: no minimum coverage percentage.
+  coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable snapshot
+        with:
+          toolchain: 1.99.1
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+        with:
+          key: coverage
+      - run: cargo install cargo-llvm-cov --version 0.9.1 --locked
+      - run: cargo llvm-cov --locked --lcov --output-path coverage.lcov
+      - name: Coverage summary (including total)
+        if: always()
+        run: |
+          cargo llvm-cov report --summary-only | tee coverage-summary.txt
+          { echo '```text'; cat coverage-summary.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: coverage
+          path: |
+            coverage.lcov
+            coverage-summary.txt
+          if-no-files-found: error
+
   dependencies:
     runs-on: ubuntu-latest
     timeout-minutes: 10

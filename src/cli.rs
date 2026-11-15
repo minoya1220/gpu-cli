@@ -10,7 +10,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 fn up_help() -> String {
     let codes = crate::error::help_codes(false);
     format!("Non-terminal example: gpu up --gpu 'RTX 4090' --mode container --no-repo --expire 2h --yes --json\nIDs: \
-        numeric Vast ID; gcp:PROJECT:ZONE:NAME or an unambiguous TPU name.\nExit codes: 0 success; 1 error; 2 \
+        numeric Vast ID; gcp:PROJECT:ZONE:NAME or an unambiguous TPU name; runpod:ID; do:REGION:ID.\nAMD providers support manual workspaces only (no --expire); use gpu offers --provider runpod|do.\nExit codes: 0 success; 1 error; 2 \
         usage; {codes}; 128+signal interrupted.")
 }
 
@@ -24,7 +24,7 @@ fn run_help() -> String {
 #[derive(Parser, Debug)]
 #[command(
     name = "gpu",
-    about = "GPU jobs and workspaces on Vast.ai, Google Cloud and Modal",
+    about = "GPU jobs and workspaces on Vast.ai, Google Cloud, Modal, Runpod and DigitalOcean",
     disable_version_flag = true,
     infer_long_args = true,
     args_override_self = true
@@ -51,11 +51,17 @@ pub enum Command {
         after_help = up_help()
     )]
     Up(UpFlags),
-    /// Run a one-shot job on Vast or Modal, fetch results, then destroy it
+    /// Run a one-shot job on Vast or Modal (AMD providers: dry-run planning only)
     #[command(
         after_help = run_help()
     )]
     Run(RunFlags),
+    /// List single-MI300X catalog prices and stock hints (not a capacity guarantee)
+    Offers {
+        /// AMD provider whose current catalog to read (runpod or do)
+        #[arg(long, required = true, value_parser = Provider::parser(&[Provider::Runpod, Provider::DigitalOcean]))]
+        provider: Provider,
+    },
     /// List rented instances
     Ls {
         /// Filled from the global JSON flag
@@ -167,6 +173,7 @@ impl Command {
             Self::Up(_) => "up",
             Self::Run(_) => "run",
             Self::Ls { .. } => "ls",
+            Self::Offers { .. } => "offers",
             Self::Wait { .. } => "wait",
             Self::Exec { .. } => "exec",
             Self::Cp { .. } => "cp",
@@ -206,8 +213,8 @@ pub struct SetupFlags {
 
 #[derive(clap::Args, Clone, Debug)]
 pub struct UpFlags {
-    /// Provider (optional; TPU flags or a TPU picked on the GPU screen use gcp)
-    #[arg(long, value_parser = Provider::parser(&[Provider::Vast, Provider::Gcp]))]
+    /// Provider (default: vast; TPU flags imply gcp; AMD workspaces have no expiry)
+    #[arg(long, value_parser = Provider::parser(&[Provider::Vast, Provider::Gcp, Provider::Runpod, Provider::DigitalOcean]))]
     pub provider: Option<Provider>,
     /// Full TPU accelerator type, e.g. v5e-1 or v6e-1
     #[arg(long, visible_alias = "type")]
@@ -300,8 +307,8 @@ impl UpFlags {
 
 #[derive(clap::Args, Clone, Debug)]
 pub struct RunFlags {
-    /// Provider (Vast by default; Modal also available in the GPU picker)
-    #[arg(long, value_parser = Provider::parser(&[Provider::Vast, Provider::Modal]))]
+    /// Provider (default: vast; runpod/do support only --dry-run)
+    #[arg(long, value_parser = Provider::parser(&[Provider::Vast, Provider::Modal, Provider::Runpod, Provider::DigitalOcean]))]
     pub provider: Option<Provider>,
     /// Modal physical CPU cores (default: 4; request equals limit)
     #[arg(long, allow_negative_numbers = true)]

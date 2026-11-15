@@ -1,8 +1,8 @@
 # gpu
 
-`gpu` rents GPU workspaces on Vast.ai and TPU VMs on Google Cloud, and runs one-shot jobs on Vast or Modal. It runs on macOS and Linux.
+`gpu` rents GPU workspaces on Vast.ai, Runpod and DigitalOcean, TPU VMs on Google Cloud, and runs one-shot jobs on Vast or Modal. It runs on macOS and Linux.
 
-Every launch rents a paid machine. Set a deadline with `--expire` and check `gpu ls` for anything still running. `gpu <command> --help` lists every flag.
+Every launch rents a paid machine. Use `--expire` where supported; experimental AMD workspaces require manual deletion. Check `gpu ls` for anything still running. `gpu <command> --help` lists every flag.
 
 ## Install
 
@@ -76,6 +76,37 @@ gpu down modal:sb-EXAMPLE --yes
 
 While a Sandbox runs, `gpu exec`, `gpu cp` and `gpu ssh --exec` work on its `modal:sb-...` ID. Modal has no `up`, `edit`, `stop` or `expire`.
 
+## AMD Instinct (experimental)
+
+Runpod Secure Cloud containers and DigitalOcean VMs support **one MI300X only**. Both backends are **untested against real rentals**; stock, image/SSH/copy and profiler hardware counters remain unverified. No automatic fallback.
+
+Install `runpodctl >= 3.1.1` or `doctl >= 2.4.0`; authenticate with that CLI, never gpu config. Register `~/.ssh/id_ed25519.pub` with the provider. Add provider settings to `~/.config/gpu/config.json` (no secrets):
+
+```json
+{
+  "runpod": {"image": "YOUR_ROCM_IMAGE@sha256:DIGEST", "datacenter": "DATACENTER"},
+  "do": {"region": "atl1", "ssh_keys": "REGISTERED_KEY_ID"}
+}
+```
+
+AMD repositories clone to `/workspace/repo`; no automatic dependency install. The Runpod image must start sshd/SFTP from its own start command and provide bash, git and tar; gpu keeps that command and starts workspace setup on the first SSH connection (`gpu wait ID --wait-setup`, `ssh`, `exec`, `cp` or an editor). Port 22 must map to a public IP. Proxy SSH cannot support copy/editors. DO resolves `gpu-amd-base` to an image ID; override with `do.image` after validation. These paths never install CUDA or Nsight.
+
+```sh
+gpu setup --provider runpod       # or --provider do; read-only CLI/auth/key checks
+gpu offers --provider runpod      # choose runpod.datacenter from stock hints
+gpu up --provider runpod --gpu MI300X --no-repo --dry-run
+gpu up --provider do --gpu MI300X --no-repo --yes --wait
+gpu ls --provider do
+gpu cp do:atl1:ID ./input :/workspace/input
+gpu down do:atl1:ID --yes          # polls for verified absence
+```
+
+Manual AMD workspaces have **no auto-destroy**. `--yes` approves renting until manual deletion; remove `default_expire` to use them. `--expire`, `gpu expire`, live `gpu run` and a configured `max_session_spend` on manual launches fail closed. `gpu run --provider runpod|do --gpu MI300X --expire 30m --dry-run -- COMMAND` uses the shared upload/planning checks only; its estimate is hypothetical, not an enforced deadline.
+
+`--max-price` checks the hourly estimate: Runpod includes container disk ($0.10/GB-month, estimated at 730h/month); DO includes its fixed boot disk. Network/tax and independent retained resources are extra. Runpod stop loses the container filesystem and still bills retained storage; DO power-off continues **full GPU billing**. `down` deletes the Pod/Droplet, not independent volumes, snapshots or backups. IDs are `runpod:ID` and `do:REGION:ID`; bare numbers remain Vast.
+
+Paid validation and expiry release gates: [live-test checklist](data/gpu-cli-amd-provider/live-test-checklist.md).
+
 ## Connect and edit
 
 ```sh
@@ -143,7 +174,7 @@ Every TPU launch needs a deadline, 1 minute to 29 days ahead. Cloud Tasks delete
 
 ## Scripts and JSON
 
-Without a terminal, `gpu` never prompts. `up` needs hardware, `--repo` or `--no-repo`, `--mode` (Vast) or `--zone` (TPU), `--expire` and `--yes`. `down` needs an ID and `--yes`.
+Without a terminal, `gpu` never prompts. Vast/TPU `up` needs hardware, `--repo` or `--no-repo`, `--mode` (Vast) or `--zone` (TPU), `--expire` and `--yes`. Manual AMD workspaces instead require explicit hardware/repo and `--yes`, with no supported deadline. `down` needs an ID and `--yes`.
 
 ```sh
 gpu up --no-repo --mode container --gpu 'RTX 4090' --expire 2h --yes --wait --json
@@ -185,7 +216,7 @@ A create timeout does not mean nothing was created: check `gpu ls` before retryi
 }
 ```
 
-`max_session_spend` refuses a launch whose estimated cost up to its deadline exceeds that many USD. Keep secrets out of this file. SSH aliases go in `~/.ssh/vst_config` and `~/.ssh/gpu_gcp_config`.
+`max_session_spend` refuses a launch whose estimated cost up to its deadline exceeds that many USD. Keep secrets out of this file. SSH aliases go in `~/.ssh/vst_config`, `~/.ssh/gpu_gcp_config` and `~/.ssh/gpu_amd/`.
 
 ## Development
 

@@ -12,11 +12,23 @@ pub enum Provider {
     Vast,
     Gcp,
     Modal,
+    Runpod,
+    DigitalOcean,
 }
 
 impl Provider {
     /// Every provider, in listing and picker order.
-    pub const ALL: [Provider; 3] = [Provider::Vast, Provider::Gcp, Provider::Modal];
+    pub const ALL: [Provider; 5] = [
+        Provider::Vast,
+        Provider::Gcp,
+        Provider::Modal,
+        Provider::Runpod,
+        Provider::DigitalOcean,
+    ];
+
+    pub fn amd(self) -> bool {
+        matches!(self, Self::Runpod | Self::DigitalOcean)
+    }
 
     /// The `--provider` value and the `provider` field of instance records.
     pub fn key(self) -> &'static str {
@@ -24,6 +36,8 @@ impl Provider {
             Provider::Vast => "vast",
             Provider::Gcp => "gcp",
             Provider::Modal => "modal",
+            Provider::Runpod => "runpod",
+            Provider::DigitalOcean => "do",
         }
     }
 
@@ -32,6 +46,8 @@ impl Provider {
             Provider::Vast => "Vast.ai",
             Provider::Gcp => "Google Cloud",
             Provider::Modal => "Modal",
+            Provider::Runpod => "Runpod",
+            Provider::DigitalOcean => "DigitalOcean",
         }
     }
 
@@ -55,6 +71,8 @@ impl Provider {
             Provider::Vast => None,
             Provider::Gcp => Some("gcp:"),
             Provider::Modal => Some("modal:"),
+            Provider::Runpod => Some("runpod:"),
+            Provider::DigitalOcean => Some("do:"),
         }
     }
 
@@ -73,6 +91,8 @@ impl Provider {
             Provider::Vast => true,
             Provider::Gcp => crate::gcp::setup::gcp_ready(cfg),
             Provider::Modal => crate::modal::configured(ctx),
+            provider if provider.amd() => crate::amd::configured(ctx, provider),
+            _ => false,
         }
     }
 
@@ -91,6 +111,7 @@ impl Provider {
                 crate::gcp::list(ctx, &crate::gcp::Settings::load(cfg)?)
             }
             Provider::Modal => crate::modal::list(ctx),
+            provider => crate::amd::list(ctx, provider),
         }
     }
 }
@@ -250,6 +271,9 @@ impl Instance for VolumeId {
 
 /// The instance an ID names, by its provider prefix.
 pub(crate) fn parse(id: &str) -> Result<Box<dyn Instance>> {
+    if id.starts_with("runpod:") || id.starts_with("do:") {
+        return Ok(Box::new(crate::amd::Id::parse(id)?));
+    }
     if id.starts_with("modal:volume:") {
         crate::modal::volume_name(id)?;
         return Ok(Box::new(VolumeId(id.into())));

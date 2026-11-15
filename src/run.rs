@@ -330,6 +330,9 @@ pub fn run(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> {
 
 fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> {
     let started = ctx.clock.monotonic();
+    if flags.provider.is_some_and(Provider::amd) {
+        crate::amd::validate_run(flags)?;
+    }
     let job = prepare(ctx, flags, cfg, cwd)?;
     let phase = Phase::start(ctx, "launch");
     report_plan(ctx, flags, &job);
@@ -485,12 +488,11 @@ fn prepare(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<Prepar
         cfg.insert("container_image", Value::str(image));
     }
     // Vast startup/config do not apply to Modal's default Debian image.
-    if flags.provider != Some(Provider::Modal) {
+    let vast = flags.provider.is_none_or(|p| p == Provider::Vast);
+    if vast {
         crate::vast::startup::run_script(deadline)?;
     }
-    if flags.provider != Some(Provider::Modal)
-        && !matches!(cfg.get("container_image"), Some(Value::Str(image)) if !image.is_empty())
-    {
+    if vast && !matches!(cfg.get("container_image"), Some(Value::Str(image)) if !image.is_empty()) {
         return Err(Error::usage("container_image must be a non-empty string."));
     }
     Ok(Prepared {
@@ -559,6 +561,12 @@ fn report_plan(ctx: &Ctx, flags: &RunFlags, job: &Prepared) {
         ctx.result(key, Value::Null);
     }
     ctx.result("expires_at", Value::str(job.deadline.to_string()));
+    if flags.provider.is_some_and(Provider::amd) {
+        ctx.result("expires_at", Value::Null);
+        ctx.result("requested_expires_at", Value::str(job.deadline.to_string()));
+        ctx.result("expiry_supported", Value::Bool(false));
+        ctx.result("live_supported", Value::Bool(false));
+    }
     ctx.result("uploaded_files", Value::Int(job.upload.files.len() as i64));
     if flags.dry_run {
         ctx.result(
@@ -591,21 +599,23 @@ fn select_backend(
     job: &Prepared,
 ) -> Result<(Box<dyn RunBackend>, RunFlags)> {
     let mut selected = flags.clone();
-    let backend: Box<dyn RunBackend> =
-        if flags.provider == Some(Provider::Modal) && (flags.gpu.is_some() || !ctx.interactive()) {
-            Box::new(crate::modal::ModalBackend::new(None))
-        } else {
-            match choose(ctx, flags, &job.cfg, &job.args)? {
-                Selection::Vast(offer) => Box::new(crate::vast::run::VastBackend::new(offer)),
-                Selection::Modal(name, rates) => {
-                    selected.provider = Some(Provider::Modal);
-                    selected.gpu = Some(name);
-                    ctx.result("provider", Value::str(Provider::Modal.key()));
-                    crate::modal::validate(&selected, job.seconds)?;
-                    Box::new(crate::modal::ModalBackend::new(rates))
-                }
+    let backend: Box<dyn RunBackend> = if let Some(provider) = flags.provider.filter(|p| p.amd()) {
+        Box::new(crate::amd::Backend(provider))
+    } else if flags.provider == Some(Provider::Modal) && (flags.gpu.is_some() || !ctx.interactive())
+    {
+        Box::new(crate::modal::ModalBackend::new(None))
+    } else {
+        match choose(ctx, flags, &job.cfg, &job.args)? {
+            Selection::Vast(offer) => Box::new(crate::vast::run::VastBackend::new(offer)),
+            Selection::Modal(name, rates) => {
+                selected.provider = Some(Provider::Modal);
+                selected.gpu = Some(name);
+                ctx.result("provider", Value::str(Provider::Modal.key()));
+                crate::modal::validate(&selected, job.seconds)?;
+                Box::new(crate::modal::ModalBackend::new(rates))
             }
-        };
+        }
+    };
     ctx.result("provider", Value::str(backend.provider().key()));
     Ok((backend, selected))
 }
@@ -635,6 +645,9 @@ fn approve(
     ctx.result("gpu", plan.gpu);
     let request = plan.request?;
     if flags.dry_run {
+        if backend.provider().amd() {
+            ctx.eprintln("AMD planning only: estimated spend is hypothetical; no enforceable deadline or live attached run is supported.")?;
+        }
         ctx.result("request", request);
         ctx.println(&format!(
             "DRY RUN: {} files, {} bytes; setup: {}; maximum compute estimate ${}. No instance created.",

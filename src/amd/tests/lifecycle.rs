@@ -134,56 +134,103 @@ fn paid_create_is_once_and_records_ownership_before_readiness() {
                 .count(),
             1
         );
-        let calls = runner.calls();
-        let create = calls
-            .iter()
-            .position(|c| c.argv.contains(&"create".into()))
-            .unwrap();
-        if provider == "do" {
-            assert_eq!(launched.ready_alias, None);
-            assert!(calls
-                .iter()
-                .all(|c| !c.argv.contains(&"get".into()) || c.argv.contains(&"image".into())));
-            continue;
-        }
-        // The image's own start command keeps sshd; setup runs over SSH after create.
-        assert_eq!(launched.ready_alias.as_deref(), Some("runpod-pod-test"));
-        let ssh = calls
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| c.program() == "ssh")
-            .collect::<Vec<_>>();
-        assert!(ssh.iter().all(|(i, _)| *i > create));
-        let setup = ssh.last().unwrap().1.argv.last().unwrap();
-        assert!(setup.contains("nohup bash -c"));
-        assert!(setup.contains(".gpu-setup"));
-        assert!(setup.ends_with("</dev/null &"));
+        assert_eq!(launched.ready_alias, None);
+        assert!(runner.calls().iter().all(|c| c.program() != "ssh"
+            && (!c.argv.contains(&"get".into()) || c.argv.contains(&"image".into()))));
+        assert_eq!(
+            t.state.join("gpu/amd-setup/runpod-pod-test").is_file(),
+            provider == "runpod"
+        );
     }
 }
 
+fn runpod_up(t: &TestEnv, runner: &std::sync::Arc<FakeRunner>) {
+    public_key(t);
+    let ctx = t.ctx().runner(runner).build().for_command(true);
+    let mut f = flags("runpod", &[]);
+    f.dry_run = false;
+    f.yes = true;
+    up(&ctx, &f, &cfg()).unwrap();
+}
+
+fn setup_starts(runner: &FakeRunner) -> usize {
+    runner
+        .calls()
+        .iter()
+        .filter(|c| c.program() == "ssh" && c.argv.last().unwrap().contains("nohup bash -c"))
+        .count()
+}
+
 #[test]
-fn runpod_setup_failure_after_create_names_the_cleanup() {
+fn runpod_setup_survives_ssh_wait_timeout_and_starts_once_on_next_connection() {
     let t = TestEnv::new();
-    public_key(&t);
-    let runner = FakeRunner::new(|cmd| {
+    let booted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let seen = booted.clone();
+    let runner = FakeRunner::new(move |cmd| {
         if cmd.argv.contains(&"create".into()) {
             return testing::ok(r#"{"id":"pod-test"}"#);
         }
-        if cmd.program() == "ssh" && cmd.argv.last().unwrap().contains("nohup") {
+        if cmd.argv.contains(&"get".into()) && !seen.load(std::sync::atomic::Ordering::SeqCst) {
+            return testing::ok(r#"{"id":"pod-test","runtimeStatus":"initializing"}"#);
+        }
+        ready(cmd)
+    });
+    runpod_up(&t, &runner);
+    let ctx = t.ctx().runner(&runner).build();
+    let error = crate::remote::wait_with_setup(&ctx, "runpod:pod-test", 5.0, true).unwrap_err();
+    assert_eq!(error.exit_code(), ExitCode::WaitTimeout as i32);
+    assert!(error.text().contains("still starting"));
+    assert!(error
+        .text()
+        .contains("gpu wait runpod:pod-test --wait-setup"));
+    assert_eq!(setup_starts(&runner), 0);
+    assert!(t.state.join("gpu/amd-setup/runpod-pod-test").is_file());
+
+    booted.store(true, std::sync::atomic::Ordering::SeqCst);
+    crate::remote::exec(&ctx, "runpod:pod-test", &["true".into()], 5.0).unwrap();
+    assert_eq!(setup_starts(&runner), 1);
+    let start = runner
+        .calls()
+        .into_iter()
+        .find(|c| c.program() == "ssh" && c.argv.last().unwrap().contains("nohup"))
+        .unwrap();
+    let remote = start.argv.last().unwrap();
+    assert!(remote.find("printf pending").unwrap() < remote.find("nohup").unwrap());
+    assert!(!t.state.join("gpu/amd-setup/runpod-pod-test").exists());
+
+    crate::remote::exec(&ctx, "runpod:pod-test", &["true".into()], 5.0).unwrap();
+    assert_eq!(setup_starts(&runner), 1);
+}
+
+#[test]
+fn runpod_setup_start_failure_is_retried_on_the_next_connection() {
+    let t = TestEnv::new();
+    let failures = std::sync::Arc::new(AtomicUsize::new(1));
+    let left = failures.clone();
+    let runner = FakeRunner::new(move |cmd| {
+        if cmd.argv.contains(&"create".into()) {
+            return testing::ok(r#"{"id":"pod-test"}"#);
+        }
+        if cmd.program() == "ssh"
+            && cmd.argv.last().unwrap().contains("nohup")
+            && left
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok()
+        {
             return Ok(Output::status(255));
         }
         ready(cmd)
     });
-    let ctx = t.ctx().runner(&runner).build().for_command(true);
-    let mut f = flags("runpod", &[]);
-    f.dry_run = false;
-    f.yes = true;
-    let error = up(&ctx, &f, &cfg()).unwrap_err();
-    assert!(error.text().contains("gpu down runpod:pod-test --yes"));
-    assert_eq!(
-        ctx.result_snapshot().get("created"),
-        Some(&Value::Bool(true))
-    );
+    runpod_up(&t, &runner);
+    let ctx = t.ctx().runner(&runner).build();
+    let error = crate::remote::wait(&ctx, "runpod:pod-test", 5.0).unwrap_err();
+    assert!(error
+        .text()
+        .contains("gpu wait runpod:pod-test --wait-setup"));
+    assert!(t.state.join("gpu/amd-setup/runpod-pod-test").is_file());
+    crate::remote::wait(&ctx, "runpod:pod-test", 5.0).unwrap();
+    assert_eq!(setup_starts(&runner), 2);
+    assert!(!t.state.join("gpu/amd-setup/runpod-pod-test").exists());
 }
 
 #[test]

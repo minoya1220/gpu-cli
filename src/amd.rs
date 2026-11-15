@@ -490,35 +490,55 @@ pub fn up(ctx: &Ctx, flags: &UpFlags, cfg: &Dict) -> Result<crate::launch::Launc
     ctx.println(&format!(
         "Created {id}; NO expiry. Next: gpu down {id} --yes"
     ))?;
-    let ready_alias = match &plan.ssh_setup {
-        Some(script) => {
-            ctx.progress(&format!(
-                "Waiting for SSH on {id} to start workspace setup..."
-            ))?;
-            let alias = Id::parse(&id)?.wait_ssh(ctx, flags.timeout)?;
-            start_setup(ctx, &alias, script).map_err(|e| e.next(format!("gpu down {id} --yes")))?;
-            Some(alias)
-        }
-        None => None,
-    };
+    if let Some(script) = &plan.ssh_setup {
+        crate::atomic_file::update(&pending_setup(ctx, &Id::parse(&id)?), |_| {
+            Ok(script.as_bytes().to_vec())
+        })
+        .map_err(|e| e.next(format!("gpu down {id} --yes")))?;
+        ctx.println(&format!(
+            "Workspace setup starts on the first SSH connection. Next: gpu wait {id} --wait-setup"
+        ))?;
+    }
     Ok(crate::launch::Launched {
         id: Some(id),
-        ready_alias,
+        ready_alias: None,
     })
 }
 
+fn pending_setup(ctx: &Ctx, id: &Id) -> std::path::PathBuf {
+    ctx.env
+        .xdg("XDG_STATE_HOME", ".local/state")
+        .join("gpu/amd-setup")
+        .join(id.alias())
+}
+
 /// Runs setup detached over SSH so the image's own start command keeps sshd running.
-fn start_setup(ctx: &Ctx, alias: &str, script: &str) -> Result<()> {
+/// The remote marker makes this idempotent; the local file only records that it is owed.
+fn resume_setup(ctx: &Ctx, id: &Id) -> Result<()> {
+    let path = pending_setup(ctx, id);
+    let script = match std::fs::read_to_string(&path) {
+        Ok(script) => script,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
     let remote = format!(
-        "mkdir -p /workspace && nohup bash -c {} >/workspace/.gpu-setup.log 2>&1 </dev/null &",
-        crate::pyfmt::shell_quote(script)
+        "mkdir -p /workspace && if (set -C; printf pending >/workspace/.gpu-setup) 2>/dev/null; then nohup bash -c {} >/workspace/.gpu-setup.log 2>&1 </dev/null & fi",
+        crate::pyfmt::shell_quote(&script)
     );
-    let cmd = crate::ssh::command(&["ssh", "-T"], true, alias, &remote).timeout(Some(30.0));
+    let cmd = crate::ssh::command(&["ssh", "-T"], true, &id.alias(), &remote).timeout(Some(30.0));
     match ctx.run(&cmd) {
-        Ok(out) if out.code == 0 => Ok(()),
+        Ok(out) if out.code == 0 => remove_pending_setup(ctx, id),
         _ => Err(Error::msg(
-            "Workspace setup could not be started over SSH; the instance is billing.",
-        )),
+            "Workspace setup could not be started over SSH; it starts on the next connection. The instance is billing.",
+        )
+        .next(format!("gpu wait {} --wait-setup", id.qualified()))),
+    }
+}
+fn remove_pending_setup(ctx: &Ctx, id: &Id) -> Result<()> {
+    match std::fs::remove_file(pending_setup(ctx, id)) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
     }
 }
 
@@ -609,6 +629,7 @@ impl Instance for Id {
                     let cmd = crate::ssh::command(&["ssh", "-T"], true, &self.alias(), "true")
                         .timeout(Some(poll.remaining().clamp(0.1, 11.0)));
                     if ctx.run(&cmd).is_ok_and(|out| out.code == 0) {
+                        resume_setup(ctx, self)?;
                         return Ok(self.alias());
                     }
                 }
@@ -621,7 +642,11 @@ impl Instance for Id {
             }
             poll.pause();
         }
-        Err(Error::status(ExitCode::WaitTimeout, "Direct SSH is not ready; instance may still be billing. Runpod proxy SSH is not a copy/editor fallback.").next(format!("gpu down {} --yes", self.qualified())))
+        let id = self.qualified();
+        if pending_setup(ctx, self).is_file() {
+            return Err(Error::status(ExitCode::WaitTimeout, format!("Direct SSH is not ready; the instance is still starting and billing. Workspace setup has not started; it starts on the next connection. To stop billing instead: gpu down {id} --yes")).next(format!("gpu wait {id} --wait-setup")));
+        }
+        Err(Error::status(ExitCode::WaitTimeout, "Direct SSH is not ready; instance may still be billing. Runpod proxy SSH is not a copy/editor fallback.").next(format!("gpu down {id} --yes")))
     }
     fn ssh(&self, ctx: &Ctx, exec: bool) -> Result<()> {
         let alias = self.wait_ssh(ctx, 120.0)?;
@@ -695,6 +720,7 @@ impl Instance for Id {
         };
         if !present(&list(ctx, self.provider)?)? {
             remove_alias(ctx, self)?;
+            remove_pending_setup(ctx, self)?;
             ctx.result("state", Value::str("already_absent"));
             return ctx.println(&format!("Instance {id} is already absent."));
         }
@@ -728,6 +754,7 @@ impl Instance for Id {
         ctx.result("destroyed", Value::Bool(true));
         ctx.result("state", Value::str("destroyed"));
         remove_alias(ctx, self)?;
+        remove_pending_setup(ctx, self)?;
         ctx.println(&format!("Deleted {id} (verified absent). Independent volumes/snapshots/backups may still bill; inspect them in the provider account."))
     }
 }

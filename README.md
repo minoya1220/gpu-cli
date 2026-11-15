@@ -89,7 +89,7 @@ Install `runpodctl >= 3.1.1` or `doctl >= 2.4.0`; authenticate with that CLI, ne
 }
 ```
 
-AMD repositories clone to `/workspace/repo`; no automatic dependency install. The Runpod image must start sshd/SFTP from its own start command and provide bash, git and tar; gpu keeps that command and runs workspace setup over SSH, so Runpod `up` waits for SSH. Port 22 must map to a public IP. Proxy SSH cannot support copy/editors. DO resolves `gpu-amd-base` to an image ID; override with `do.image` after validation. These paths never install CUDA or Nsight.
+AMD repositories clone to `/workspace/repo`; no automatic dependency install. The Runpod image must start sshd/SFTP from its own start command and provide bash, git and tar; gpu keeps that command and starts workspace setup on the first SSH connection (`gpu wait ID --wait-setup`, `ssh`, `exec`, `cp` or an editor). Port 22 must map to a public IP. Proxy SSH cannot support copy/editors. DO resolves `gpu-amd-base` to an image ID; override with `do.image` after validation. These paths never install CUDA or Nsight.
 
 ```sh
 gpu setup --provider runpod       # or --provider do; read-only CLI/auth/key checks

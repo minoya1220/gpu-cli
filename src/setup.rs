@@ -23,6 +23,7 @@ fn status_rows(ctx: &Ctx, cfg: &Dict, vast: Option<bool>) -> Vec<(Provider, Stri
             Provider::Vast => vast,
             Provider::Gcp => Some(gcp),
             Provider::Modal => Some(modal),
+            provider => Some(crate::amd::configured(ctx, provider)),
         };
         let state = match ready {
             Some(true) => READY,
@@ -112,12 +113,23 @@ pub fn run(ctx: &Ctx, cfg: &Dict, flags: &SetupFlags) -> Result<()> {
             ctx.result("vast_ready", Value::Bool(vast));
             ctx.result("gcp_ready", Value::Bool(gcp_ready(cfg)));
             ctx.result("modal_ready", Value::Bool(crate::modal::configured(ctx)));
+            ctx.result(
+                "runpod_ready",
+                Value::Bool(crate::amd::configured(ctx, Provider::Runpod)),
+            );
+            ctx.result(
+                "do_ready",
+                Value::Bool(crate::amd::configured(ctx, Provider::DigitalOcean)),
+            );
             for (_, row) in status_rows(ctx, cfg, Some(vast)) {
                 ctx.println(&row)?;
             }
             return ctx.println("Next: gpu setup --provider gcp --help");
         }
     };
+    if provider.amd() {
+        return crate::amd::check(ctx, provider);
+    }
     if provider == Provider::Modal {
         return crate::modal::check(ctx);
     }

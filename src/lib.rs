@@ -1,6 +1,7 @@
 //! GPU jobs and workspaces on Vast.ai, Google Cloud and Modal.
 //! External work always crosses the Runner seam.
 
+pub(crate) mod amd;
 mod atomic_file;
 mod cache;
 pub(crate) mod cli;
@@ -113,6 +114,9 @@ fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
     ctx.set_gcp_ready(gcp::setup::gcp_ready(&cfg));
     if let Command::Up(flags) = &mut command {
         guardrails::defaults(flags, &cfg)?;
+        if flags.target().amd() {
+            amd::validate_up(flags)?;
+        }
         if flags.target() == provider::Provider::Vast && flags.tpu_flags() {
             return Err(
                 Error::msg("TPU flags do not apply to Vast").next("gpu up --provider gcp --help")
@@ -162,13 +166,16 @@ fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
     }
     guardrails::nonterminal(ctx, &command, &cfg)?;
     if let Command::Up(flags) = &command {
-        config::infer_identity(ctx, &mut cfg);
+        if !flags.target().amd() {
+            config::infer_identity(ctx, &mut cfg);
+        }
         if let Some(repo) = &flags.repo {
             repos::resolve_repo(repo, &pyfmt::py_str(config::get(&cfg, "owner")?))?;
         }
     }
     match command {
         Command::Setup(flags) => setup::run(ctx, &cfg, &flags),
+        Command::Offers { provider } => amd::offers(ctx, provider),
         Command::Run(flags) => run::run(ctx, &flags, &cfg, &std::env::current_dir()?),
         Command::Wait {
             id,
@@ -210,6 +217,16 @@ fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
                 ctx.set_ssh_timeout(timeout);
             }
             ctx.result("dry_run", pyjson::Value::Bool(flags.dry_run));
+            if flags.target().amd() {
+                let launched = amd::up(ctx, &flags, &cfg)?;
+                return remote::after_up(
+                    ctx,
+                    launched,
+                    wait && !flags.dry_run,
+                    timeout,
+                    wait_setup,
+                );
+            }
             if flags.target() == provider::Provider::Gcp {
                 let launched =
                     gcp::launch(ctx, &gcp::TpuArgs::from_flags(&flags)?, &cfg, up_deadline)?;

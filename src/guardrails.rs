@@ -28,7 +28,8 @@ pub(crate) fn nonterminal(ctx: &Ctx, command: &Command, cfg: &Dict) -> Result<()
     match command {
         Command::Up(flags) => {
             let mut missing = Vec::new();
-            if flags.expire.as_deref().is_none_or(str::is_empty) {
+            let amd = flags.target().amd();
+            if !amd && flags.expire.as_deref().is_none_or(str::is_empty) {
                 missing.push("Non-terminal gpu up requires --expire DURATION (e.g. --expire 2h), or default_expire in config.json.");
             }
             let tpu = flags.target() == crate::provider::Provider::Gcp;
@@ -42,7 +43,7 @@ pub(crate) fn nonterminal(ctx: &Ctx, command: &Command, cfg: &Dict) -> Result<()
             if flags.repo.is_none() && !flags.no_repo {
                 missing.push("Choose a repository: pass --repo URL or --no-repo.");
             }
-            if !tpu && flags.mode.is_none() {
+            if !tpu && !amd && flags.mode.is_none() {
                 missing.push("Choose a mode: pass --mode container or --mode vm.");
             }
             if tpu
@@ -55,7 +56,7 @@ pub(crate) fn nonterminal(ctx: &Ctx, command: &Command, cfg: &Dict) -> Result<()
             {
                 missing.push("Choose a TPU zone: pass --zone ZONE (or configure gcp.zone).");
             }
-            if !tpu && flags.dry_run && !flags.yes && flags.offer.is_none() {
+            if !tpu && !amd && flags.dry_run && !flags.yes && flags.offer.is_none() {
                 missing.push("Choose an offer: pass --yes (cheapest) or --offer ID.");
             }
             if !flags.yes && !flags.dry_run {

@@ -104,7 +104,17 @@ impl Sandbox {
             "#!/bin/sh\n[ \"$1\" = config ] && exit 1\nexec /usr/bin/git \"$@\"\n",
         );
         for tool in [
-            "ssh", "scp", "rsync", "cursor", "code", "zed", "curl", "gcloud", "uv",
+            "ssh",
+            "scp",
+            "rsync",
+            "cursor",
+            "code",
+            "zed",
+            "curl",
+            "gcloud",
+            "uv",
+            "runpodctl",
+            "doctl",
         ] {
             sandbox.stub(tool, FORBIDDEN);
         }

@@ -330,6 +330,11 @@ fn deletion_is_idempotent_verified_and_region_bound() {
             } else {
                 "doctl"
             }));
+        assert_eq!(
+            ctx.result_snapshot().get("state"),
+            Some(&Value::str("destroyed"))
+        );
+        let ctx = t.ctx().runner(&runner).build().for_command(true);
         Id::parse(id).unwrap().down(&ctx, &cfg(), true).unwrap();
         assert_eq!(
             runner
@@ -338,6 +343,14 @@ fn deletion_is_idempotent_verified_and_region_bound() {
                 .filter(|c| c.argv.contains(&"delete".into()))
                 .count(),
             1
+        );
+        assert_eq!(
+            ctx.result_snapshot().get("state"),
+            Some(&Value::str("already_absent"))
+        );
+        assert_eq!(
+            ctx.result_snapshot().get("destroyed"),
+            Some(&Value::Bool(false))
         );
     }
     let t = TestEnv::new();
@@ -400,4 +413,67 @@ fn accepted_delete_without_absence_is_cleanup_unverified() {
         ctx.result_snapshot().get("destroyed"),
         Some(&Value::Bool(false))
     );
+}
+
+#[test]
+fn never_present_id_is_already_absent_not_deleted() {
+    for id in ["runpod:pod-tset", "do:atl1:43"] {
+        let t = TestEnv::new();
+        let runner = FakeRunner::new(fixture);
+        let ctx = t.ctx().runner(&runner).build().for_command(false);
+        Id::parse(id).unwrap().down(&ctx, &cfg(), true).unwrap();
+        let result = ctx.result_snapshot();
+        assert_eq!(result.get("state"), Some(&Value::str("already_absent")));
+        assert_eq!(result.get("destroyed"), Some(&Value::Bool(false)));
+        let out = testing::out(&ctx);
+        assert!(out.contains(&format!("Instance {id} is already absent.")));
+        assert!(!out.contains("Deleted"));
+        assert!(runner
+            .calls()
+            .iter()
+            .all(|c| !c.argv.contains(&"delete".into())));
+    }
+}
+
+#[test]
+fn wait_ssh_retries_transient_provider_failures() {
+    for transient in [
+        Err(crate::process::RunError::TimedOut),
+        Err(crate::process::RunError::Os("transient".into())),
+    ] {
+        let t = TestEnv::new();
+        let gets = AtomicUsize::new(0);
+        let runner = FakeRunner::new(move |cmd| {
+            if cmd.argv.contains(&"get".into()) && gets.fetch_add(1, Ordering::SeqCst) == 0 {
+                return transient.clone();
+            }
+            fixture(cmd)
+        });
+        let ctx = t.ctx().runner(&runner).build();
+        assert_eq!(
+            Id::parse("runpod:pod-test")
+                .unwrap()
+                .wait_ssh(&ctx, 30.0)
+                .unwrap(),
+            "runpod-pod-test"
+        );
+    }
+    let t = TestEnv::new();
+    let runner = FakeRunner::new(|_| {
+        Ok(Output {
+            code: 1,
+            stdout: r#"{"error":{"code":"unauthorized"}}"#.into(),
+            stderr: String::new(),
+        })
+    });
+    let ctx = t.ctx().runner(&runner).build();
+    assert_eq!(
+        Id::parse("runpod:pod-test")
+            .unwrap()
+            .wait_ssh(&ctx, 30.0)
+            .unwrap_err()
+            .exit_code(),
+        ExitCode::AuthExpired as i32
+    );
+    assert_eq!(runner.calls().len(), 1);
 }

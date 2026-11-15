@@ -62,12 +62,6 @@ pub(super) fn plan(
     if !(1..=2000).contains(&disk) {
         return Err(Error::usage("Runpod --disk must be 1..=2000 GB."));
     }
-    // A failed clone marks setup failed but must not kill sshd/container access.
-    let script = format!(
-        "bash -lc {}\nexec sleep infinity\n",
-        crate::pyfmt::shell_quote(setup)
-    );
-    let args = crate::pyfmt::shell_join(&["bash".to_string(), "-lc".into(), script]);
     let command = cli(
         Provider::Runpod,
         &[
@@ -92,8 +86,6 @@ pub(super) fn plan(
             "0",
             "--name",
             label,
-            "--docker-args",
-            &args,
         ],
     );
     // Official container-disk rate $0.10/GB-month, estimated at 730h/month.
@@ -102,6 +94,7 @@ pub(super) fn plan(
         command,
         rate: quote.rate + disk as f64 * 0.10 / 730.0,
         _data: None,
+        ssh_setup: Some(setup.into()),
     })
 }
 

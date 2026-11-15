@@ -112,6 +112,7 @@ pub(super) fn plan(
         command,
         rate: quote.rate,
         _data: Some(data),
+        ssh_setup: None,
     })
 }
 

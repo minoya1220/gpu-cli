@@ -87,6 +87,7 @@ fn paid_create_is_once_and_records_ownership_before_readiness() {
             if cmd.argv.contains(&"create".into()) {
                 assert!(!cmd.argv.contains(&"--wait".into()));
                 if cmd.program() == "runpodctl" {
+                    assert!(!cmd.argv.iter().any(|a| a.starts_with("--docker")));
                     return testing::ok(r#"{"id":"pod-test"}"#);
                 }
                 let path = &cmd.argv[cmd
@@ -133,11 +134,56 @@ fn paid_create_is_once_and_records_ownership_before_readiness() {
                 .count(),
             1
         );
-        assert!(runner
-            .calls()
+        let calls = runner.calls();
+        let create = calls
             .iter()
-            .all(|c| !c.argv.contains(&"get".into()) || c.argv.contains(&"image".into())));
+            .position(|c| c.argv.contains(&"create".into()))
+            .unwrap();
+        if provider == "do" {
+            assert_eq!(launched.ready_alias, None);
+            assert!(calls
+                .iter()
+                .all(|c| !c.argv.contains(&"get".into()) || c.argv.contains(&"image".into())));
+            continue;
+        }
+        // The image's own start command keeps sshd; setup runs over SSH after create.
+        assert_eq!(launched.ready_alias.as_deref(), Some("runpod-pod-test"));
+        let ssh = calls
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.program() == "ssh")
+            .collect::<Vec<_>>();
+        assert!(ssh.iter().all(|(i, _)| *i > create));
+        let setup = ssh.last().unwrap().1.argv.last().unwrap();
+        assert!(setup.contains("nohup bash -c"));
+        assert!(setup.contains(".gpu-setup"));
+        assert!(setup.ends_with("</dev/null &"));
     }
+}
+
+#[test]
+fn runpod_setup_failure_after_create_names_the_cleanup() {
+    let t = TestEnv::new();
+    public_key(&t);
+    let runner = FakeRunner::new(|cmd| {
+        if cmd.argv.contains(&"create".into()) {
+            return testing::ok(r#"{"id":"pod-test"}"#);
+        }
+        if cmd.program() == "ssh" && cmd.argv.last().unwrap().contains("nohup") {
+            return Ok(Output::status(255));
+        }
+        ready(cmd)
+    });
+    let ctx = t.ctx().runner(&runner).build().for_command(true);
+    let mut f = flags("runpod", &[]);
+    f.dry_run = false;
+    f.yes = true;
+    let error = up(&ctx, &f, &cfg()).unwrap_err();
+    assert!(error.text().contains("gpu down runpod:pod-test --yes"));
+    assert_eq!(
+        ctx.result_snapshot().get("created"),
+        Some(&Value::Bool(true))
+    );
 }
 
 #[test]

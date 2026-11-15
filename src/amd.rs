@@ -359,6 +359,7 @@ struct Plan {
     rate: f64,
     // Temporary user-data must remain alive through create.
     _data: Option<tempfile::NamedTempFile>,
+    ssh_setup: Option<String>,
 }
 fn plan(
     ctx: &Ctx,
@@ -386,6 +387,9 @@ fn request(plan: &Plan) -> Value {
         if let Ok(script) = std::fs::read_to_string(data.path()) {
             result.insert("user_data", Value::str(script));
         }
+    }
+    if let Some(script) = &plan.ssh_setup {
+        result.insert("ssh_setup", Value::str(script));
     }
     Value::Dict(result)
 }
@@ -486,10 +490,36 @@ pub fn up(ctx: &Ctx, flags: &UpFlags, cfg: &Dict) -> Result<crate::launch::Launc
     ctx.println(&format!(
         "Created {id}; NO expiry. Next: gpu down {id} --yes"
     ))?;
+    let ready_alias = match &plan.ssh_setup {
+        Some(script) => {
+            ctx.progress(&format!(
+                "Waiting for SSH on {id} to start workspace setup..."
+            ))?;
+            let alias = Id::parse(&id)?.wait_ssh(ctx, flags.timeout)?;
+            start_setup(ctx, &alias, script).map_err(|e| e.next(format!("gpu down {id} --yes")))?;
+            Some(alias)
+        }
+        None => None,
+    };
     Ok(crate::launch::Launched {
         id: Some(id),
-        ready_alias: None,
+        ready_alias,
     })
+}
+
+/// Runs setup detached over SSH so the image's own start command keeps sshd running.
+fn start_setup(ctx: &Ctx, alias: &str, script: &str) -> Result<()> {
+    let remote = format!(
+        "mkdir -p /workspace && nohup bash -c {} >/workspace/.gpu-setup.log 2>&1 </dev/null &",
+        crate::pyfmt::shell_quote(script)
+    );
+    let cmd = crate::ssh::command(&["ssh", "-T"], true, alias, &remote).timeout(Some(30.0));
+    match ctx.run(&cmd) {
+        Ok(out) if out.code == 0 => Ok(()),
+        _ => Err(Error::msg(
+            "Workspace setup could not be started over SSH; the instance is billing.",
+        )),
+    }
 }
 
 fn bootstrap(repo: Option<&str>) -> String {
@@ -582,7 +612,8 @@ impl Instance for Id {
                         return Ok(self.alias());
                     }
                 }
-                Err(Error::Status(ExitCode::WaitTimeout, _)) => {}
+                Err(Error::Status(ExitCode::WaitTimeout | ExitCode::CommandTimeout, _)) => {}
+                Err(error) if error.retryable() => {}
                 Err(error) => return Err(error),
             }
             if poll.remaining() <= 0.0 {
@@ -662,36 +693,40 @@ impl Instance for Id {
             }
             Ok(false)
         };
-        if present(&list(ctx, self.provider)?)? {
-            let cmd = if self.provider == Provider::Runpod {
-                cli(self.provider, &["pod", "delete", &self.raw])
-            } else {
-                cli(
-                    self.provider,
-                    &["compute", "droplet", "delete", &self.raw, "--force"],
-                )
-            };
-            // A failed/ambiguous DELETE can still have taken effect. Only the
-            // authenticated complete inventory read below determines success.
-            let _ = call(ctx, &cmd);
-            let poll = ctx.polling(30.0, 2.0);
-            loop {
-                if let Ok(items) = list(ctx, self.provider) {
-                    if !present(&items)? {
-                        break;
-                    }
+        if !present(&list(ctx, self.provider)?)? {
+            remove_alias(ctx, self)?;
+            ctx.result("state", Value::str("already_absent"));
+            return ctx.println(&format!("Instance {id} is already absent."));
+        }
+        let cmd = if self.provider == Provider::Runpod {
+            cli(self.provider, &["pod", "delete", &self.raw])
+        } else {
+            cli(
+                self.provider,
+                &["compute", "droplet", "delete", &self.raw, "--force"],
+            )
+        };
+        // A failed/ambiguous DELETE can still have taken effect. Only the
+        // authenticated complete inventory read below determines success.
+        let _ = call(ctx, &cmd);
+        let poll = ctx.polling(30.0, 2.0);
+        loop {
+            if let Ok(items) = list(ctx, self.provider) {
+                if !present(&items)? {
+                    break;
                 }
-                if poll.remaining() <= 0.0 {
-                    return Err(Error::status(
-                        ExitCode::CleanupUnverified,
-                        "Deletion unverified; billing may continue.",
-                    )
-                    .next(format!("gpu down {id} --yes")));
-                }
-                poll.pause();
             }
+            if poll.remaining() <= 0.0 {
+                return Err(Error::status(
+                    ExitCode::CleanupUnverified,
+                    "Deletion unverified; billing may continue.",
+                )
+                .next(format!("gpu down {id} --yes")));
+            }
+            poll.pause();
         }
         ctx.result("destroyed", Value::Bool(true));
+        ctx.result("state", Value::str("destroyed"));
         remove_alias(ctx, self)?;
         ctx.println(&format!("Deleted {id} (verified absent). Independent volumes/snapshots/backups may still bill; inspect them in the provider account."))
     }

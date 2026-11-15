@@ -105,8 +105,6 @@ Manual AMD workspaces have **no auto-destroy**. `--yes` approves renting until m
 
 `--max-price` checks the hourly estimate: Runpod includes container disk ($0.10/GB-month, estimated at 730h/month); DO includes its fixed boot disk. Network/tax and independent retained resources are extra. Runpod stop loses the container filesystem and still bills retained storage; DO power-off continues **full GPU billing**. `down` deletes the Pod/Droplet, not independent volumes, snapshots or backups. IDs are `runpod:ID` and `do:REGION:ID`; bare numbers remain Vast.
 
-Paid validation and expiry release gates: [live-test checklist](data/gpu-cli-amd-provider/live-test-checklist.md).
-
 ## Connect and edit
 
 ```sh

@@ -149,6 +149,16 @@ impl Helper {
         self.call_command(ctx, &self.command(op), false)
     }
     fn call_command(&self, ctx: &Ctx, cmd: &Cmd, cancellable: bool) -> Result<(Value, String)> {
+        self.call_reply(ctx, cmd, cancellable)?
+            .map_err(|failure| crate::provider_errors::modal(&failure.kind, &failure.detail))
+    }
+    /// Like `call_command`, but keeps a helper-reported error kind distinct.
+    fn call_reply(
+        &self,
+        ctx: &Ctx,
+        cmd: &Cmd,
+        cancellable: bool,
+    ) -> Result<std::result::Result<(Value, String), HelperFailure>> {
         for key in [
             "MODAL_TOKEN_ID",
             "MODAL_TOKEN_SECRET",
@@ -205,18 +215,24 @@ impl Helper {
                 .get("message")
                 .and_then(Value::as_str)
                 .unwrap_or("Modal helper failed.");
-            return Err(crate::provider_errors::modal(
-                kind,
-                &ctx.safe_diagnostic(detail),
-            ));
+            return Ok(Err(HelperFailure {
+                kind: kind.to_string(),
+                detail: ctx.safe_diagnostic(detail),
+            }));
         }
         if output.code != 0 {
             return Err(failed(
                 "Modal helper failed. Retry gpu setup --provider modal.",
             ));
         }
-        Ok((value, diagnostic))
+        Ok(Ok((value, diagnostic)))
     }
+}
+
+/// An error the helper reported as an exception kind and redacted message.
+struct HelperFailure {
+    kind: String,
+    detail: String,
 }
 
 pub fn check(ctx: &Ctx) -> Result<()> {
@@ -444,14 +460,17 @@ impl RunBackend for ModalBackend {
         cmd = cmd
             .timeout(Some(wait + 30.0))
             .stdin(Input::Text(pyjson::dumps(&Value::Dict(spec), None)));
-        let reply = helper.call_command(ctx, &cmd, true).and_then(|(reply, _)| {
-            let raw = reply
-                .get("id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| Error::msg("Modal create response has no sandbox ID."))?;
-            sandbox_id(&format!("modal:{raw}"))?;
-            Ok(format!("modal:{raw}"))
-        });
+        let reply = helper
+            .call_reply(ctx, &cmd, true)
+            .and_then(|reply| reply.map_err(|failure| capped_wait(failure, wait, timeout)))
+            .and_then(|(reply, _)| {
+                let raw = reply
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| Error::msg("Modal create response has no sandbox ID."))?;
+                sandbox_id(&format!("modal:{raw}"))?;
+                Ok(format!("modal:{raw}"))
+            });
         let id = match reply {
             Ok(id) => id,
             Err(error) => {
@@ -471,7 +490,7 @@ impl RunBackend for ModalBackend {
                 return if ctx.interrupts() > 0 {
                     Err(Error::Cancelled(130))
                 } else {
-                    Err(capped_wait(error, wait, timeout))
+                    Err(error)
                 };
             }
         };
@@ -596,12 +615,15 @@ impl RunBackend for ModalBackend {
     }
 }
 
-/// When `--expire` (which keeps 10 minutes for results), not `--timeout`, set
-/// the readiness wait, say so: raising `--timeout` alone would not help.
-fn capped_wait(error: Error, wait: f64, timeout: f64) -> Error {
+/// When `--expire` (which keeps 10 minutes for results), not `--timeout`, cut
+/// a readiness wait short, say so: raising `--timeout` alone would not help.
+/// An immediate rejection such as `ResourceExhaustedError` gets no such note.
+fn capped_wait(failure: HelperFailure, wait: f64, timeout: f64) -> Error {
+    let error = crate::provider_errors::modal(&failure.kind, &failure.detail);
     match error {
-        Error::Status(code @ (ExitCode::WaitTimeout | ExitCode::NoCapacity), message)
-            if wait < timeout =>
+        Error::Status(code, message)
+            if wait < timeout
+                && matches!(failure.kind.as_str(), "ImageBuildTimeout" | "SchedulingTimeout") =>
         {
             Error::status(
                 code,

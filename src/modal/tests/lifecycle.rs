@@ -385,6 +385,7 @@ fn readiness_timeouts_name_their_cause_and_an_expire_cap() {
         ("ImageBuildTimeout", 40, 1200.0, 14, false),
         ("SchedulingTimeout", 15, 1200.0, 10, true),
         ("SchedulingTimeout", 30, 120.0, 10, false),
+        ("ResourceExhaustedError", 15, 1200.0, 10, false),
     ] {
         let runner = FakeRunner::new(move |cmd| match cmd.argv[5].as_str() {
             "create" => testing::ok(&format!(
@@ -413,7 +414,7 @@ fn readiness_timeouts_name_their_cause_and_an_expire_cap() {
             "{text}"
         );
         let wait: f64 = runner.calls()[0].argv[6].parse().unwrap();
-        assert_eq!(wait, if capped { 300.0 } else { timeout });
+        assert_eq!(wait, if minutes == 15 { 300.0 } else { timeout });
     }
 }
 

@@ -313,10 +313,19 @@ class HelperTest(unittest.TestCase):
         rows = json.loads(self.call('list', RUN_VOLUME=name, CLAIMED=name, FINISHED='1').stdout)['volumes']
         self.assertEqual(rows, [{'name': name}])
         self.assertEqual(json.loads(self.call('list', RUN_VOLUME=name, FINISHED='1').stdout)['volumes'], [])
-        old = time.time() - 16 * 60
-        for path in self.state.iterdir():
-            os.utime(path, (old, old))
-        # Unclaimed past the create readiness window: an orphan.
+        def age(seconds):
+            then = time.time() - seconds
+            for path in self.state.iterdir():
+                os.utime(path, (then, then))
+        # Still inside the default 1200s readiness wait (e.g. a long first
+        # image pull): its create may yet succeed, so it is not an orphan.
+        age(1190)
+        self.assertEqual(json.loads(self.call('list').stdout)['volumes'], [])
+        # Still inside the longest wait create accepts (--timeout 86400).
+        age(86400)
+        self.assertEqual(json.loads(self.call('list').stdout)['volumes'], [])
+        age(86400 + 16 * 60)
+        # Unclaimed past the longest create readiness window: an orphan.
         rows = json.loads(self.call('list').stdout)['volumes']
         self.assertEqual(rows, [{'name': name}])
         self.assertEqual(json.loads(self.call('list', RUN_VOLUME=name).stdout)['volumes'], [])

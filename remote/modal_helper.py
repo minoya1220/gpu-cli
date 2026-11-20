@@ -29,9 +29,13 @@ VOLUME_MOUNT = "/gpu-volume"
 OUTPUT_DIR = "outputs"
 # The supervisor writes and commits this marker when its job starts.
 CLAIM_MARKER = ".gpu-cli-claimed"
-# A create makes the Volume, then waits up to --timeout (default 1200s) for a
-# Sandbox. An unclaimed Volume this young may belong to a run still starting.
-PENDING_CREATE = timedelta(minutes=15)
+# The longest readiness wait `create` accepts; it matches `gpu run --timeout`'s
+# maximum, and the default (1200s) and any --expire cap are below it.
+MAX_READINESS_WAIT = 86400
+# A create makes the Volume within its readiness wait, before the Sandbox
+# exists. An unclaimed Volume this young may belong to a run still starting, so
+# the window outlasts the longest wait plus a margin for the Rust-side reply.
+PENDING_CREATE = timedelta(seconds=MAX_READINESS_WAIT, minutes=15)
 
 
 def volume_name(name):
@@ -371,7 +375,7 @@ def dispatch(modal, args):
         if not (cpu > 0 and memory > 0 and 0 < timeout <= 86400):
             raise ValueError()
         scheduling_timeout = float(args[1]) if len(args) == 2 else 120.0
-        if not (0 < scheduling_timeout <= 86400):
+        if not (0 < scheduling_timeout <= MAX_READINESS_WAIT):
             raise ValueError()
         sandbox = asyncio.run(create(modal, spec, scheduling_timeout))
         emit({"id": sandbox.object_id})

@@ -62,6 +62,9 @@ pub(crate) fn modal(kind: &str, detail: &str) -> Error {
         // non-secret guidance and classify this as a usage/request rejection.
         "InvalidError" => return Error::usage(detail),
         "ResourceExhaustedError" | "SchedulingTimeout" => ExitCode::NoCapacity,
+        // The image was still building or pulling: a readiness timeout, not
+        // a capacity shortage.
+        "ImageBuildTimeout" => ExitCode::WaitTimeout,
         "NotFoundError" => ExitCode::NotFound,
         "InstanceLost" => ExitCode::InstanceLost,
         "CleanupUnverified" => ExitCode::CleanupUnverified,

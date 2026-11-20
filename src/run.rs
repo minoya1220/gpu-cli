@@ -25,6 +25,8 @@ mod tests;
 pub const REMOTE_SOURCE: &str = include_str!("../remote/run_remote.sh");
 pub(crate) const DOWNLOAD_RESERVE: i64 = 600;
 const CHUNK: u64 = 131072;
+/// Default `--timeout`: how long launch waits for SSH readiness.
+const READINESS_TIMEOUT: f64 = 600.0;
 /// Where results land, under the directory `gpu run` was started in.
 const RESULTS_DIR: &str = "gpu-runs";
 
@@ -482,7 +484,7 @@ fn prepare(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<Prepar
             "WARNING: uploading secret-looking files allowed by --allow-secrets: {names}."
         ))?;
     }
-    let setup = setup(flags, &upload.root.join(&upload.relative));
+    let setup = setup(flags, &upload.root);
     let mut cfg = cfg.clone();
     if let Some(image) = &flags.image {
         cfg.insert("container_image", Value::str(image));
@@ -713,45 +715,41 @@ fn execute(
     session: &mut Session,
 ) -> Result<()> {
     let ctx = phase.ctx;
-    let id = backend.launch(
-        ctx,
-        request,
-        job.deadline,
-        flags.timeout,
-        &mut |id, named| {
-            // Record ownership before any local I/O can fail. Launch readiness
-            // failures must still reach provider-state-verified destruction.
-            session.created_id = Some(id.to_string());
-            session.run_id = match named {
-                Some(named) => named.into(),
-                None => format!("{}-{id}", job.now.strftime("%Y%m%dT%H%M%SZ")),
-            };
-            session.local = results.join(&session.run_id);
-            fs::rename(staging, &session.local)
-                .map_err(|e| crate::error::os_error(&e, &session.local))?;
-            ctx.result("run_id", Value::str(&session.run_id));
-            ctx.result(
-                "log_path",
-                Value::str(session.local.join("log.txt").to_string_lossy()),
-            );
-            Ok(())
-        },
-    )?;
+    let timeout = flags
+        .timeout
+        .unwrap_or(if backend.provider() == Provider::Modal {
+            crate::modal::READINESS_TIMEOUT
+        } else {
+            READINESS_TIMEOUT
+        });
+    let id = backend.launch(ctx, request, job.deadline, timeout, &mut |id, named| {
+        // Record ownership before any local I/O can fail. Launch readiness
+        // failures must still reach provider-state-verified destruction.
+        session.created_id = Some(id.to_string());
+        session.run_id = match named {
+            Some(named) => named.into(),
+            None => format!("{}-{id}", job.now.strftime("%Y%m%dT%H%M%SZ")),
+        };
+        session.local = results.join(&session.run_id);
+        fs::rename(staging, &session.local)
+            .map_err(|e| crate::error::os_error(&e, &session.local))?;
+        ctx.result("run_id", Value::str(&session.run_id));
+        ctx.result(
+            "log_path",
+            Value::str(session.local.join("log.txt").to_string_lossy()),
+        );
+        Ok(())
+    })?;
     let run_id = session.run_id.clone();
-    let target = format!("/workspace/gpu-run-{run_id}");
-    let jobdir = if job.upload.relative.as_os_str().is_empty() {
-        target.clone()
-    } else {
-        format!("{target}/{}", job.upload.relative.to_string_lossy())
-    };
+    let jobdir = format!("/workspace/gpu-run-{run_id}");
     let root = format!("/root/.local/state/gpu-run/{run_id}");
     session.paths = Some((root.clone(), jobdir.clone()));
     ctx.check_cancelled()?;
     phase.set("upload");
     let command = backend.upload(format!(
         "mkdir -p {} && tar -xzf - --no-same-owner -C {}",
-        shell_quote(&target),
-        shell_quote(&target)
+        shell_quote(&jobdir),
+        shell_quote(&jobdir)
     ));
     let remaining =
         (job.deadline.as_second() - DOWNLOAD_RESERVE - ctx.clock.now().as_second()).max(1) as f64;
@@ -840,10 +838,16 @@ fn settle(owned: &Owned, mut outcome: Result<()>, started: f64) -> Result<()> {
     if modal_lost && ctx.interrupts() == 0 {
         outcome = Err(Error::status(
             ExitCode::InstanceLost,
-            "Modal sandbox ended while the job was running (possibly preempted); recovering the last committed outputs.",
+            if session.launched {
+                "Modal sandbox ended while the job was running (possibly preempted); recovering the last committed outputs.".into()
+            } else {
+                format!("Modal sandbox ended during {}, before the job started; the job never ran. A sandbox stops itself when its upload makes no progress for 5 minutes; check network access to Modal.", phase.get())
+            },
         ));
     }
-    if let Some(paths) = session.paths.as_ref() {
+    // Before the start request nothing ran, so there is no log or output to
+    // fetch: go straight to cleanup.
+    if let Some(paths) = session.paths.as_ref().filter(|_| session.launched) {
         if modal_lost {
             if ctx.interrupts() < 2 {
                 phase.set("download");
@@ -1215,8 +1219,8 @@ fn finish_log(
     Ok(())
 }
 
-/// Only SSH transport failures are retried, a few times; a remote tar error
-/// or an exhausted budget proceeds straight to destroy.
+/// Only SSH transport failures are retried, a few times; a remote tar error,
+/// a definite not-found or an exhausted budget proceeds straight to destroy.
 const DOWNLOAD_RETRY_DELAYS: [f64; 3] = [5.0, 15.0, 30.0];
 
 fn download(
@@ -1255,6 +1259,8 @@ fn download(
             Ok(_) => break,
             Err(error) => error,
         };
+        // A missing instance or output Volume will not come back.
+        let transport = transport && !matches!(error, Error::Status(ExitCode::NotFound, _));
         let Some(delay) =
             delay.filter(|delay| transport && ctx.interrupts() < 2 && *delay < poll.remaining())
         else {

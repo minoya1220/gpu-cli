@@ -43,11 +43,11 @@ gpu run --gpu 'RTX 4090' --expire 30m --yes --env HF_TOKEN -- python train.py
 
 `gpu run` rents a Vast container, uploads your files, runs setup and the command, downloads results, then destroys the instance.
 
-- Upload: in a git repo, every non-ignored file including uncommitted edits; elsewhere, the current folder minus `.venv`, `node_modules` and caches. Secret-looking files (`.env*`, SSH keys, `*.pem`, `.netrc`, `.aws/`, `credentials*.json`) are refused unless you pass `--allow-secrets`. The cap is `--max-upload` (default 1G).
+- Upload: the current folder and below, nothing above it; the job starts in that folder. In a git repo, every non-ignored file there including uncommitted edits; elsewhere, all files minus `.venv`, `node_modules` and caches. `--dry-run` lists them. Secret-looking files (`.env*`, SSH keys, `*.pem`, `.netrc`, `.aws/`, `credentials*.json`) are refused unless you pass `--allow-secrets`. The cap is `--max-upload` (default 1G).
 - Setup: `uv.lock`, `pyproject.toml` or `requirements.txt` is installed with uv. On a CUDA/torch `--image`, pass `--no-setup` or your own `--setup CMD` so uv does not reinstall torch.
 - Secrets: `--env NAME` sends a local variable over SSH stdin, never in arguments or Vast metadata. Job output is not filtered.
 - Results: write to `outputs/`. They land in `./gpu-runs/<time>-<id>/` with `log.txt` and `result.json`; add `gpu-runs/` to `.gitignore`.
-- `--expire` must exceed 10 minutes, which are reserved for downloading results. `--timeout` limits the SSH wait, not the job.
+- `--expire` must exceed 10 minutes, which are reserved for downloading results. `--timeout` limits the readiness wait (SSH; on Modal, image build/pull and GPU scheduling), not the job.
 - Ctrl-C once stops the job, downloads partial outputs and destroys the instance; twice skips the download; three times exits at once and prints the cleanup command. If the CLI dies, only the deadline remains.
 
 The job's exit code passes through. `run` adds 17 job timeout, 18 instance lost, 19 cleanup unverified (it may still bill: run `gpu down ID --yes`) and 130 cancelled.
@@ -65,6 +65,8 @@ gpu down modal:sb-EXAMPLE --yes
 ```
 
 - Use Modal GPU names. `--cpu` (default 4) and `--memory` (GiB, default 16) set the size. `--expire` must exceed 10 minutes and be at most 24 hours; build, scheduling, upload and setup count against it.
+- `--timeout` defaults to 20 minutes on Modal, as the first pull of a large CUDA image can take over 10. The wait is also capped at `--expire` minus 10 minutes. A timeout says whether the image or GPU scheduling was still pending.
+- Behind a proxy, Modal uses `HTTPS_PROXY`/`ALL_PROXY` (HTTP or SOCKS) and `NO_PROXY`.
 - `--max-price` and `max_session_spend` check an estimate, not your bill; Modal also bills setup, idle and download time.
 - GPU Sandboxes can be preempted and the job is never rerun. Outputs sync to a Volume every 30 seconds; checkpoint your work.
 - If the CLI dies, the Sandbox still ends at its deadline, but its output Volume keeps billing storage. `gpu ls --provider modal` shows it as `outputs-only`. Recover and delete it:

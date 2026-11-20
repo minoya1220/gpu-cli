@@ -18,17 +18,35 @@ use crate::run::{RunBackend, RunPlan};
 pub const HELPER: &str = include_str!("../remote/modal_helper.py");
 pub const KEEPER: &str = include_str!("../remote/modal_keeper.sh");
 const KEEPER_ROOT: &str = "/tmp/gpu-modal-keeper";
+/// Default `gpu run --timeout` for Modal: the first pull of a large registry
+/// image (a ~4GB CUDA devel image) alone can take over 10 minutes, before GPU
+/// scheduling starts. No GPU time is billed before scheduling; Modal's own
+/// scheduling wait is 21 minutes.
+pub const READINESS_TIMEOUT: f64 = 1200.0;
 const VOLUME_MOUNT: &str = "/gpu-volume";
 const OUTPUTS_HOOK: &str = "#!/bin/bash\n# On a VolumeFS v2 mount, syncfs commits. Without sync, writes commit only when\n# the Sandbox terminates gracefully, which preemption may skip.\nif command -v sync >/dev/null 2>&1; then\n    sync -f /gpu-volume 2>/dev/null || sync /gpu-volume 2>/dev/null || echo 'WARNING: output Volume flush failed; only prior commits may survive preemption.' >&2\nelse\n    echo 'WARNING: sync unavailable; outputs commit only when the Sandbox ends, so preemption may lose them.' >&2\nfi\n";
 
 fn client_version() -> &'static str {
-    HELPER
+    pinned_modal(HELPER).expect("bundled helper has an exact Modal dependency pin")
+}
+
+/// The exact `modal==VERSION` (optionally `modal[extras]==VERSION`) pin from a
+/// PEP 723 dependency line, whatever else that list holds.
+fn pinned_modal(source: &str) -> Option<&str> {
+    let list = source
         .lines()
-        .find_map(|line| {
-            line.strip_prefix("# dependencies = [\"modal==")?
-                .strip_suffix("\"]")
-        })
-        .expect("bundled helper has an exact Modal dependency pin")
+        .find_map(|line| line.strip_prefix("# dependencies = ["))?
+        .strip_suffix(']')?;
+    list.split(',').find_map(|item| {
+        let item = item.trim().strip_prefix('"')?.strip_suffix('"')?;
+        let rest = item.strip_prefix("modal")?;
+        let rest = match rest.strip_prefix('[') {
+            Some(extras) => &extras[extras.find(']')? + 1..],
+            None => rest,
+        };
+        rest.strip_prefix("==")
+            .filter(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.'))
+    })
 }
 
 // Names and rate keys only; prices always come from this workspace's live rates.
@@ -131,6 +149,16 @@ impl Helper {
         self.call_command(ctx, &self.command(op), false)
     }
     fn call_command(&self, ctx: &Ctx, cmd: &Cmd, cancellable: bool) -> Result<(Value, String)> {
+        self.call_reply(ctx, cmd, cancellable)?
+            .map_err(|failure| crate::provider_errors::modal(&failure.kind, &failure.detail))
+    }
+    /// Like `call_command`, but keeps a helper-reported error kind distinct.
+    fn call_reply(
+        &self,
+        ctx: &Ctx,
+        cmd: &Cmd,
+        cancellable: bool,
+    ) -> Result<std::result::Result<(Value, String), HelperFailure>> {
         for key in [
             "MODAL_TOKEN_ID",
             "MODAL_TOKEN_SECRET",
@@ -187,18 +215,24 @@ impl Helper {
                 .get("message")
                 .and_then(Value::as_str)
                 .unwrap_or("Modal helper failed.");
-            return Err(crate::provider_errors::modal(
-                kind,
-                &ctx.safe_diagnostic(detail),
-            ));
+            return Ok(Err(HelperFailure {
+                kind: kind.to_string(),
+                detail: ctx.safe_diagnostic(detail),
+            }));
         }
         if output.code != 0 {
             return Err(failed(
                 "Modal helper failed. Retry gpu setup --provider modal.",
             ));
         }
-        Ok((value, diagnostic))
+        Ok(Ok((value, diagnostic)))
     }
+}
+
+/// An error the helper reported as an exception kind and redacted message.
+struct HelperFailure {
+    kind: String,
+    detail: String,
 }
 
 pub fn check(ctx: &Ctx) -> Result<()> {
@@ -426,14 +460,17 @@ impl RunBackend for ModalBackend {
         cmd = cmd
             .timeout(Some(wait + 30.0))
             .stdin(Input::Text(pyjson::dumps(&Value::Dict(spec), None)));
-        let reply = helper.call_command(ctx, &cmd, true).and_then(|(reply, _)| {
-            let raw = reply
-                .get("id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| Error::msg("Modal create response has no sandbox ID."))?;
-            sandbox_id(&format!("modal:{raw}"))?;
-            Ok(format!("modal:{raw}"))
-        });
+        let reply = helper
+            .call_reply(ctx, &cmd, true)
+            .and_then(|reply| reply.map_err(|failure| capped_wait(failure, wait, timeout)))
+            .and_then(|(reply, _)| {
+                let raw = reply
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| Error::msg("Modal create response has no sandbox ID."))?;
+                sandbox_id(&format!("modal:{raw}"))?;
+                Ok(format!("modal:{raw}"))
+            });
         let id = match reply {
             Ok(id) => id,
             Err(error) => {
@@ -575,6 +612,28 @@ impl RunBackend for ModalBackend {
                 "Cleanup unverified; billing may continue. Next: gpu down {id} --yes; gpu down modal:volume:{} --yes", self.volume)));
         }
         Ok(())
+    }
+}
+
+/// When `--expire` (which keeps 10 minutes for results), not `--timeout`, cut
+/// a readiness wait short, say so: raising `--timeout` alone would not help.
+/// An immediate rejection such as `ResourceExhaustedError` gets no such note.
+fn capped_wait(failure: HelperFailure, wait: f64, timeout: f64) -> Error {
+    let error = crate::provider_errors::modal(&failure.kind, &failure.detail);
+    match error {
+        Error::Status(code, message)
+            if wait < timeout
+                && matches!(failure.kind.as_str(), "ImageBuildTimeout" | "SchedulingTimeout") =>
+        {
+            Error::status(
+                code,
+                format!(
+                    "{message} The readiness wait was {}s, capped by --expire (it keeps 10 minutes for results); a longer --expire allows a longer wait.",
+                    wait.round() as i64
+                ),
+            )
+        }
+        error => error,
     }
 }
 

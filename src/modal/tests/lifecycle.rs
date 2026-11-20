@@ -25,6 +25,10 @@ enum End {
     CancelTwice,
     DownloadFailure,
     LostDuringDownload,
+    /// The upload never finishes and the Sandbox is gone afterwards.
+    LostDuringUpload,
+    /// The Sandbox and its output Volume are both gone at download time.
+    VolumeGone,
 }
 
 fn write_outputs(path: &std::path::Path) -> std::result::Result<Output, RunError> {
@@ -53,6 +57,8 @@ fn shared_run_flow_over_modal_exec() {
         End::CancelTwice,
         End::DownloadFailure,
         End::LostDuringDownload,
+        End::LostDuringUpload,
+        End::VolumeGone,
     ] {
         let t = TestEnv::new();
         let cwd = t.root.join("source");
@@ -83,6 +89,9 @@ fn shared_run_flow_over_modal_exec() {
                     *tag_copy.lock().unwrap() =
                         tags.get("run_id").unwrap().as_str().unwrap().into();
                     assert_eq!(tags.get("gpu-cli"), Some(&Value::str("true")));
+                    // Modal's default readiness wait fits a first large image pull.
+                    let wait: f64 = cmd.argv[6].parse().unwrap();
+                    assert!((1199.0..=1200.0).contains(&wait), "{wait}");
                     testing::ok(r#"{"id":"sb-offline"}"#)
                 }
                 "exec" => {
@@ -94,6 +103,8 @@ fn shared_run_flow_over_modal_exec() {
                         assert_eq!(tar::Archive::new(gzip).entries().unwrap().count(), 1);
                         return if matches!(end, End::UploadFailure) {
                             testing::status(1)
+                        } else if matches!(end, End::LostDuringUpload) {
+                            Err(RunError::TimedOut)
                         } else {
                             testing::ok("")
                         };
@@ -129,7 +140,10 @@ fn shared_run_flow_over_modal_exec() {
                     }
                     if remote.starts_with("tar -C ") {
                         assert!(remote.contains(" -cf - -- outputs/. "));
-                        if matches!(end, End::DownloadFailure | End::LostDuringDownload) {
+                        if matches!(
+                            end,
+                            End::DownloadFailure | End::LostDuringDownload | End::VolumeGone
+                        ) {
                             return testing::status(255);
                         }
                         return write_outputs(cmd.stdout_file.as_ref().unwrap());
@@ -141,7 +155,17 @@ fn shared_run_flow_over_modal_exec() {
                     panic!("unexpected exec {cmd:?}");
                 }
                 "volume-get" => {
-                    assert!(matches!(end, End::Lost | End::LostDuringDownload));
+                    assert!(matches!(
+                        end,
+                        End::Lost | End::LostDuringDownload | End::VolumeGone
+                    ));
+                    if matches!(end, End::VolumeGone) {
+                        return Ok(Output {
+                            code: 255,
+                            stdout: String::new(),
+                            stderr: r#"{"error":{"kind":"NotFoundError","message":"Modal sandbox or output Volume was not found."}}"#.into(),
+                        });
+                    }
                     assert!(cmd.argv[6].starts_with("gpu-cli-run-"));
                     assert_eq!(cmd.argv[7], "outputs");
                     write_outputs(cmd.stdout_file.as_ref().unwrap())
@@ -155,11 +179,19 @@ fn shared_run_flow_over_modal_exec() {
                         r#"{"finished":true}"#
                     })
                 }
-                "status" => testing::ok(if matches!(end, End::Lost | End::LostDuringDownload) {
-                    r#"{"running":false,"returncode":137}"#
-                } else {
-                    r#"{"running":true,"returncode":null}"#
-                }),
+                "status" => testing::ok(
+                    if matches!(
+                        end,
+                        End::Lost
+                            | End::LostDuringDownload
+                            | End::LostDuringUpload
+                            | End::VolumeGone
+                    ) {
+                        r#"{"running":false,"returncode":137}"#
+                    } else {
+                        r#"{"running":true,"returncode":null}"#
+                    },
+                ),
                 "terminate" => testing::ok(if matches!(end, End::CleanupFailure) {
                     r#"{"finished":false}"#
                 } else {
@@ -180,7 +212,7 @@ fn shared_run_flow_over_modal_exec() {
                 End::Success => 0,
                 End::Failure => 7,
                 End::Timeout => 17,
-                End::Lost | End::LostDuringDownload => 18,
+                End::Lost | End::LostDuringDownload | End::LostDuringUpload | End::VolumeGone => 18,
                 End::CleanupFailure | End::VolumeCleanupFailure => 19,
                 End::Cancel | End::CancelTwice => 130,
                 _ => 1,
@@ -227,6 +259,38 @@ fn shared_run_flow_over_modal_exec() {
                 b"ok\n"
             );
             assert_eq!(std::fs::read(local.join("log.txt")).unwrap(), b"");
+        }
+        let calls = runner.calls();
+        let remote = |prefix: &str| {
+            calls
+                .iter()
+                .filter(|cmd| cmd.argv.get(5).is_some_and(|op| op == "exec"))
+                .filter(|cmd| cmd.argv.last().unwrap().starts_with(prefix))
+                .count()
+        };
+        let helper = |op: &str| {
+            calls
+                .iter()
+                .filter(|cmd| cmd.argv.get(5).is_some_and(|o| o == op))
+                .count()
+        };
+        if matches!(end, End::UploadFailure | End::LostDuringUpload) {
+            // Nothing ran: no log, status, expiry or output requests.
+            assert_eq!(remote("tar -C "), 0);
+            assert_eq!(remote("dd "), 0);
+            assert_eq!(remote("printf "), 0);
+            assert_eq!(remote("bash -s -- start "), 0);
+            assert_eq!(helper("volume-get"), 0);
+            assert_eq!(result.get("phase"), Some(&Value::str("upload")));
+        }
+        if matches!(end, End::LostDuringUpload) {
+            let text = outcome.as_ref().unwrap_err().text();
+            assert!(text.contains("before the job started"), "{text}");
+            assert!(!text.contains("preempted"), "{text}");
+        }
+        if matches!(end, End::VolumeGone) {
+            // A definite not-found is never retried.
+            assert_eq!(helper("volume-get"), 1);
         }
         if matches!(end, End::CancelTwice) {
             assert!(!local.join("outputs").exists());
@@ -311,6 +375,46 @@ fn lost_create_reply_reconciles_only_its_run_tag() {
             assert_eq!(calls[1].argv[7], format!("run_id={tag}"));
             assert_eq!(calls[0].timeout, Some(150.0));
         }
+    }
+}
+
+#[test]
+fn readiness_timeouts_name_their_cause_and_an_expire_cap() {
+    for (kind, minutes, timeout, code, capped) in [
+        ("ImageBuildTimeout", 15, 1200.0, 14, true),
+        ("ImageBuildTimeout", 40, 1200.0, 14, false),
+        ("SchedulingTimeout", 15, 1200.0, 10, true),
+        ("SchedulingTimeout", 30, 120.0, 10, false),
+        ("ResourceExhaustedError", 15, 1200.0, 10, false),
+    ] {
+        let runner = FakeRunner::new(move |cmd| match cmd.argv[5].as_str() {
+            "create" => testing::ok(&format!(
+                r#"{{"error":{{"kind":"{kind}","message":"helper cause."}}}}"#
+            )),
+            "terminate" => testing::ok(r#"{"finished":true}"#),
+            "volume-delete" => testing::ok(r#"{"finished":true}"#),
+            _ => panic!("{cmd:?}"),
+        });
+        let t = TestEnv::new();
+        let ctx = t.ctx().runner(&runner).build();
+        let mut backend = ModalBackend::new(None);
+        let deadline = ctx.clock.now() + jiff::Span::new().minutes(minutes);
+        let request = pyjson::loads(r#"{"gpu":"T4","tags":{}}"#).unwrap();
+        let error = backend
+            .launch(&ctx, &request, deadline, timeout, &mut |_, _| {
+                panic!("no ID received")
+            })
+            .unwrap_err();
+        assert_eq!(error.exit_code(), code, "{kind}");
+        let text = error.text();
+        assert!(text.starts_with("helper cause."), "{text}");
+        assert_eq!(
+            text.contains("The readiness wait was 300s, capped by --expire"),
+            capped,
+            "{text}"
+        );
+        let wait: f64 = runner.calls()[0].argv[6].parse().unwrap();
+        assert_eq!(wait, if minutes == 15 { 300.0 } else { timeout });
     }
 }
 

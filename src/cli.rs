@@ -346,9 +346,9 @@ pub struct RunFlags {
     /// Lifetime ceiling including boot, upload and download (prompted in a terminal when unset)
     #[arg(long, value_name = "DURATION")]
     pub expire: Option<String>,
-    /// Readiness timeout (SSH or Modal image build/scheduling), not job runtime
-    #[arg(long, default_value = "600", value_parser = positive_seconds)]
-    pub timeout: f64,
+    /// Readiness timeout in seconds (SSH, or Modal image build/pull and scheduling), not job runtime [default: 600; Modal: 1200]
+    #[arg(long, value_parser = positive_seconds)]
+    pub timeout: Option<f64>,
     /// Override the container image
     #[arg(long)]
     pub image: Option<String>,

@@ -5,7 +5,7 @@ use std::fs;
 use std::path::Path;
 
 #[test]
-fn git_upload_respects_ignores_edits_and_subdirectory_without_recursing_links() {
+fn git_upload_respects_ignores_edits_and_cwd_subtree_without_recursing_links() {
     let env = TestEnv::new();
     let root = env.root.join("project");
     fs::create_dir_all(root.join("sub")).unwrap();
@@ -34,9 +34,8 @@ fn git_upload_respects_ignores_edits_and_subdirectory_without_recursing_links() 
     fs::create_dir(root.join("gpu-runs")).unwrap();
     fs::write(root.join("gpu-runs/old-output"), "not sent").unwrap();
     std::os::unix::fs::symlink("/no/such/target", root.join("link")).unwrap();
-    let upload = prepare(&ctx, &root.join("sub"), 1024).unwrap();
+    let upload = prepare(&ctx, &root, 1024).unwrap();
     assert_eq!(upload.root, root.canonicalize().unwrap());
-    assert_eq!(upload.relative, Path::new("sub"));
     let gzip = flate2::read::GzDecoder::new(fs::File::open(upload.archive.path()).unwrap());
     let mut archive = tar::Archive::new(gzip);
     let output = env.root.join("unpacked");
@@ -50,6 +49,20 @@ fn git_upload_respects_ignores_edits_and_subdirectory_without_recursing_links() 
     for name in ["ignored", ".env", "gpu-runs", ".git"] {
         assert!(!output.join(name).exists());
     }
+    // From a subdirectory only that subtree is sent, rooted at it; the
+    // repo's ignore rules still apply.
+    fs::write(root.join("sub/ignored"), "not sent").unwrap();
+    let upload = prepare(&ctx, &root.join("sub"), 1024).unwrap();
+    assert_eq!(upload.root, root.join("sub").canonicalize().unwrap());
+    assert_eq!(
+        upload.files,
+        vec![Path::new("untracked file\nwith newline").to_path_buf()]
+    );
+    let gzip = flate2::read::GzDecoder::new(fs::File::open(upload.archive.path()).unwrap());
+    let output = env.root.join("unpacked-sub");
+    tar::Archive::new(gzip).unpack(&output).unwrap();
+    assert!(output.join("untracked file\nwith newline").exists());
+    assert!(!output.join("tracked").exists());
     assert!(prepare(&ctx, &root, 1)
         .unwrap_err()
         .text()

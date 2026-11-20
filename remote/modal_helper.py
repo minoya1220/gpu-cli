@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["modal==1.6.3"]
+# dependencies = ["modal[api-proxy-support]==1.6.3", "python-socks[asyncio]==3.2.1", "aiohttp-socks==0.12.0"]
 # ///
 """Private gpu transport. Control ops emit JSON; exec is a byte stream.
 
@@ -29,9 +29,13 @@ VOLUME_MOUNT = "/gpu-volume"
 OUTPUT_DIR = "outputs"
 # The supervisor writes and commits this marker when its job starts.
 CLAIM_MARKER = ".gpu-cli-claimed"
-# A create makes the Volume, then waits up to --timeout (default 600s) for a
-# Sandbox. An unclaimed Volume this young may belong to a run still starting.
-PENDING_CREATE = timedelta(minutes=15)
+# The longest readiness wait `create` accepts; it matches `gpu run --timeout`'s
+# maximum, and the default (1200s) and any --expire cap are below it.
+MAX_READINESS_WAIT = 86400
+# A create makes the Volume within its readiness wait, before the Sandbox
+# exists. An unclaimed Volume this young may belong to a run still starting, so
+# the window outlasts the longest wait plus a margin for the Rust-side reply.
+PENDING_CREATE = timedelta(seconds=MAX_READINESS_WAIT, minutes=15)
 
 
 def volume_name(name):
@@ -68,8 +72,16 @@ class SchedulingTimeout(Exception):
     pass
 
 
+class ImageBuildTimeout(Exception):
+    pass
+
+
 async def create(modal, spec, timeout):
+    # Which part of the readiness wait was running, for the timeout's cause.
+    phase = "image"
+
     async def allocate():
+        nonlocal phase
         image = (modal.Image.from_registry(spec["image"]) if spec.get("image")
                  else modal.Image.debian_slim(python_version="3.13"))
         # COPY uses Modal's Dockerfile builder directly: custom registry images
@@ -78,6 +90,11 @@ async def create(modal, spec, timeout):
             "COPY --from=ghcr.io/astral-sh/uv:0.10.4 /uv /uvx /usr/local/bin/"
         )
         app = await modal.App.lookup.aio("gpu-cli", create_if_missing=True)
+        # Build (pulling the registry image) before creating the Sandbox, so a
+        # timeout can say whether the image or GPU scheduling was the wait.
+        # Sandbox.create reuses the built image.
+        await image.build.aio(app)
+        phase = "scheduling"
         volumes = {}
         if spec.get("volume"):
             # VolumeFS v2: an in-Sandbox sync commits, so checkpoints survive preemption.
@@ -96,7 +113,7 @@ async def create(modal, spec, timeout):
         # Rust also reconciles by run_id if this process/reply is lost.
         return await asyncio.wait_for(allocate(), timeout=timeout)
     except TimeoutError:
-        raise SchedulingTimeout() from None
+        raise (ImageBuildTimeout() if phase == "image" else SchedulingTimeout()) from None
 
 
 def emit(value):
@@ -358,7 +375,7 @@ def dispatch(modal, args):
         if not (cpu > 0 and memory > 0 and 0 < timeout <= 86400):
             raise ValueError()
         scheduling_timeout = float(args[1]) if len(args) == 2 else 120.0
-        if not (0 < scheduling_timeout <= 86400):
+        if not (0 < scheduling_timeout <= MAX_READINESS_WAIT):
             raise ValueError()
         sandbox = asyncio.run(create(modal, spec, scheduling_timeout))
         emit({"id": sandbox.object_id})
@@ -439,14 +456,25 @@ def dispatch(modal, args):
     return 0
 
 
+def causes(exc):
+    """The exception and what caused it, outermost first, bounded."""
+    chain = []
+    while exc is not None and len(chain) < 8 and exc not in chain:
+        chain.append(exc)
+        exc = exc.__cause__ or (None if exc.__suppress_context__ else exc.__context__)
+    return chain
+
+
 def failure(exc):
     # Class identity, never human-message parsing. Never emit raw SDK exception
-    # text/tracebacks: those can contain credentials or an echoed exec payload.
+    # text/tracebacks: those can contain credentials (a proxy URL's password,
+    # a token) or an echoed exec payload. Class names are safe to show.
     messages = {
         "MissingToken": "Modal has no token. Next: uvx modal@1.6.3 token new",
         "AuthError": "Modal authentication failed or expired. Next: uvx modal@1.6.3 token new",
         "ResourceExhaustedError": "Modal has insufficient capacity. Try another GPU or retry later.",
-        "SchedulingTimeout": "Modal scheduling exceeded --timeout. Try another GPU or a longer --timeout.",
+        "SchedulingTimeout": "Modal built the image but scheduled no GPU within the readiness wait. Try another GPU, retry later or raise --timeout.",
+        "ImageBuildTimeout": "Modal image build/pull did not finish within the readiness wait. A large registry image (e.g. a 4GB CUDA devel image) can take over 10 minutes on first use; Modal caches it afterwards. Raise --timeout or retry.",
         "NotFoundError": "Modal sandbox or output Volume was not found.",
         "ImageBuildError": "Modal image build failed. Inspect the build logs in the Modal dashboard; check the registry image and bootstrap steps.",
         "InvalidError": "Modal rejected the request. Check Modal account/billing settings (including a payment method), the GPU type and image.",
@@ -455,14 +483,22 @@ def failure(exc):
         "FileNotFoundError": "Copy source or destination parent does not exist.",
         "PermissionError": "Copy permission denied. Check source and destination permissions.",
         "ValueError": "Invalid Modal helper or copy request. Check paths and --recursive; only regular files and directories are supported.",
+        "ImportError": "The Modal helper is missing a Python package. Update gpu; if it persists, run uv cache clean.",
+        "ConnectionError": "Could not connect to Modal. Check network access; behind a proxy, check HTTPS_PROXY/ALL_PROXY/NO_PROXY.",
     }
     kind = type(exc).__name__
-    # SDK exceptions may have internal subclasses; retain their public base kind.
+    # SDK exceptions may have internal subclasses; retain their public base
+    # kind. Only the raised exception decides the kind: callers act on it (a
+    # NotFound confirms termination), so a cause must never change it.
     for cls in type(exc).__mro__:
         if cls.__name__ in messages:
             kind = cls.__name__
             break
-    return {"error": {"kind": kind, "message": messages.get(kind, "Modal helper failed. Retry or update gpu.")}}
+    message = messages.get(kind, "Modal helper failed. Retry or update gpu.")
+    chain = causes(exc)
+    if len(chain) > 1 or kind not in messages:
+        message += f" Cause: {' <- '.join(type(e).__name__ for e in chain)}."
+    return {"error": {"kind": kind, "message": message}}
 
 
 def main():

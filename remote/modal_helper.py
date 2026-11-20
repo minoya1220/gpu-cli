@@ -29,7 +29,7 @@ VOLUME_MOUNT = "/gpu-volume"
 OUTPUT_DIR = "outputs"
 # The supervisor writes and commits this marker when its job starts.
 CLAIM_MARKER = ".gpu-cli-claimed"
-# A create makes the Volume, then waits up to --timeout (default 600s) for a
+# A create makes the Volume, then waits up to --timeout (default 1200s) for a
 # Sandbox. An unclaimed Volume this young may belong to a run still starting.
 PENDING_CREATE = timedelta(minutes=15)
 

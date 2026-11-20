@@ -93,6 +93,57 @@ fn dry_run_has_a_size_plan_but_never_creates() {
 }
 
 #[test]
+fn dry_run_in_a_git_subdirectory_plans_only_that_subtree() {
+    let s = sandbox();
+    let project = s.root.join("project");
+    let git = |args: &[&str]| {
+        let status = std::process::Command::new("/usr/bin/git")
+            .arg("-C")
+            .arg(&project)
+            .args(args)
+            .env("HOME", &s.home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+    };
+    git(&["init", "-q"]);
+    std::fs::create_dir(project.join("ncutest")).unwrap();
+    std::fs::write(project.join("ncutest/k.cu"), b"// kernel").unwrap();
+    std::fs::write(project.join("ncutest/run.sh"), b"ncu ./k").unwrap();
+    git(&["add", "train.py", "ncutest/k.cu"]);
+    let out = s
+        .command(&[
+            "run",
+            "--gpu",
+            "RTX 4090",
+            "--expire",
+            "30m",
+            "--dry-run",
+            "--json",
+            "--",
+            "bash",
+            "run.sh",
+        ])
+        .current_dir(project.join("ncutest"))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let object = pyjson::loads(&String::from_utf8_lossy(&out.stdout)).unwrap();
+    let result = object.get("result").unwrap();
+    assert_eq!(result.get("uploaded_files"), Some(&Value::Int(2)));
+    assert_eq!(
+        result.get("files"),
+        Some(&Value::List(vec![Value::str("k.cu"), Value::str("run.sh")]))
+    );
+    assert!(!s.home.join("created").exists());
+}
+
+#[test]
 fn first_interrupt_downloads_and_destroys_before_returning_one_json_object() {
     for sig in [
         rustix::process::Signal::INT,

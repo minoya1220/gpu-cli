@@ -455,8 +455,13 @@ fn pre_start_failures_do_not_wait_for_a_supervisor() {
             .iter()
             .filter(|c| c.program() == "ssh" && c.argv.last().unwrap().contains(" stop "))
             .count();
+        let downloads = calls
+            .iter()
+            .filter(|c| c.program() == "ssh" && c.argv.last().unwrap().starts_with("tar -C "))
+            .count();
         match end {
-            End::UploadFailure => assert_eq!((status, stops), (1, 0)),
+            // Nothing ran before the start request: nothing to ask or fetch.
+            End::UploadFailure => assert_eq!((status, stops, downloads), (0, 0, 0)),
             _ => assert_eq!((status, stops), (3, 1)),
         }
     }

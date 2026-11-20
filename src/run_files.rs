@@ -12,7 +12,6 @@ use crate::process::Cmd;
 #[derive(Debug)]
 pub(crate) struct Upload {
     pub root: PathBuf,
-    pub relative: PathBuf,
     pub files: Vec<PathBuf>,
     pub bytes: u64,
     pub archive: tempfile::NamedTempFile,
@@ -100,46 +99,42 @@ fn git_file(ctx: &Ctx, cwd: &Path, args: &[&str]) -> Result<Option<Vec<u8>>> {
         .transpose()?)
 }
 
+/// The upload is always the current directory's subtree. Inside a git repo,
+/// git decides which of those files are visible (ignores apply, edits and
+/// untracked files are included); elsewhere, a walk minus built-in excludes.
 pub(crate) fn prepare(ctx: &Ctx, cwd: &Path, cap: u64) -> Result<Upload> {
-    let cwd = cwd.canonicalize()?;
+    let root = cwd.canonicalize()?;
     let mut files = Vec::new();
-    let root = match git_file(ctx, &cwd, &["rev-parse", "--show-toplevel"])? {
-        Some(mut bytes) => {
-            if bytes.last() == Some(&b'\n') {
-                bytes.pop();
-            }
-            let root = PathBuf::from(std::ffi::OsString::from_vec(bytes));
-            let stage = git_file(ctx, &root, &["ls-files", "--stage", "-z"])?
-                .ok_or_else(|| Error::msg("Cannot enumerate git files."))?;
-            if stage.split(|b| *b == 0).any(|s| s.starts_with(b"160000 ")) {
-                return Err(Error::usage(
-                    "gpu run does not upload git submodules; upload a project without gitlinks.",
-                ));
-            }
-            let list = git_file(
-                ctx,
-                &root,
-                &[
-                    "ls-files",
-                    "-z",
-                    "--cached",
-                    "--others",
-                    "--exclude-standard",
-                ],
-            )?
-            .ok_or_else(|| Error::msg("Cannot enumerate git-visible files."))?;
-            files.extend(
-                list.split(|b| *b == 0)
-                    .filter(|s| !s.is_empty())
-                    .map(|s| PathBuf::from(std::ffi::OsString::from_vec(s.to_vec()))),
-            );
-            root
+    if git_file(ctx, &root, &["rev-parse", "--show-toplevel"])?.is_some() {
+        // Run from the current directory, ls-files lists only that subtree,
+        // with paths relative to it.
+        let stage = git_file(ctx, &root, &["ls-files", "--stage", "-z"])?
+            .ok_or_else(|| Error::msg("Cannot enumerate git files."))?;
+        if stage.split(|b| *b == 0).any(|s| s.starts_with(b"160000 ")) {
+            return Err(Error::usage(
+                "gpu run does not upload git submodules; upload a project without gitlinks.",
+            ));
         }
-        None => {
-            walk(&cwd, Path::new(""), &mut files)?;
-            cwd.clone()
-        }
-    };
+        let list = git_file(
+            ctx,
+            &root,
+            &[
+                "ls-files",
+                "-z",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+            ],
+        )?
+        .ok_or_else(|| Error::msg("Cannot enumerate git-visible files."))?;
+        files.extend(
+            list.split(|b| *b == 0)
+                .filter(|s| !s.is_empty())
+                .map(|s| PathBuf::from(std::ffi::OsString::from_vec(s.to_vec()))),
+        );
+    } else {
+        walk(&root, Path::new(""), &mut files)?;
+    }
     files.retain(|p| !excluded(p) && fs::symlink_metadata(root.join(p)).is_ok());
     let files: Vec<_> = files
         .into_iter()
@@ -156,7 +151,7 @@ pub(crate) fn prepare(ctx: &Ctx, cwd: &Path, cap: u64) -> Result<Upload> {
         let parent = root.join(path).parent().unwrap().canonicalize()?;
         if !parent.starts_with(&root) {
             return Err(Error::msg(
-                "Upload directory symlink escapes the project root.",
+                "Upload directory symlink escapes the current directory.",
             ));
         }
         let meta = fs::symlink_metadata(root.join(path))?;
@@ -202,13 +197,8 @@ pub(crate) fn prepare(ctx: &Ctx, cwd: &Path, cap: u64) -> Result<Upload> {
     }
     bytes = actual;
     archive.as_file_mut().seek(SeekFrom::Start(0))?;
-    let relative = cwd
-        .strip_prefix(&root)
-        .map_err(|_| Error::msg("Working directory is outside git root."))?
-        .to_path_buf();
     Ok(Upload {
         root,
-        relative,
         files,
         bytes,
         archive,

@@ -18,17 +18,35 @@ use crate::run::{RunBackend, RunPlan};
 pub const HELPER: &str = include_str!("../remote/modal_helper.py");
 pub const KEEPER: &str = include_str!("../remote/modal_keeper.sh");
 const KEEPER_ROOT: &str = "/tmp/gpu-modal-keeper";
+/// Default `gpu run --timeout` for Modal: the first pull of a large registry
+/// image (a ~4GB CUDA devel image) alone can take over 10 minutes, before GPU
+/// scheduling starts. No GPU time is billed before scheduling; Modal's own
+/// scheduling wait is 21 minutes.
+pub const READINESS_TIMEOUT: f64 = 1200.0;
 const VOLUME_MOUNT: &str = "/gpu-volume";
 const OUTPUTS_HOOK: &str = "#!/bin/bash\n# On a VolumeFS v2 mount, syncfs commits. Without sync, writes commit only when\n# the Sandbox terminates gracefully, which preemption may skip.\nif command -v sync >/dev/null 2>&1; then\n    sync -f /gpu-volume 2>/dev/null || sync /gpu-volume 2>/dev/null || echo 'WARNING: output Volume flush failed; only prior commits may survive preemption.' >&2\nelse\n    echo 'WARNING: sync unavailable; outputs commit only when the Sandbox ends, so preemption may lose them.' >&2\nfi\n";
 
 fn client_version() -> &'static str {
-    HELPER
+    pinned_modal(HELPER).expect("bundled helper has an exact Modal dependency pin")
+}
+
+/// The exact `modal==VERSION` (optionally `modal[extras]==VERSION`) pin from a
+/// PEP 723 dependency line, whatever else that list holds.
+fn pinned_modal(source: &str) -> Option<&str> {
+    let list = source
         .lines()
-        .find_map(|line| {
-            line.strip_prefix("# dependencies = [\"modal==")?
-                .strip_suffix("\"]")
-        })
-        .expect("bundled helper has an exact Modal dependency pin")
+        .find_map(|line| line.strip_prefix("# dependencies = ["))?
+        .strip_suffix(']')?;
+    list.split(',').find_map(|item| {
+        let item = item.trim().strip_prefix('"')?.strip_suffix('"')?;
+        let rest = item.strip_prefix("modal")?;
+        let rest = match rest.strip_prefix('[') {
+            Some(extras) => &extras[extras.find(']')? + 1..],
+            None => rest,
+        };
+        rest.strip_prefix("==")
+            .filter(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.'))
+    })
 }
 
 // Names and rate keys only; prices always come from this workspace's live rates.
@@ -453,7 +471,7 @@ impl RunBackend for ModalBackend {
                 return if ctx.interrupts() > 0 {
                     Err(Error::Cancelled(130))
                 } else {
-                    Err(error)
+                    Err(capped_wait(error, wait, timeout))
                 };
             }
         };
@@ -575,6 +593,25 @@ impl RunBackend for ModalBackend {
                 "Cleanup unverified; billing may continue. Next: gpu down {id} --yes; gpu down modal:volume:{} --yes", self.volume)));
         }
         Ok(())
+    }
+}
+
+/// When `--expire` (which keeps 10 minutes for results), not `--timeout`, set
+/// the readiness wait, say so: raising `--timeout` alone would not help.
+fn capped_wait(error: Error, wait: f64, timeout: f64) -> Error {
+    match error {
+        Error::Status(code @ (ExitCode::WaitTimeout | ExitCode::NoCapacity), message)
+            if wait < timeout =>
+        {
+            Error::status(
+                code,
+                format!(
+                    "{message} The readiness wait was {}s, capped by --expire (it keeps 10 minutes for results); a longer --expire allows a longer wait.",
+                    wait.round() as i64
+                ),
+            )
+        }
+        error => error,
     }
 }
 

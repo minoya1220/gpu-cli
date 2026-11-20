@@ -138,6 +138,7 @@ fn helper_typed_failures_and_timeouts_are_redacted() {
         ("InvalidError", 2),
         ("ResourceExhaustedError", 10),
         ("SchedulingTimeout", 10),
+        ("ImageBuildTimeout", 14),
         ("NotFoundError", 16),
         ("ImageBuildError", 1),
         ("VersionError", 1),
@@ -170,6 +171,41 @@ fn helper_typed_failures_and_timeouts_are_redacted() {
         assert_eq!(rates(&ctx).err().unwrap().exit_code(), code);
     }
     assert_eq!(ExitCode::CommandTimeout as i32, 20);
+}
+
+#[test]
+fn modal_pin_is_found_beside_other_dependencies_and_extras() {
+    assert_eq!(client_version(), "1.6.3");
+    for (line, expected) in [
+        (r#"["modal==1.6.3"]"#, Some("1.6.3")),
+        (
+            r#"["modal[api-proxy-support]==1.6.3", "python-socks[asyncio]==3.2.1"]"#,
+            Some("1.6.3"),
+        ),
+        (r#"["python-socks==3.2.1", "modal==1.7.0"]"#, Some("1.7.0")),
+        (r#"["modal>=1.6.3"]"#, None),
+        (r#"["modalx==1.6.3"]"#, None),
+        (r#"["python-socks==3.2.1"]"#, None),
+    ] {
+        let source = format!("# /// script\n# dependencies = {line}\n# ///\n");
+        assert_eq!(pinned_modal(&source), expected, "{line}");
+    }
+}
+
+#[test]
+fn proxy_dependencies_are_pinned_for_the_modal_helper() {
+    let line = HELPER
+        .lines()
+        .find(|l| l.starts_with("# dependencies = ["))
+        .unwrap();
+    // Modal reads HTTP(S)_PROXY/ALL_PROXY and then needs these packages.
+    for pin in [
+        "modal[api-proxy-support]==",
+        "python-socks[asyncio]==",
+        "aiohttp-socks==",
+    ] {
+        assert!(line.contains(&format!("\"{pin}")), "{line}");
+    }
 }
 
 #[test]

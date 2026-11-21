@@ -296,12 +296,15 @@ pub(crate) fn parse(id: &str) -> Result<Box<dyn Instance>> {
 struct Inventory {
     items: Vec<Dict>,
     failed: Vec<(Provider, Error)>,
+    /// Providers whose listing succeeded: only they can prove an instance is gone.
+    answered: Vec<Provider>,
 }
 
 fn inventory(ctx: &Ctx, cfg: &Dict, only: Option<Provider>) -> Result<Inventory> {
     let mut inventory = Inventory {
         items: Vec::new(),
         failed: Vec::new(),
+        answered: Vec::new(),
     };
     let selected = Provider::ALL
         .into_iter()
@@ -312,7 +315,10 @@ fn inventory(ctx: &Ctx, cfg: &Dict, only: Option<Provider>) -> Result<Inventory>
         .collect::<Vec<_>>();
     for &provider in &selected {
         match provider.instances(ctx, cfg) {
-            Ok(items) => inventory.items.extend(items),
+            Ok(items) => {
+                inventory.items.extend(items);
+                inventory.answered.push(provider);
+            }
             // A listing of one provider is not partial: it fails as that provider.
             Err(error) if selected.len() == 1 => return Err(error),
             // Modal credentials without its runtime must not break other inventories.
@@ -321,6 +327,19 @@ fn inventory(ctx: &Ctx, cfg: &Dict, only: Option<Provider>) -> Result<Inventory>
         }
     }
     Ok(inventory)
+}
+
+/// Live instances, and the providers whose answer is complete.
+pub(crate) struct Live {
+    pub items: Vec<Dict>,
+    pub answered: Vec<Provider>,
+}
+
+pub(crate) fn live(ctx: &Ctx, cfg: &Dict) -> Result<Live> {
+    let Inventory {
+        items, answered, ..
+    } = inventory(ctx, cfg, None)?;
+    Ok(Live { items, answered })
 }
 
 fn labels(failed: &[(Provider, Error)]) -> String {
@@ -418,7 +437,9 @@ pub fn ls(
     only: Option<Provider>,
     envelope: bool,
 ) -> Result<()> {
-    let Inventory { items, mut failed } = inventory(ctx, cfg, only)?;
+    let Inventory {
+        items, mut failed, ..
+    } = inventory(ctx, cfg, only)?;
     if json {
         let value = crate::redact::redact(&Value::List(
             items.iter().cloned().map(Value::Dict).collect(),

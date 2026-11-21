@@ -151,6 +151,22 @@ pub enum Command {
         /// Approve permanent destruction without a prompt (required without a terminal)
         #[arg(long)]
         yes: bool,
+        /// Destroy a linked instance even if its latest changes could not be pulled first
+        #[arg(long)]
+        discard_unsynced: bool,
+    },
+    /// Pull GPU changes into the local directory an instance is linked to
+    #[command(after_help = SYNC_HELP)]
+    Sync(SyncFlags),
+    /// Link a running instance to a local directory: copy it up once, then mirror the GPU copy back
+    Link(LinkFlags),
+    /// Stop syncing a local directory with an instance (files stay where they are)
+    Unlink {
+        /// Instance ID (picker if omitted)
+        id: Option<String>,
+        /// Local directory (default: the current directory)
+        #[arg(long)]
+        dir: Option<String>,
     },
     /// Schedule destruction, show or cancel it
     #[command(
@@ -182,8 +198,58 @@ impl Command {
             Self::Stop { .. } => "stop",
             Self::Down { .. } => "down",
             Self::Expire { .. } => "expire",
+            Self::Sync(_) => "sync",
+            Self::Link(_) => "link",
+            Self::Unlink { .. } => "unlink",
         }
     }
+}
+
+const SYNC_HELP: &str = "The GPU copy leads: edit on the instance (Zed or VS Code remote, or Neovim over SSH) and sync pulls its changes here. \
+A local file edited since the last sync is never overwritten: it stays, and the GPU version is saved beside it as NAME.gpu-ID-TIME.EXT. \
+Local files are never deleted. Gitignored GPU files (outputs/) are pulled only with --include.\n\
+Examples: gpu sync; gpu sync --watch; gpu sync 12345678 --include outputs; gpu sync --list";
+
+#[derive(clap::Args, Clone, Debug, Default)]
+pub struct SyncFlags {
+    /// Instance ID (default: the instance linked to the current directory; picker if several)
+    pub id: Option<String>,
+    /// Local directory (default: the current directory)
+    #[arg(long)]
+    pub dir: Option<String>,
+    /// Keep pulling as the GPU copy changes until Ctrl-C
+    #[arg(long, conflicts_with = "list")]
+    pub watch: bool,
+    /// Only show linked instances and whether they are in sync; pull nothing
+    #[arg(long)]
+    pub list: bool,
+    /// Also pull this gitignored path (repeatable, remembered for the link)
+    #[arg(long, value_name = "PATH")]
+    pub include: Vec<String>,
+    /// Do not pull files larger than this (a terminal asks first), e.g. 500M or 2G
+    #[arg(long, default_value = "256M")]
+    pub max_file: String,
+}
+
+#[derive(clap::Args, Clone, Debug, Default)]
+pub struct LinkFlags {
+    /// Instance ID (picker if omitted)
+    pub id: Option<String>,
+    /// Local directory (default: the current directory)
+    #[arg(long)]
+    pub dir: Option<String>,
+    /// Also pull this gitignored path (repeatable, remembered for the link)
+    #[arg(long, value_name = "PATH")]
+    pub include: Vec<String>,
+    /// Maximum size of the one-time copy up, e.g. 500M or 1G
+    #[arg(long, default_value = "1G")]
+    pub max_upload: String,
+    /// Approve uploading over files already in the instance's directory
+    #[arg(long)]
+    pub yes: bool,
+    /// Maximum SSH readiness wait in seconds
+    #[arg(long, default_value = "120", value_parser = positive_seconds)]
+    pub timeout: f64,
 }
 
 #[derive(clap::Args, Debug, Default)]
@@ -237,6 +303,15 @@ pub struct UpFlags {
     /// Launch without cloning a repository
     #[arg(long)]
     pub no_repo: bool,
+    /// Attach a local directory: copy it up once, then mirror the GPU copy back (see gpu sync)
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["repo", "no_repo"])]
+    pub dir: Option<String>,
+    /// With --dir: also pull this gitignored path (repeatable)
+    #[arg(long, value_name = "PATH", requires = "dir")]
+    pub include: Vec<String>,
+    /// With --dir: maximum size of the one-time copy up
+    #[arg(long, default_value = "1G")]
+    pub max_upload: String,
     /// Workspace type (required for non-terminal Vast launches)
     #[arg(long, value_parser = ["container", "vm"])]
     pub mode: Option<String>,

@@ -22,6 +22,7 @@ jiff = "0.2.38"
 iana-time-zone = "=0.1.65"
 regex = "1.13.1"
 rustix = { version = "1.1.6", features = ["event", "fs", "pipe", "process", "stdio", "termios"] }
+sha2 = "0.11.1"
 shlex = "2.0.1"
 signal-hook = "0.4.5"
 tempfile = "3.27.0"
@@ -31,5 +32,4 @@ tar = "0.4"
 [dev-dependencies]
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }
 rustix = { version = "1.1.6", features = ["pty"] }
-sha2 = "0.11.1"
 vt100 = "0.18.1"

@@ -190,3 +190,35 @@ fn autosync_ends_itself_when_its_instance_is_destroyed() {
     );
     assert!(p.files("json").is_empty(), "the link is forgotten");
 }
+
+#[test]
+fn autosync_keeps_running_when_the_include_list_changes() {
+    let p = Project::new();
+    let dir = p.dir.to_str().unwrap();
+    let (code, _, err) = p.gpu(&["link", "7", "--dir", dir, "--yes", "--autosync"]);
+    assert_eq!(code, 0, "{err}");
+    let pid = p.pid().expect("the syncer recorded its process");
+    let log = p.files("log").into_iter().next().expect("a log file");
+    wait_until("the syncer's first log line", 20, || {
+        read(&log).contains("Autosync started:")
+    });
+    // A documented manual sync rewrites the link with a new include list.
+    let (code, out, err) = p.gpu(&["sync", "7", "--dir", dir, "--include", "outputs"]);
+    assert_eq!(code, 0, "{out}{err}");
+    // The syncer goes through several more passes (each `wait` takes 1s)
+    // and is still the one listed as running.
+    std::thread::sleep(Duration::from_secs(4));
+    assert!(alive(pid), "autosync stopped: {}", read(&log));
+    assert!(
+        !read(&log).contains("the link was removed"),
+        "{}",
+        read(&log)
+    );
+    let (code, out, err) = p.gpu(&["sync", "--dir", dir, "--list"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("running"), "{out}");
+    let (code, out, err) = p.gpu(&["sync", "--dir", dir, "--no-autosync"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("Stopped autosync of 7"), "{out}");
+    wait_until("the syncer to exit", 10, || !alive(pid));
+}

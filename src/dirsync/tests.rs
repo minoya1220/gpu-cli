@@ -723,7 +723,9 @@ fn down_refuses_while_ignored_or_secret_gpu_changes_were_not_pulled() {
     // --include cannot bring a secret home, so it is not offered.
     assert!(!said.contains("--include"), "{said}");
     assert!(
-        said.contains(&format!("gpu down {ID} --yes --discard-unsynced")),
+        said.contains(&format!(
+            "They are lost when the instance is destroyed. Next: gpu down {ID} --yes --discard-unsynced"
+        )),
         "{said}"
     );
     assert_eq!(w.gpu(&ctx, &["down", ID, "--yes", "--discard-unsynced"]), 0);

@@ -853,11 +853,11 @@ pub(crate) fn before_down(ctx: &Ctx, id: &str, discard: bool) -> Result<()> {
         };
         let Some(problem) = problem else { continue };
         let warning = format!(
-            "The latest changes on {id} are not all in {}: {problem}. They are lost when the instance is destroyed.",
+            "The latest changes on {id} are not all in {}: {problem}. They are lost when the instance is destroyed",
             link.local.display()
         );
         if discard {
-            ctx.eprintln(&format!("Warning: {warning}"))?;
+            ctx.eprintln(&format!("Warning: {warning}."))?;
             continue;
         }
         if !ctx.interactive() {
@@ -868,7 +868,7 @@ pub(crate) fn before_down(ctx: &Ctx, id: &str, discard: bool) -> Result<()> {
             };
             return Err(Error::usage(warning).next(next));
         }
-        ctx.eprintln(&format!("Warning: {warning}"))?;
+        ctx.eprintln(&format!("Warning: {warning}."))?;
         if !crate::prompt::confirm(ctx, Some("Destroy it anyway?"))? {
             return Err(Error::Cancelled(130));
         }

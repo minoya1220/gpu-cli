@@ -23,6 +23,8 @@ struct Instance {
     /// The instance answers SSH.
     up: AtomicBool,
     destroyed: AtomicBool,
+    /// `gpu expire ID show` reports a deadline.
+    expiry_armed: AtomicBool,
     clock: AtomicU64,
 }
 
@@ -87,6 +89,15 @@ impl Instance {
                     return Ok(Output::failed(255, "ssh: connect: Connection refused"));
                 }
                 let command = cmd.argv.last().unwrap();
+                // The expiry worker never runs here: it would act on this machine.
+                if stdin.starts_with(b"GPU_EXPIRE_SOURCE=") {
+                    assert_eq!(command, &format!("bash -s -- show {ID}"));
+                    return ok(if self.expiry_armed.load(Ordering::SeqCst) {
+                        r#"{"status": "armed", "deadline": 4102444800}"#
+                    } else {
+                        r#"{"status": "none"}"#
+                    });
+                }
                 if command == "true" {
                     return ok("");
                 }
@@ -173,6 +184,7 @@ impl Twin {
             root: remote.path().to_path_buf(),
             up: AtomicBool::new(true),
             destroyed: AtomicBool::new(false),
+            expiry_armed: AtomicBool::new(false),
             clock: AtomicU64::new(0),
         });
         let fake = instance.clone();
@@ -238,7 +250,9 @@ impl Twin {
     }
 
     fn link(&self, ctx: &Ctx) -> Link {
-        super::link(ctx, ID, &self.dir(), &[], "1G", true, 5.0).unwrap()
+        super::link(ctx, ID, &self.dir(), &[], "1G", true, 5.0)
+            .unwrap()
+            .0
     }
 
     fn gpu(&self, ctx: &Ctx, args: &[&str]) -> i32 {
@@ -251,6 +265,16 @@ impl Twin {
         let mut all = vec!["sync", "--dir", dir.to_str().unwrap()];
         all.extend_from_slice(args);
         main(ctx, &all)
+    }
+
+    fn git_init(&self) {
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(self.dir())
+            .output()
+            .unwrap()
+            .status
+            .success());
     }
 
     fn state(&self) -> Vec<Link> {
@@ -485,16 +509,7 @@ fn gitignored_and_secret_files_on_the_gpu_are_not_pulled_until_included() {
     let w = Twin::new();
     w.put(".gitignore", "outputs/\n*.log\n");
     w.put("train.py", "t\n");
-    let init = |args: &[&str]| {
-        assert!(std::process::Command::new("git")
-            .args(args)
-            .current_dir(w.dir())
-            .output()
-            .unwrap()
-            .status
-            .success());
-    };
-    init(&["init", "-q"]);
+    w.git_init();
     let ctx = w.ctx();
     w.link(&ctx);
     out(&ctx);
@@ -664,6 +679,63 @@ fn down_treats_files_it_could_not_pull_as_unsynced() {
 }
 
 #[test]
+fn down_refuses_while_ignored_or_secret_gpu_changes_were_not_pulled() {
+    let w = Twin::new();
+    w.put(".gitignore", "outputs/\n");
+    w.put("train.py", "t\n");
+    w.git_init();
+    let ctx = w.ctx();
+    w.link(&ctx);
+    w.remote_put("outputs/model.pt", "weights\n");
+    w.remote_put(".env", "TOKEN=1\n");
+    assert_eq!(w.gpu(&ctx, &["down", ID, "--yes"]), 2);
+    let said = err(&ctx);
+    assert!(
+        said.contains("2 files changed on the GPU but not pulled"),
+        "{said}"
+    );
+    assert!(said.contains(".env, outputs/model.pt"), "{said}");
+    assert!(
+        said.contains(&format!("gpu sync {ID} --include PATH")),
+        "{said}"
+    );
+    assert!(said.contains("--discard-unsynced"), "{said}");
+    assert!(!w.instance.destroyed.load(Ordering::SeqCst));
+    // Including the folder brings the checkpoint home; the secret stays, so
+    // only an explicit say-so destroys.
+    assert_eq!(
+        w.sync(&ctx, &[ID, "--include", "outputs"]),
+        0,
+        "{}",
+        err(&ctx)
+    );
+    assert_eq!(w.local("outputs/model.pt"), "weights\n");
+    assert_eq!(w.gpu(&ctx, &["down", ID, "--yes"]), 2);
+    let said = err(&ctx);
+    assert!(
+        said.contains("1 file changed on the GPU but not pulled"),
+        "{said}"
+    );
+    assert!(!said.contains("model.pt"), "{said}");
+    assert_eq!(w.gpu(&ctx, &["down", ID, "--yes", "--discard-unsynced"]), 0);
+    assert!(w.instance.destroyed.load(Ordering::SeqCst));
+}
+
+#[test]
+fn down_lists_only_the_first_unpulled_paths() {
+    let problem = super::unpulled_problem(
+        0,
+        &(1..=7).map(|n| format!("out/{n}.pt")).collect::<Vec<_>>(),
+    )
+    .unwrap();
+    assert!(
+        problem.ends_with("(out/1.pt, out/2.pt, out/3.pt, out/4.pt, out/5.pt and 2 more)"),
+        "{problem}"
+    );
+    assert_eq!(super::unpulled_problem(0, &[]), None);
+}
+
+#[test]
 fn down_of_an_unlinked_instance_makes_no_sync_calls() {
     let w = Twin::new();
     let ctx = w.ctx();
@@ -775,6 +847,24 @@ fn expiry_on_a_linked_instance_warns_about_the_missing_final_pull() {
     );
     super::expiry_notice(&ctx, "99").unwrap();
     assert_eq!(err(&ctx), "");
+}
+
+#[test]
+fn link_warns_when_the_instance_already_has_expiry_armed() {
+    let w = Twin::new();
+    w.put("a.py", "a\n");
+    let ctx = w.ctx();
+    let dir = w.dir();
+    let args = ["link", ID, "--dir", dir.to_str().unwrap(), "--yes"];
+    assert_eq!(w.gpu(&ctx, &args), 0, "{}", err(&ctx));
+    assert!(!err(&ctx).contains("Auto-destroy"));
+    w.instance.expiry_armed.store(true, Ordering::SeqCst);
+    assert_eq!(w.gpu(&ctx, &args), 0, "{}", err(&ctx));
+    let said = err(&ctx);
+    assert!(
+        said.contains("deletes the GPU copy without pulling"),
+        "{said}"
+    );
 }
 
 #[test]

@@ -350,6 +350,14 @@ pub fn queue_for_node(cfg: &Dict, id: &TpuId, node: &Dict) -> Result<Queue> {
     Ok(queue)
 }
 
+/// Whether a deletion task is pending for `id`.
+pub fn armed(ctx: &Ctx, cfg: &Dict, id: &TpuId) -> Result<bool> {
+    let node = gcp::find_node(&gcp::nodes(ctx, &id.project, &id.zone)?, &id.name)
+        .cloned()
+        .unwrap_or_default();
+    queue_for_node(cfg, id, &node)?.has_tasks(ctx, id)
+}
+
 pub fn manage(
     ctx: &Ctx,
     cfg: &Dict,

@@ -44,6 +44,9 @@ pub(crate) struct Outcome {
     pub kept_deleted: Vec<String>,
     /// Listed files rsync could not copy.
     pub missing: Vec<String>,
+    /// Changed files a pull leaves on the instance: ignored by git and not
+    /// included, or secret-looking.
+    pub filtered: Vec<String>,
 }
 
 impl Outcome {
@@ -351,7 +354,10 @@ pub(crate) fn pull(
     options: &PullOptions,
 ) -> Result<Outcome> {
     let mut outcome = Outcome::default();
-    let wanted = visible(ctx, link, changed_paths(base, &listing.files));
+    let changed = changed_paths(base, &listing.files);
+    let wanted = visible(ctx, link, changed.clone());
+    let shown: BTreeSet<&String> = wanted.iter().collect();
+    outcome.filtered = changed.into_iter().filter(|p| !shown.contains(p)).collect();
     let mut to_pull = Vec::new();
     let mut large = Vec::new();
     for path in wanted {

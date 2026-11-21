@@ -167,7 +167,7 @@ pub(crate) fn link(
     max_upload: &str,
     yes: bool,
     timeout: f64,
-) -> Result<Link> {
+) -> Result<(Link, String)> {
     refuse_modal(id)?;
     let include = normalize_includes(include)?;
     let upload = preflight(ctx, dir, max_upload)?;
@@ -219,7 +219,7 @@ pub(crate) fn link(
         link.remote,
         describe_upload(&upload)
     ))?;
-    Ok(link)
+    Ok((link, remote.alias))
 }
 
 /// `gpu link`.
@@ -228,7 +228,7 @@ pub(crate) fn link_command(ctx: &Ctx, cfg: &Dict, flags: &LinkFlags) -> Result<(
     let Some(id) = crate::provider::selected_id(ctx, cfg, flags.id.as_deref(), "link")? else {
         return Ok(());
     };
-    link(
+    let (_, alias) = link(
         ctx,
         &id,
         &dir,
@@ -236,8 +236,14 @@ pub(crate) fn link_command(ctx: &Ctx, cfg: &Dict, flags: &LinkFlags) -> Result<(
         &flags.max_upload,
         flags.yes,
         flags.timeout,
-    )
-    .map(drop)
+    )?;
+    if crate::provider::parse(&id)?
+        .expiry_armed(ctx, cfg, &alias)
+        .unwrap_or(false)
+    {
+        expiry_notice(ctx, &id)?;
+    }
+    Ok(())
 }
 
 /// After `gpu up --dir` created `id`: wait for SSH, copy the directory up.
@@ -765,6 +771,33 @@ pub(crate) fn unlink_command(
     Ok(())
 }
 
+/// What `gpu down` would lose: files a pull could not copy, and changed files
+/// it leaves on the instance (ignored by git or secret-looking).
+fn unpulled_problem(failed: usize, filtered: &[String]) -> Option<String> {
+    let mut parts = Vec::new();
+    if failed > 0 {
+        parts.push(format!("{} could not be pulled", plural(failed, "file")));
+    }
+    if !filtered.is_empty() {
+        let mut shown = filtered
+            .iter()
+            .take(5)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        if filtered.len() > 5 {
+            shown.push_str(&format!(" and {} more", filtered.len() - 5));
+        }
+        parts.push(format!(
+            "{} changed on the GPU but not pulled because git ignores {} or {} secret-looking ({shown})",
+            plural(filtered.len(), "file"),
+            if filtered.len() == 1 { "it" } else { "them" },
+            if filtered.len() == 1 { "it looks" } else { "they look" },
+        ));
+    }
+    (!parts.is_empty()).then(|| parts.join("; "))
+}
+
 /// Before `gpu down` destroys `id`: pull what the local copy has not seen,
 /// or refuse to go on without an explicit say-so.
 pub(crate) fn before_down(ctx: &Ctx, id: &str, discard: bool) -> Result<()> {
@@ -786,14 +819,17 @@ pub(crate) fn before_down(ctx: &Ctx, id: &str, discard: bool) -> Result<()> {
             };
             pull_once(ctx, &remote, &link, &options, None)
         };
-        let problem = match attempt() {
+        let (problem, filtered) = match attempt() {
             Ok(outcome) => {
                 say_outcome(ctx, &link, &outcome)?;
                 ctx.result("final_pull", Value::Bool(true));
                 let left = outcome.large.len() + outcome.missing.len();
-                (left > 0).then(|| format!("{} could not be pulled", plural(left, "file")))
+                (
+                    unpulled_problem(left, &outcome.filtered),
+                    !outcome.filtered.is_empty(),
+                )
             }
-            Err(error) => Some(error.summary().to_string()),
+            Err(error) => (Some(error.summary().to_string()), false),
         };
         let Some(problem) = problem else { continue };
         let warning = format!(
@@ -805,9 +841,13 @@ pub(crate) fn before_down(ctx: &Ctx, id: &str, discard: bool) -> Result<()> {
             continue;
         }
         if !ctx.interactive() {
-            return Err(Error::usage(warning).next(format!(
-                "gpu sync {id}, or gpu down {id} --yes --discard-unsynced"
-            )));
+            let sync = if filtered {
+                format!("gpu sync {id} --include PATH")
+            } else {
+                format!("gpu sync {id}")
+            };
+            return Err(Error::usage(warning)
+                .next(format!("{sync}, or gpu down {id} --yes --discard-unsynced")));
         }
         ctx.eprintln(&format!("Warning: {warning}"))?;
         if !crate::prompt::confirm(ctx, Some("Destroy it anyway?"))? {

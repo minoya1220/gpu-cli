@@ -691,10 +691,12 @@ fn down_refuses_while_ignored_or_secret_gpu_changes_were_not_pulled() {
     assert_eq!(w.gpu(&ctx, &["down", ID, "--yes"]), 2);
     let said = err(&ctx);
     assert!(
-        said.contains("2 files changed on the GPU but not pulled"),
+        said.contains(
+            "1 file changed on the GPU but not pulled because git ignores it (outputs/model.pt)"
+        ),
         "{said}"
     );
-    assert!(said.contains(".env, outputs/model.pt"), "{said}");
+    assert!(said.contains("because it looks like a secret"), "{said}");
     assert!(
         said.contains(&format!("gpu sync {ID} --include PATH")),
         "{said}"
@@ -713,10 +715,17 @@ fn down_refuses_while_ignored_or_secret_gpu_changes_were_not_pulled() {
     assert_eq!(w.gpu(&ctx, &["down", ID, "--yes"]), 2);
     let said = err(&ctx);
     assert!(
-        said.contains("1 file changed on the GPU but not pulled"),
+        said.contains("never pulled because it looks like a secret"),
         "{said}"
     );
+    assert!(said.contains("(.env)"), "{said}");
     assert!(!said.contains("model.pt"), "{said}");
+    // --include cannot bring a secret home, so it is not offered.
+    assert!(!said.contains("--include"), "{said}");
+    assert!(
+        said.contains(&format!("gpu down {ID} --yes --discard-unsynced")),
+        "{said}"
+    );
     assert_eq!(w.gpu(&ctx, &["down", ID, "--yes", "--discard-unsynced"]), 0);
     assert!(w.instance.destroyed.load(Ordering::SeqCst));
 }
@@ -726,13 +735,14 @@ fn down_lists_only_the_first_unpulled_paths() {
     let problem = super::unpulled_problem(
         0,
         &(1..=7).map(|n| format!("out/{n}.pt")).collect::<Vec<_>>(),
+        &[],
     )
     .unwrap();
     assert!(
         problem.ends_with("(out/1.pt, out/2.pt, out/3.pt, out/4.pt, out/5.pt and 2 more)"),
         "{problem}"
     );
-    assert_eq!(super::unpulled_problem(0, &[]), None);
+    assert_eq!(super::unpulled_problem(0, &[], &[]), None);
 }
 
 #[test]

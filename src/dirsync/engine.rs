@@ -44,9 +44,10 @@ pub(crate) struct Outcome {
     pub kept_deleted: Vec<String>,
     /// Listed files rsync could not copy.
     pub missing: Vec<String>,
-    /// Changed files a pull leaves on the instance: ignored by git and not
-    /// included, or secret-looking.
-    pub filtered: Vec<String>,
+    /// Changed files ignored by git and not included; `--include` pulls them.
+    pub ignored: Vec<String>,
+    /// Changed files no pull brings: secret-looking or unsafe names.
+    pub unpullable: Vec<String>,
 }
 
 impl Outcome {
@@ -140,20 +141,30 @@ fn git_ignored(ctx: &Ctx, dir: &Path, paths: &[&String]) -> BTreeSet<String> {
     }
 }
 
-/// Which of the changed paths a pull may bring home: not secret-looking, and
-/// not ignored by git unless the link includes them.
-fn visible(ctx: &Ctx, link: &Link, changed: Vec<String>) -> Vec<String> {
-    let candidates: Vec<String> = changed
+/// Changed paths sorted by whether a pull may bring them home.
+struct Visible {
+    wanted: Vec<String>,
+    ignored: Vec<String>,
+    unpullable: Vec<String>,
+}
+
+/// A pull brings changed paths that are not secret-looking, and not ignored
+/// by git unless the link includes them.
+fn visible(ctx: &Ctx, link: &Link, changed: Vec<String>) -> Visible {
+    let (candidates, unpullable): (Vec<String>, Vec<String>) = changed
         .into_iter()
-        .filter(|p| store::safe_relative(p) && !secret_path(Path::new(p)))
-        .collect();
+        .partition(|p| store::safe_relative(p) && !secret_path(Path::new(p)));
     let included = |p: &String| link.include.iter().any(|inc| under(p, inc));
     let to_check: Vec<&String> = candidates.iter().filter(|p| !included(p)).collect();
     let ignored = git_ignored(ctx, &link.local, &to_check);
-    candidates
+    let (wanted, ignored) = candidates
         .into_iter()
-        .filter(|p| included(p) || !ignored.contains(p))
-        .collect()
+        .partition(|p| included(p) || !ignored.contains(p));
+    Visible {
+        wanted,
+        ignored,
+        unpullable,
+    }
 }
 
 /// Paths in `files` that differ from the baseline (new, or another size or time).
@@ -170,7 +181,9 @@ pub(crate) fn changed_paths(base: &Base, files: &Manifest) -> Vec<String> {
 
 /// How many visible files on the instance a pull would bring.
 pub(crate) fn behind(ctx: &Ctx, link: &Link, base: &Base, listing: &Listing) -> usize {
-    visible(ctx, link, changed_paths(base, &listing.files)).len()
+    visible(ctx, link, changed_paths(base, &listing.files))
+        .wanted
+        .len()
 }
 
 /// The short tag naming an instance in saved-copy file names.
@@ -354,10 +367,13 @@ pub(crate) fn pull(
     options: &PullOptions,
 ) -> Result<Outcome> {
     let mut outcome = Outcome::default();
-    let changed = changed_paths(base, &listing.files);
-    let wanted = visible(ctx, link, changed.clone());
-    let shown: BTreeSet<&String> = wanted.iter().collect();
-    outcome.filtered = changed.into_iter().filter(|p| !shown.contains(p)).collect();
+    let Visible {
+        wanted,
+        ignored,
+        unpullable,
+    } = visible(ctx, link, changed_paths(base, &listing.files));
+    outcome.ignored = ignored;
+    outcome.unpullable = unpullable;
     let mut to_pull = Vec::new();
     let mut large = Vec::new();
     for path in wanted {

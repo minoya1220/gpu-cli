@@ -771,28 +771,40 @@ pub(crate) fn unlink_command(
     Ok(())
 }
 
+/// A short list of `paths`.
+fn some_paths(paths: &[String]) -> String {
+    let mut shown = paths.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
+    if paths.len() > 5 {
+        shown.push_str(&format!(" and {} more", paths.len() - 5));
+    }
+    shown
+}
+
 /// What `gpu down` would lose: files a pull could not copy, and changed files
-/// it leaves on the instance (ignored by git or secret-looking).
-fn unpulled_problem(failed: usize, filtered: &[String]) -> Option<String> {
+/// it leaves on the instance.
+fn unpulled_problem(failed: usize, ignored: &[String], unpullable: &[String]) -> Option<String> {
     let mut parts = Vec::new();
     if failed > 0 {
         parts.push(format!("{} could not be pulled", plural(failed, "file")));
     }
-    if !filtered.is_empty() {
-        let mut shown = filtered
-            .iter()
-            .take(5)
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(", ");
-        if filtered.len() > 5 {
-            shown.push_str(&format!(" and {} more", filtered.len() - 5));
-        }
+    if !ignored.is_empty() {
         parts.push(format!(
-            "{} changed on the GPU but not pulled because git ignores {} or {} secret-looking ({shown})",
-            plural(filtered.len(), "file"),
-            if filtered.len() == 1 { "it" } else { "them" },
-            if filtered.len() == 1 { "it looks" } else { "they look" },
+            "{} changed on the GPU but not pulled because git ignores {} ({})",
+            plural(ignored.len(), "file"),
+            if ignored.len() == 1 { "it" } else { "them" },
+            some_paths(ignored)
+        ));
+    }
+    if !unpullable.is_empty() {
+        parts.push(format!(
+            "{} changed on the GPU but never pulled because {}; copy by hand what you need ({})",
+            plural(unpullable.len(), "file"),
+            if unpullable.len() == 1 {
+                "it looks like a secret"
+            } else {
+                "they look like secrets"
+            },
+            some_paths(unpullable)
         ));
     }
     (!parts.is_empty()).then(|| parts.join("; "))
@@ -819,17 +831,25 @@ pub(crate) fn before_down(ctx: &Ctx, id: &str, discard: bool) -> Result<()> {
             };
             pull_once(ctx, &remote, &link, &options, None)
         };
-        let (problem, filtered) = match attempt() {
+        let (problem, sync) = match attempt() {
             Ok(outcome) => {
                 say_outcome(ctx, &link, &outcome)?;
                 ctx.result("final_pull", Value::Bool(true));
                 let left = outcome.large.len() + outcome.missing.len();
+                let sync = if !outcome.ignored.is_empty() {
+                    Some(format!("gpu sync {id} --include PATH"))
+                } else {
+                    (left > 0).then(|| format!("gpu sync {id}"))
+                };
                 (
-                    unpulled_problem(left, &outcome.filtered),
-                    !outcome.filtered.is_empty(),
+                    unpulled_problem(left, &outcome.ignored, &outcome.unpullable),
+                    sync,
                 )
             }
-            Err(error) => (Some(error.summary().to_string()), false),
+            Err(error) => (
+                Some(error.summary().to_string()),
+                Some(format!("gpu sync {id}")),
+            ),
         };
         let Some(problem) = problem else { continue };
         let warning = format!(
@@ -841,13 +861,12 @@ pub(crate) fn before_down(ctx: &Ctx, id: &str, discard: bool) -> Result<()> {
             continue;
         }
         if !ctx.interactive() {
-            let sync = if filtered {
-                format!("gpu sync {id} --include PATH")
-            } else {
-                format!("gpu sync {id}")
+            let discard = format!("gpu down {id} --yes --discard-unsynced");
+            let next = match sync {
+                Some(sync) => format!("{sync}, or {discard}"),
+                None => discard,
             };
-            return Err(Error::usage(warning)
-                .next(format!("{sync}, or gpu down {id} --yes --discard-unsynced")));
+            return Err(Error::usage(warning).next(next));
         }
         ctx.eprintln(&format!("Warning: {warning}"))?;
         if !crate::prompt::confirm(ctx, Some("Destroy it anyway?"))? {

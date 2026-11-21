@@ -61,7 +61,11 @@ pub(crate) fn open(
         }
     };
     check_editor(&ctx.env, &editor)?;
-    let target = connect(&editor)?;
+    let mut target = connect(&editor)?;
+    // A directory linked to this instance is the project: open its twin.
+    if let Some(directory) = crate::dirsync::linked_directory(&ctx.env, id) {
+        target.directory = directory;
+    }
     ctx.result("ssh_alias", Value::str(&target.alias));
     ctx.result("directory", Value::str(&target.directory));
     ctx.result("editor", Value::str(&editor));
@@ -92,7 +96,7 @@ pub(crate) fn offer_after_launch(
     cfg: &crate::pyjson::Dict,
     instance: &dyn crate::provider::Instance,
 ) -> Result<()> {
-    if !ctx.interactive() {
+    if !ctx.interactive() || ctx.editor_offer_deferred() {
         return Ok(());
     }
     let editor = crate::picker::pick(ctx, after_up_screen(last_editor(&ctx.env)))?;

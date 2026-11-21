@@ -12,6 +12,8 @@ pub(crate) struct CommandOutput {
     pub result: Dict,
     pub ssh_timeout: Option<f64>,
     pub command_timeout: Option<f64>,
+    /// `gpu up --dir`: offer the editor once the directory has been copied.
+    pub defer_editor_offer: bool,
 }
 
 pub(crate) fn envelope(ctx: &Ctx, command: &str, outcome: &Result<()>) -> Value {

@@ -152,6 +152,11 @@ pub(crate) trait Instance {
         Err(self.unsupported())
     }
 
+    /// Whether an auto-destroy deadline is set; `alias` is its SSH alias.
+    fn expiry_armed(&self, _ctx: &Ctx, _cfg: &Dict, _alias: &str) -> Result<bool> {
+        Ok(false)
+    }
+
     fn edit(&self, _ctx: &Ctx, _editor: Option<&str>, _nvim_config: Option<&Value>) -> Result<()> {
         Err(self.unsupported())
     }
@@ -185,6 +190,13 @@ impl Instance for VastId {
         deadline: Option<Timestamp>,
     ) -> Result<()> {
         crate::vast::instance::expire_instance(ctx, &self.0, action, deadline).map(drop)
+    }
+    fn expiry_armed(&self, ctx: &Ctx, _cfg: &Dict, alias: &str) -> Result<bool> {
+        let reply = crate::vast::expiry::manage_expiry(ctx, alias, &self.0, "show", None)?;
+        Ok(matches!(
+            reply.get("status").and_then(Value::as_str),
+            Some("armed" | "retrying")
+        ))
     }
     fn edit(&self, ctx: &Ctx, editor: Option<&str>, nvim_config: Option<&Value>) -> Result<()> {
         crate::editors::open(ctx, &self.0, editor, nvim_config, |_| {
@@ -223,6 +235,9 @@ impl Instance for crate::gcp::TpuId {
         deadline: Option<Timestamp>,
     ) -> Result<()> {
         crate::gcp::expiry::manage(ctx, cfg, self, action, deadline)
+    }
+    fn expiry_armed(&self, ctx: &Ctx, cfg: &Dict, _alias: &str) -> Result<bool> {
+        crate::gcp::expiry::armed(ctx, cfg, self)
     }
     fn edit(&self, ctx: &Ctx, editor: Option<&str>, nvim_config: Option<&Value>) -> Result<()> {
         ctx.require_gcloud()?;
@@ -296,12 +311,15 @@ pub(crate) fn parse(id: &str) -> Result<Box<dyn Instance>> {
 struct Inventory {
     items: Vec<Dict>,
     failed: Vec<(Provider, Error)>,
+    /// Providers whose listing succeeded: only they can prove an instance is gone.
+    answered: Vec<Provider>,
 }
 
 fn inventory(ctx: &Ctx, cfg: &Dict, only: Option<Provider>) -> Result<Inventory> {
     let mut inventory = Inventory {
         items: Vec::new(),
         failed: Vec::new(),
+        answered: Vec::new(),
     };
     let selected = Provider::ALL
         .into_iter()
@@ -312,7 +330,10 @@ fn inventory(ctx: &Ctx, cfg: &Dict, only: Option<Provider>) -> Result<Inventory>
         .collect::<Vec<_>>();
     for &provider in &selected {
         match provider.instances(ctx, cfg) {
-            Ok(items) => inventory.items.extend(items),
+            Ok(items) => {
+                inventory.items.extend(items);
+                inventory.answered.push(provider);
+            }
             // A listing of one provider is not partial: it fails as that provider.
             Err(error) if selected.len() == 1 => return Err(error),
             // Modal credentials without its runtime must not break other inventories.
@@ -321,6 +342,19 @@ fn inventory(ctx: &Ctx, cfg: &Dict, only: Option<Provider>) -> Result<Inventory>
         }
     }
     Ok(inventory)
+}
+
+/// Live instances, and the providers whose answer is complete.
+pub(crate) struct Live {
+    pub items: Vec<Dict>,
+    pub answered: Vec<Provider>,
+}
+
+pub(crate) fn live(ctx: &Ctx, cfg: &Dict) -> Result<Live> {
+    let Inventory {
+        items, answered, ..
+    } = inventory(ctx, cfg, None)?;
+    Ok(Live { items, answered })
 }
 
 fn labels(failed: &[(Provider, Error)]) -> String {
@@ -418,7 +452,9 @@ pub fn ls(
     only: Option<Provider>,
     envelope: bool,
 ) -> Result<()> {
-    let Inventory { items, mut failed } = inventory(ctx, cfg, only)?;
+    let Inventory {
+        items, mut failed, ..
+    } = inventory(ctx, cfg, only)?;
     if json {
         let value = crate::redact::redact(&Value::List(
             items.iter().cloned().map(Value::Dict).collect(),

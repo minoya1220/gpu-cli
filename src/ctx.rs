@@ -456,6 +456,14 @@ impl Ctx {
         self.output.lock_recover().command_timeout
     }
 
+    pub(crate) fn defer_editor_offer(&self) {
+        self.output.lock_recover().defer_editor_offer = true;
+    }
+
+    pub(crate) fn editor_offer_deferred(&self) -> bool {
+        self.output.lock_recover().defer_editor_offer
+    }
+
     pub(crate) fn set_ssh_timeout(&self, seconds: f64) {
         self.output.lock_recover().ssh_timeout = Some(seconds);
     }

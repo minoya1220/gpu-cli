@@ -1,5 +1,5 @@
 //! Job upload manifest and binary archive transport. No cloud calls here.
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::ffi::OsStringExt;
@@ -15,6 +15,11 @@ pub(crate) struct Upload {
     pub files: Vec<PathBuf>,
     pub bytes: u64,
     pub archive: tempfile::NamedTempFile,
+    /// Regular files' size and modification time (ns) read before archiving,
+    /// so an edit during the upload can only look newer than what was sent.
+    pub stats: BTreeMap<PathBuf, (u64, i128)>,
+    /// Secret-looking files left out, when the caller asked for that.
+    pub skipped_secrets: Vec<PathBuf>,
 }
 
 pub(crate) fn relative(path: &Path) -> bool {
@@ -22,6 +27,11 @@ pub(crate) fn relative(path: &Path) -> bool {
 }
 
 pub(crate) fn max_bytes(text: &str) -> Result<u64> {
+    size_bytes(text, "--max-upload")
+}
+
+/// A positive byte count: plain bytes or a K/M/G size, such as `1G`.
+pub(crate) fn size_bytes(text: &str, flag: &str) -> Result<u64> {
     let upper = text.to_ascii_uppercase();
     let (number, scale) = match upper.as_bytes().last() {
         Some(b'K') => (&upper[..upper.len() - 1], 1024u64),
@@ -34,7 +44,11 @@ pub(crate) fn max_bytes(text: &str) -> Result<u64> {
         .ok()
         .and_then(|n| n.checked_mul(scale))
         .filter(|n| *n > 0)
-        .ok_or_else(|| Error::usage("--max-upload must be positive bytes or a K/M/G size, e.g. 1G"))
+        .ok_or_else(|| {
+            Error::usage(format!(
+                "{flag} must be positive bytes or a K/M/G size, e.g. 1G"
+            ))
+        })
 }
 
 pub(crate) fn secret_path(path: &Path) -> bool {
@@ -103,6 +117,12 @@ fn git_file(ctx: &Ctx, cwd: &Path, args: &[&str]) -> Result<Option<Vec<u8>>> {
 /// git decides which of those files are visible (ignores apply, edits and
 /// untracked files are included); elsewhere, a walk minus built-in excludes.
 pub(crate) fn prepare(ctx: &Ctx, cwd: &Path, cap: u64) -> Result<Upload> {
+    prepare_with(ctx, cwd, cap, false)
+}
+
+/// `prepare`; with `drop_secrets`, secret-looking files are left out (and
+/// listed in `skipped_secrets`) instead of being the caller's problem.
+pub(crate) fn prepare_with(ctx: &Ctx, cwd: &Path, cap: u64, drop_secrets: bool) -> Result<Upload> {
     let root = cwd.canonicalize()?;
     let mut files = Vec::new();
     if git_file(ctx, &root, &["rev-parse", "--show-toplevel"])?.is_some() {
@@ -112,7 +132,7 @@ pub(crate) fn prepare(ctx: &Ctx, cwd: &Path, cap: u64) -> Result<Upload> {
             .ok_or_else(|| Error::msg("Cannot enumerate git files."))?;
         if stage.split(|b| *b == 0).any(|s| s.starts_with(b"160000 ")) {
             return Err(Error::usage(
-                "gpu run does not upload git submodules; upload a project without gitlinks.",
+                "gpu does not upload git submodules; upload a project without gitlinks.",
             ));
         }
         let list = git_file(
@@ -136,12 +156,19 @@ pub(crate) fn prepare(ctx: &Ctx, cwd: &Path, cap: u64) -> Result<Upload> {
         walk(&root, Path::new(""), &mut files)?;
     }
     files.retain(|p| !excluded(p) && fs::symlink_metadata(root.join(p)).is_ok());
+    let mut skipped_secrets = Vec::new();
+    if drop_secrets {
+        let (secret, rest): (Vec<_>, Vec<_>) = files.into_iter().partition(|p| secret_path(p));
+        files = rest;
+        skipped_secrets = secret;
+    }
     let files: Vec<_> = files
         .into_iter()
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
     let mut sizes = Vec::new();
+    let mut stats = BTreeMap::new();
     let mut bytes = 0u64;
     for path in &files {
         if !relative(path) {
@@ -163,6 +190,9 @@ pub(crate) fn prepare(ctx: &Ctx, cwd: &Path, cap: u64) -> Result<Upload> {
         bytes = bytes
             .checked_add(meta.len())
             .ok_or_else(|| Error::msg("Upload size overflow."))?;
+        if meta.is_file() {
+            stats.insert(path.clone(), (meta.len(), mtime_ns(&meta)));
+        }
         sizes.push((meta.len(), path));
     }
     if bytes > cap {
@@ -202,7 +232,15 @@ pub(crate) fn prepare(ctx: &Ctx, cwd: &Path, cap: u64) -> Result<Upload> {
         files,
         bytes,
         archive,
+        stats,
+        skipped_secrets,
     })
+}
+
+/// Modification time in nanoseconds since the epoch.
+pub(crate) fn mtime_ns(meta: &fs::Metadata) -> i128 {
+    use std::os::unix::fs::MetadataExt;
+    i128::from(meta.mtime()) * 1_000_000_000 + i128::from(meta.mtime_nsec())
 }
 
 /// tar's unpack_in rejects traversal and symlink-parent escapes. Restrict the

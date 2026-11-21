@@ -7,6 +7,7 @@ mod cache;
 pub(crate) mod cli;
 pub mod config;
 pub mod ctx;
+pub(crate) mod dirsync;
 pub(crate) mod editors;
 pub mod error;
 pub mod expiry;
@@ -113,6 +114,16 @@ fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
     let mut cfg = config::load_config(&ctx.env)?;
     ctx.set_gcp_ready(gcp::setup::gcp_ready(&cfg));
     if let Command::Up(flags) = &mut command {
+        // A directory to attach replaces the repository pick.
+        if let Some(dir) = &flags.dir {
+            let dir = dirsync::resolve_dir(Some(dir))?;
+            if !flags.dry_run {
+                dirsync::preflight(ctx, &dir, &flags.max_upload)?;
+            }
+            flags.dir = Some(dir.to_string_lossy().into_owned());
+            flags.no_repo = true;
+            ctx.defer_editor_offer();
+        }
         guardrails::defaults(flags, &cfg)?;
         if flags.target().amd() {
             amd::validate_up(flags)?;
@@ -217,30 +228,25 @@ fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
                 ctx.set_ssh_timeout(timeout);
             }
             ctx.result("dry_run", pyjson::Value::Bool(flags.dry_run));
-            if flags.target().amd() {
-                let launched = amd::up(ctx, &flags, &cfg)?;
-                return remote::after_up(
-                    ctx,
-                    launched,
-                    wait && !flags.dry_run,
-                    timeout,
-                    wait_setup,
-                );
-            }
-            if flags.target() == provider::Provider::Gcp {
-                let launched =
-                    gcp::launch(ctx, &gcp::TpuArgs::from_flags(&flags)?, &cfg, up_deadline)?;
-                return remote::after_up(
-                    ctx,
-                    launched,
-                    wait && !flags.dry_run,
-                    timeout,
-                    wait_setup,
-                );
-            }
             let dry_run = flags.dry_run;
-            let launched = launch::launch(ctx, &UpArgs::from(&flags), &cfg, up_deadline)?;
-            remote::after_up(ctx, launched, wait && !dry_run, timeout, wait_setup)
+            let launched = if flags.target().amd() {
+                amd::up(ctx, &flags, &cfg)?
+            } else if flags.target() == provider::Provider::Gcp {
+                gcp::launch(ctx, &gcp::TpuArgs::from_flags(&flags)?, &cfg, up_deadline)?
+            } else {
+                launch::launch(ctx, &UpArgs::from(&flags), &cfg, up_deadline)?
+            };
+            let id = launched.id.clone();
+            remote::after_up(ctx, launched, wait && !dry_run, timeout, wait_setup)?;
+            match (&flags.dir, id) {
+                (Some(dir), _) if dry_run => {
+                    dirsync::dry_run(ctx, std::path::Path::new(dir), &flags.max_upload)
+                }
+                (Some(dir), Some(id)) => {
+                    dirsync::after_up(ctx, &cfg, &flags, &id, std::path::Path::new(dir))
+                }
+                _ => Ok(()),
+            }
         }
         Command::Ls {
             json,
@@ -251,8 +257,13 @@ fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
         Command::Expire { .. } => {
             let (id, action, deadline) = expire_plan.expect("parsed above");
             ctx.result("action", pyjson::Value::str(&action));
-            match provider::select(ctx, &cfg, id.as_deref(), "expire")? {
-                Some(instance) => instance.expire(ctx, &cfg, &action, deadline),
+            match provider::selected_id(ctx, &cfg, id.as_deref(), "expire")? {
+                Some(id) => {
+                    if action == "arm" {
+                        dirsync::expiry_notice(ctx, &id)?;
+                    }
+                    provider::parse(&id)?.expire(ctx, &cfg, &action, deadline)
+                }
                 None => Ok(()),
             }
         }
@@ -278,9 +289,23 @@ fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
             Some(instance) => instance.stop(ctx, &cfg),
             None => Ok(()),
         },
-        Command::Down { id, yes } => match provider::select(ctx, &cfg, id.as_deref(), "down")? {
-            Some(instance) => instance.down(ctx, &cfg, yes),
+        Command::Down {
+            id,
+            yes,
+            discard_unsynced,
+        } => match provider::selected_id(ctx, &cfg, id.as_deref(), "down")? {
+            Some(id) => {
+                dirsync::before_down(ctx, &id, discard_unsynced)?;
+                provider::parse(&id)?.down(ctx, &cfg, yes)?;
+                dirsync::after_down(ctx, &cfg, &id);
+                Ok(())
+            }
             None => Ok(()),
         },
+        Command::Sync(flags) => dirsync::sync_command(ctx, &cfg, &flags),
+        Command::Link(flags) => dirsync::link_command(ctx, &cfg, &flags),
+        Command::Unlink { id, dir } => {
+            dirsync::unlink_command(ctx, &cfg, id.as_deref(), dir.as_deref())
+        }
     }
 }

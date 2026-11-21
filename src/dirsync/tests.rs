@@ -1724,7 +1724,10 @@ fn watch_in_a_terminal_is_refused_while_autosync_runs() {
     assert_eq!(w.sync(&ctx, &["--watch"]), 2);
     let said = err(&ctx);
     assert!(said.contains("Autosync already syncs"), "{said}");
-    assert!(said.contains("gpu sync 7 --no-autosync"), "{said}");
+    assert!(
+        said.contains("would only repeat its work. Next: gpu sync 7 --no-autosync"),
+        "{said}"
+    );
 }
 
 #[test]

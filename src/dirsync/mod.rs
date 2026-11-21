@@ -767,7 +767,7 @@ pub(crate) fn sync_command(ctx: &Ctx, cfg: &Dict, flags: &SyncFlags) -> Result<(
     }
     if let (true, Some(pid)) = (flags.watch, row.autosync.pid) {
         return Err(Error::usage(format!(
-            "Autosync already syncs {} (process {pid}); watching as well would only repeat its work.",
+            "Autosync already syncs {} (process {pid}); watching as well would only repeat its work",
             row.link.local.display()
         ))
         .next(format!("gpu sync {} --no-autosync", row.link.id)));

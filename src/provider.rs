@@ -157,6 +157,11 @@ pub(crate) trait Instance {
         Ok(false)
     }
 
+    /// The armed auto-destroy deadline, when the provider can report one.
+    fn expiry_deadline(&self, _ctx: &Ctx, _cfg: &Dict, _alias: &str) -> Result<Option<Timestamp>> {
+        Ok(None)
+    }
+
     fn edit(&self, _ctx: &Ctx, _editor: Option<&str>, _nvim_config: Option<&Value>) -> Result<()> {
         Err(self.unsupported())
     }
@@ -198,6 +203,21 @@ impl Instance for VastId {
             Some("armed" | "retrying")
         ))
     }
+    fn expiry_deadline(&self, ctx: &Ctx, _cfg: &Dict, alias: &str) -> Result<Option<Timestamp>> {
+        let reply = crate::vast::expiry::manage_expiry(ctx, alias, &self.0, "show", None)?;
+        if !matches!(
+            reply.get("status").and_then(Value::as_str),
+            Some("armed" | "retrying")
+        ) {
+            return Ok(None);
+        }
+        let seconds = match reply.get("deadline") {
+            Some(Value::Int(n)) => *n as f64,
+            Some(Value::Float(n)) => *n,
+            _ => return Ok(None),
+        };
+        Ok(Timestamp::from_microsecond((seconds * 1e6).round() as i64).ok())
+    }
     fn edit(&self, ctx: &Ctx, editor: Option<&str>, nvim_config: Option<&Value>) -> Result<()> {
         crate::editors::open(ctx, &self.0, editor, nvim_config, |_| {
             let (alias, directory) =
@@ -238,6 +258,9 @@ impl Instance for crate::gcp::TpuId {
     }
     fn expiry_armed(&self, ctx: &Ctx, cfg: &Dict, _alias: &str) -> Result<bool> {
         crate::gcp::expiry::armed(ctx, cfg, self)
+    }
+    fn expiry_deadline(&self, ctx: &Ctx, cfg: &Dict, _alias: &str) -> Result<Option<Timestamp>> {
+        crate::gcp::expiry::deadline(ctx, cfg, self)
     }
     fn edit(&self, ctx: &Ctx, editor: Option<&str>, nvim_config: Option<&Value>) -> Result<()> {
         ctx.require_gcloud()?;

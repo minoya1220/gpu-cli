@@ -150,8 +150,46 @@ pub trait Runner: Send + Sync {
         self.run(cmd)
     }
 
+    /// Start `cmd` detached from this process with stdout and stderr appended
+    /// to `log`, and return its process ID without waiting for it.
+    fn spawn_detached(
+        &self,
+        _cmd: &Cmd,
+        _log: &std::path::Path,
+    ) -> std::result::Result<u32, RunError> {
+        Err(RunError::Os(
+            "background processes are not supported".into(),
+        ))
+    }
+
     /// Replace the current process (`os.execvp`); returns only on failure.
     fn exec(&self, argv: &[String]) -> String;
+}
+
+/// Work that a termination signal must let finish (up to a limit) in a
+/// background process, so a stop never lands between two halves of an update.
+static CRITICAL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+pub struct Critical;
+
+/// Mark a critical section until the guard drops.
+pub fn critical() -> Critical {
+    CRITICAL.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    Critical
+}
+
+impl Drop for Critical {
+    fn drop(&mut self) {
+        CRITICAL.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Wait up to `limit` for every critical section to end.
+pub fn wait_critical(limit: Duration) {
+    let end = Instant::now() + limit;
+    while CRITICAL.load(std::sync::atomic::Ordering::SeqCst) > 0 && Instant::now() < end {
+        thread::sleep(Duration::from_millis(50));
+    }
 }
 
 pub struct RealRunner;
@@ -356,6 +394,34 @@ impl Runner for RealRunner {
         threshold: usize,
     ) -> std::result::Result<Output, RunError> {
         Self::execute(cmd, Some((count, threshold)))
+    }
+
+    fn spawn_detached(
+        &self,
+        cmd: &Cmd,
+        log: &std::path::Path,
+    ) -> std::result::Result<u32, RunError> {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let open = || {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .mode(0o600)
+                .open(log)
+                .map_err(|err| RunError::Os(crate::error::os_message(&err, Some(log))))
+        };
+        let child = Command::new(cmd.program())
+            .args(&cmd.argv[1..])
+            .stdin(Stdio::null())
+            .stdout(open()?)
+            .stderr(open()?)
+            .spawn()
+            .map_err(|err| match err.kind() {
+                std::io::ErrorKind::NotFound => RunError::NotFound,
+                _ => RunError::Os(crate::error::os_message(&err, None)),
+            })?;
+        Ok(child.id())
     }
 
     fn exec(&self, argv: &[String]) -> String {

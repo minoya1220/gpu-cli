@@ -220,6 +220,13 @@ fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
             remote::copy(ctx, &id, &source, &destination, recursive, timeout)
         }
         Command::Up(flags) => {
+            if let Some(dir) = flags
+                .dir
+                .as_deref()
+                .filter(|_| dirsync::asks_autosync(&flags))
+            {
+                dirsync::ask_autosync(ctx, std::path::Path::new(dir))?;
+            }
             let wait = flags.wait || flags.wait_setup;
             let wait_setup = flags.wait_setup;
             ctx.result("setup_done", pyjson::Value::Null);
@@ -303,6 +310,7 @@ fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
             None => Ok(()),
         },
         Command::Sync(flags) => dirsync::sync_command(ctx, &cfg, &flags),
+        Command::AutosyncRun(flags) => dirsync::autosync_run(ctx, &cfg, &flags),
         Command::Link(flags) => dirsync::link_command(ctx, &cfg, &flags),
         Command::Unlink { id, dir } => {
             dirsync::unlink_command(ctx, &cfg, id.as_deref(), dir.as_deref())

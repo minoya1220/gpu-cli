@@ -126,11 +126,13 @@ Omit the ID to pick an instance.
 For code that lives only on your computer: copy it up once, edit on the GPU (Zed or VS Code remote, or Neovim over SSH), and let `gpu sync` mirror the GPU's changes back. The GPU copy leads; the local directory is a mirror. Vast, Runpod, DigitalOcean and Google Cloud only; Modal has no SSH.
 
 ```sh
-gpu up --dir .                          # normal picker, then copy this folder to /workspace/NAME
-gpu link 12345678                       # or attach an instance that is already running
+gpu up --dir .                          # normal picker (it asks about autosync), then copy this folder to /workspace/NAME
+gpu up --dir . --autosync               # same, answering yes without asking
+gpu link 12345678 [--autosync]          # or attach an instance that is already running
 gpu edit 12345678                       # opens /workspace/NAME, not /workspace
 gpu sync                                # list linked instances and pull the GPU's changes here
 gpu sync --watch                        # keep pulling until Ctrl-C
+gpu sync --autosync                     # keep pulling in the background; gpu sync --no-autosync stops it
 gpu sync 12345678 --include outputs     # also pull a gitignored folder (remembered)
 gpu unlink 12345678
 ```
@@ -139,8 +141,9 @@ gpu unlink 12345678
 - Pull: the instance lists its files over SSH (inotify when available, polling otherwise); bursts of saves become one rsync of the changed files. `gpu sync` shows each linked instance as `in sync` or `behind by N files`.
 - Conflicts: your local file is never overwritten silently. If you edited a file here since the last sync and the GPU changed it too, your file stays and the GPU version is saved beside it as `NAME.gpu-ID-TIME.EXT`, with a `CONFLICT` line. Move the saved copy over yours to take it. Local files are never deleted, including ones deleted on the GPU.
 - What is pulled: new and changed GPU files that git would not ignore here, so `.venv`, caches and outputs stay on the GPU unless named with `--include`. Secret-looking files stay put. Files above `--max-file` (default 256M) are skipped with a warning; a terminal asks first.
-- `gpu down` pulls once more before it destroys a linked instance. If that pull fails, skips files, or leaves changed gitignored or secret-looking files on the GPU, it stops: fix it (`gpu sync ID --include PATH` brings ignored files home), or pass `--discard-unsynced` to destroy anyway. Auto-destroy (`--expire`, `gpu expire`) cannot pull first, so changes not yet synced are lost at the deadline (`gpu expire` and `gpu link` say so for a linked instance); keep `gpu sync --watch` running, or run `gpu sync` beforehand. `gpu sync` forgets links whose instance is gone.
-- Links and their last-synced state live in `~/.local/state/gpu/sync/`. Only one sync of a link runs at a time.
+- `gpu down` pulls once more before it destroys a linked instance. If that pull fails, skips files, or leaves changed gitignored or secret-looking files on the GPU, it stops: fix it (`gpu sync ID --include PATH` brings ignored files home), or pass `--discard-unsynced` to destroy anyway. Auto-destroy (`--expire`, `gpu expire`) cannot pull first, so changes not yet synced are lost at the deadline (`gpu expire` and `gpu link` say so for a linked instance); run autosync (below), keep `gpu sync --watch` running, or run `gpu sync` beforehand. `gpu sync` forgets links whose instance is gone.
+- Autosync is `--watch` in a detached background process, one per link, so it outlives the terminal. It reconnects with a growing pause (10s up to 5 minutes) after a dropped connection or a sleeping laptop, and ends by itself when the instance is destroyed or the link removed. `gpu sync` lists each link's autosync as `running`, `running, reconnecting` or `off`, with its recent errors; `gpu down` stops it after the final pull, and `gpu unlink` stops it. While it runs it also pulls once more about three minutes before an armed auto-destroy deadline, if the instance can be reached; changes made after that, or while it cannot connect, are still lost. It does not start again after a reboot. Starting and stopping it is the only background work `gpu` does for you; there is nothing to install on the instance.
+- Links and their last-synced state live in `~/.local/state/gpu/sync/`, and so do each autosync's log (`ID-HASH.log`, never secrets) and status. Only one sync of a link runs at a time; a manual `gpu sync` waits for autosync's pull in progress.
 
 ## Stop or destroy
 

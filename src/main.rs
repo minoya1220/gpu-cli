@@ -13,10 +13,25 @@ fn main() {
         default_hook(info);
     }));
     let ctx = gpu::ctx::Ctx::real();
-    if let Ok(mut signals) = Signals::new([SIGINT, SIGHUP, SIGTERM]) {
+    // `gpu autosync-run` is the detached background syncer: its own session,
+    // deaf to its terminal closing, and a stop lets a pull in progress finish.
+    let background = std::env::args().nth(1).as_deref() == Some("autosync-run");
+    let signals = if background {
+        let _ = rustix::process::setsid();
+        let _ = signal_hook::flag::register(SIGHUP, std::sync::Arc::new(Default::default()));
+        Signals::new([SIGINT, SIGTERM])
+    } else {
+        Signals::new([SIGINT, SIGHUP, SIGTERM])
+    };
+    if let Ok(mut signals) = signals {
         let handler_ctx = ctx.clone();
         std::thread::spawn(move || {
             for signal in signals.forever() {
+                if background {
+                    gpu::process::wait_critical(std::time::Duration::from_secs(30));
+                    let _ = rustix::io::write(rustix::stdio::stderr(), b"Autosync stopped.\n");
+                    std::process::exit(0);
+                }
                 if handler_ctx.cooperative() {
                     let count = handler_ctx.interrupt();
                     if count < 3 {

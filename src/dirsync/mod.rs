@@ -3,9 +3,11 @@
 //! instance's copy leads and `gpu sync` mirrors its changes back.
 //! rsync over SSH moves the files; `engine` decides what moves and what is
 //! kept as a conflict, `transport` is everything that crosses SSH.
+mod autosync;
 mod engine;
 mod store;
 mod transport;
+mod watch;
 
 #[cfg(test)]
 mod tests;
@@ -22,6 +24,9 @@ use crate::table::plural;
 use engine::{human, Outcome, PullOptions};
 use store::Link;
 use transport::Remote;
+use watch::watch;
+
+pub(crate) use autosync::run_command as autosync_run;
 
 /// Seconds one `wait` call may block on the instance.
 const WATCH_WAIT: u32 = 30;
@@ -30,6 +35,10 @@ const BACKSTOP_EVERY: u32 = 4;
 /// Consecutive failures after which `--watch` gives up.
 const WATCH_RETRIES: u32 = 12;
 const ONE_TIME_WAIT: f64 = 600.0;
+/// Seconds a pull waits for another sync of the same link to finish.
+const LOCK_WAIT: f64 = 120.0;
+/// The file size limit autosync pulls under (as `gpu sync --max-file` writes it).
+const DEFAULT_MAX_FILE_TEXT: &str = "256M";
 
 /// The canonical local directory for `--dir`, or the current directory.
 pub(crate) fn resolve_dir(path: Option<&str>) -> Result<PathBuf> {
@@ -222,13 +231,25 @@ pub(crate) fn link(
     Ok((link, remote.alias))
 }
 
+/// Start autosync for a link just made. The link stands either way, so a
+/// failure to start says how to try again instead of failing the command.
+fn start_after_link(ctx: &Ctx, link: &Link) -> Result<()> {
+    autosync::start(ctx, link, DEFAULT_MAX_FILE_TEXT).or_else(|error| {
+        ctx.eprintln(&format!(
+            "{}. Start it later: gpu sync {} --autosync",
+            error.text().trim_end_matches('.'),
+            link.id
+        ))
+    })
+}
+
 /// `gpu link`.
 pub(crate) fn link_command(ctx: &Ctx, cfg: &Dict, flags: &LinkFlags) -> Result<()> {
     let dir = resolve_dir(flags.dir.as_deref())?;
     let Some(id) = crate::provider::selected_id(ctx, cfg, flags.id.as_deref(), "link")? else {
         return Ok(());
     };
-    let (_, alias) = link(
+    let (link, alias) = link(
         ctx,
         &id,
         &dir,
@@ -237,6 +258,9 @@ pub(crate) fn link_command(ctx: &Ctx, cfg: &Dict, flags: &LinkFlags) -> Result<(
         flags.yes,
         flags.timeout,
     )?;
+    if flags.autosync {
+        start_after_link(ctx, &link)?;
+    }
     if crate::provider::parse(&id)?
         .expiry_armed(ctx, cfg, &alias)
         .unwrap_or(false)
@@ -254,7 +278,7 @@ pub(crate) fn after_up(
     id: &str,
     dir: &Path,
 ) -> Result<()> {
-    link(
+    let link = link(
         ctx,
         id,
         dir,
@@ -263,7 +287,7 @@ pub(crate) fn after_up(
         true,
         flags.timeout.max(ONE_TIME_WAIT),
     )
-    .map(drop)
+    .map(|(link, _)| link)
     .map_err(|error| {
         let message = format!(
             "Instance {id} is running but {} could not be copied to it: {}",
@@ -274,11 +298,44 @@ pub(crate) fn after_up(
             .with_text(message)
             .next(format!("gpu link {id} --dir {}", dir.display()))
     })?;
+    // The picker's answer when the flag was not given.
+    if flags.autosync || ctx.autosync_chosen() {
+        start_after_link(ctx, &link)?;
+    }
     if flags.expire.as_deref().is_some_and(|e| !e.is_empty()) {
         expiry_notice(ctx, id)?;
     }
     // The editor offer waited for the directory to exist on the instance.
     crate::editors::offer_after_launch(ctx, cfg, &*crate::provider::parse(id)?)
+}
+
+/// Whether `gpu up` asks about autosync: a directory is attached, and
+/// nothing said to launch without questions.
+pub(crate) fn asks_autosync(flags: &crate::cli::UpFlags) -> bool {
+    flags.dir.is_some() && !flags.autosync && !flags.yes && !flags.dry_run
+}
+
+/// In a terminal, `gpu up --dir` asks whether to keep the directory in
+/// sync in the background; the answer is read by `after_up`.
+pub(crate) fn ask_autosync(ctx: &Ctx, dir: &Path) -> Result<()> {
+    if !ctx.interactive() {
+        return Ok(());
+    }
+    let options = vec![
+        crate::picker::Opt::new(
+            "yes".to_string(),
+            "Yes: pull GPU changes into the directory in the background (autosync)",
+        ),
+        crate::picker::Opt::new("no".to_string(), "No: I will run gpu sync myself"),
+    ];
+    let screen = crate::picker::Screen::new(
+        format!("Keep {} in sync with the GPU automatically?", dir.display()),
+        move || options.clone(),
+        crate::picker::Next::Done,
+    );
+    let answer = crate::picker::pick(ctx, screen)?;
+    ctx.set_autosync_choice(Some(answer == "yes"));
+    Ok(())
 }
 
 /// The directory on the instance that a linked local directory mirrors.
@@ -298,9 +355,20 @@ pub(crate) fn expiry_notice(ctx: &Ctx, id: &str) -> Result<()> {
     if links.is_empty() {
         return Ok(());
     }
+    if links
+        .iter()
+        .any(|link| store::autosync_pid(&ctx.env, link).is_some())
+    {
+        return ctx.eprintln(&format!(
+            "Note: {id} is linked to {} and autosync runs. It pulls once more a few minutes before the deadline \
+             if the instance can be reached; changes made after that, or while it cannot connect, are lost.",
+            links[0].local.display()
+        ));
+    }
     ctx.eprintln(&format!(
         "Note: {id} is linked to {}. Auto-destroy deletes the GPU copy without pulling it first: \
-         changes not yet synced are lost. Keep `gpu sync --watch` running, or run `gpu sync` before the deadline.",
+         changes not yet synced are lost. Run `gpu sync --autosync` (pulls once more before the deadline), \
+         keep `gpu sync --watch` running, or run `gpu sync` before the deadline.",
         links[0].local.display()
     ))
 }
@@ -337,35 +405,37 @@ fn pull_options(max_file: &str, ask_large: bool) -> Result<PullOptions> {
     })
 }
 
-fn say_outcome(ctx: &Ctx, link: &Link, outcome: &Outcome) -> Result<()> {
+/// The lines that tell what a pull did.
+fn outcome_lines(link: &Link, outcome: &Outcome) -> Vec<String> {
+    let mut lines = Vec::new();
     if !outcome.pulled.is_empty() {
-        ctx.println(&format!(
+        lines.push(format!(
             "Pulled {} ({}) from {} into {}",
             plural(outcome.pulled.len(), "file"),
             human(outcome.bytes),
             link.id,
             link.local.display()
-        ))?;
+        ));
     }
     for conflict in &outcome.conflicts {
-        ctx.println(&format!(
+        lines.push(format!(
             "CONFLICT {}: edited here and on the GPU. Kept yours; the GPU version is saved as {}",
             conflict.path, conflict.saved_as
-        ))?;
+        ));
     }
     if !outcome.large.is_empty() {
         let total: u64 = outcome.large.iter().map(|(_, size)| size).sum();
         let (path, size) = outcome.large.iter().max_by_key(|(_, size)| *size).unwrap();
-        ctx.println(&format!(
+        lines.push(format!(
             "Not pulled: {} above the size limit ({} in all; largest {path}, {}). Pull them with: gpu sync --max-file {}M",
             plural(outcome.large.len(), "file"),
             human(total),
             human(*size),
             size / (1024 * 1024) + 1,
-        ))?;
+        ));
     }
     if !outcome.missing.is_empty() {
-        ctx.println(&format!(
+        lines.push(format!(
             "Could not copy {}: {}",
             plural(outcome.missing.len(), "file"),
             outcome
@@ -375,10 +445,10 @@ fn say_outcome(ctx: &Ctx, link: &Link, outcome: &Outcome) -> Result<()> {
                 .cloned()
                 .collect::<Vec<_>>()
                 .join(", ")
-        ))?;
+        ));
     }
     if !outcome.kept_deleted.is_empty() {
-        ctx.println(&format!(
+        lines.push(format!(
             "{} deleted on the GPU; your local {} kept: {}",
             plural(outcome.kept_deleted.len(), "file"),
             if outcome.kept_deleted.len() == 1 {
@@ -393,7 +463,14 @@ fn say_outcome(ctx: &Ctx, link: &Link, outcome: &Outcome) -> Result<()> {
                 .cloned()
                 .collect::<Vec<_>>()
                 .join(", ")
-        ))?;
+        ));
+    }
+    lines
+}
+
+fn say_outcome(ctx: &Ctx, link: &Link, outcome: &Outcome) -> Result<()> {
+    for line in outcome_lines(link, outcome) {
+        ctx.println(&line)?;
     }
     Ok(())
 }
@@ -439,7 +516,7 @@ fn pull_once(
     options: &PullOptions,
     listing: Option<transport::Listing>,
 ) -> Result<Outcome> {
-    let Some(_lock) = store::lock(&ctx.env, link)? else {
+    let Some(_lock) = store::lock_wait(ctx, link, LOCK_WAIT)? else {
         return Err(Error::msg(format!(
             "Another gpu sync is already running for {} and {}",
             link.local.display(),
@@ -450,6 +527,8 @@ fn pull_once(
         Some(listing) => listing,
         None => remote.manifest(&link.remote)?,
     };
+    // A background syncer asked to stop finishes this pull first.
+    let _critical = crate::process::critical();
     let mut base = store::load_base(&ctx.env, link);
     let outcome = engine::pull(ctx, remote, link, &mut base, &listing, options)?;
     // The baseline always follows what was applied, even when a later file failed.
@@ -474,6 +553,7 @@ fn candidates(ctx: &Ctx, id: Option<&str>, dir: Option<&str>) -> Result<Vec<Link
 struct Row {
     link: Link,
     state: String,
+    autosync: autosync::Info,
     alias: Option<String>,
     listing: Option<transport::Listing>,
 }
@@ -507,7 +587,15 @@ fn connect(
 }
 
 fn print_rows(ctx: &Ctx, rows: &[Row]) -> Result<()> {
-    let mut cells = vec![["#", "Instance", "Directory", "On the GPU", "State"].map(String::from)];
+    let mut cells = vec![[
+        "#",
+        "Instance",
+        "Directory",
+        "On the GPU",
+        "State",
+        "Autosync",
+    ]
+    .map(String::from)];
     for (n, row) in rows.iter().enumerate() {
         cells.push([
             (n + 1).to_string(),
@@ -515,11 +603,25 @@ fn print_rows(ctx: &Ctx, rows: &[Row]) -> Result<()> {
             row.link.local.display().to_string(),
             row.link.remote.clone(),
             row.state.clone(),
+            row.autosync.label(),
         ]);
     }
     use crate::table::Column::{Left, Plain, Right};
-    for line in crate::table::aligned_rows(&cells, [Right, Left, Left, Left, Plain]) {
+    for line in crate::table::aligned_rows(&cells, [Right, Left, Left, Left, Left, Plain]) {
         ctx.println(line.trim_end())?;
+    }
+    for row in rows {
+        if row.autosync.errors().is_empty() {
+            continue;
+        }
+        ctx.println(&format!(
+            "Recent autosync errors for {} (log: {}):",
+            row.link.id,
+            row.autosync.log.display()
+        ))?;
+        for (at, text) in row.autosync.errors() {
+            ctx.println(&format!("  {at}  {text}"))?;
+        }
     }
     Ok(())
 }
@@ -535,6 +637,7 @@ fn record_rows(ctx: &Ctx, rows: &[Row]) {
                     item.insert("local_dir", Value::str(row.link.local.to_string_lossy()));
                     item.insert("remote_dir", Value::str(&row.link.remote));
                     item.insert("state", Value::str(&row.state));
+                    item.insert("autosync", row.autosync.value());
                     Value::Dict(item)
                 })
                 .collect(),
@@ -564,6 +667,27 @@ pub(crate) fn sync_command(ctx: &Ctx, cfg: &Dict, flags: &SyncFlags) -> Result<(
         }
         .next("gpu up --dir . (launch one) or gpu link ID (attach a running one)"));
     }
+    if flags.no_autosync {
+        let mut stopped = false;
+        for link in &wanted {
+            if autosync::stop(ctx, link)? {
+                stopped = true;
+                ctx.println(&format!(
+                    "Stopped autosync of {} for {}. Files were left as they are.",
+                    link.id,
+                    link.local.display()
+                ))?;
+            } else {
+                ctx.println(&format!(
+                    "Autosync is not running for {} and {}",
+                    link.id,
+                    link.local.display()
+                ))?;
+            }
+        }
+        ctx.result("autosync_stopped", Value::Bool(stopped));
+        return Ok(());
+    }
     let is_running = |link: &Link| match &live {
         Some(live) => live
             .items
@@ -583,6 +707,7 @@ pub(crate) fn sync_command(ctx: &Ctx, cfg: &Dict, flags: &SyncFlags) -> Result<(
         }
         let (alias, listing, state) = connect(ctx, &link, is_running(&link));
         rows.push(Row {
+            autosync: autosync::info(ctx, &link),
             link,
             state,
             alias,
@@ -635,6 +760,18 @@ pub(crate) fn sync_command(ctx: &Ctx, cfg: &Dict, flags: &SyncFlags) -> Result<(
         }
     };
     let row = rows.swap_remove(chosen);
+    if flags.autosync {
+        autosync::start(ctx, &row.link, &flags.max_file)?;
+        ctx.result("autosync", Value::Bool(true));
+        return Ok(());
+    }
+    if let (true, Some(pid)) = (flags.watch, row.autosync.pid) {
+        return Err(Error::usage(format!(
+            "Autosync already syncs {} (process {pid}); watching as well would only repeat its work.",
+            row.link.local.display()
+        ))
+        .next(format!("gpu sync {} --no-autosync", row.link.id)));
+    }
     let remote = Remote::new(ctx, row.alias.expect("reachable"));
     if flags.watch {
         return watch(ctx, &remote, &row.link, &options, row.listing, None);
@@ -652,83 +789,22 @@ pub(crate) fn sync_command(ctx: &Ctx, cfg: &Dict, flags: &SyncFlags) -> Result<(
     Ok(())
 }
 
-/// `--watch`: pull, then keep pulling as the instance changes. `cycles` bounds the
-/// loop for tests.
-fn watch(
-    ctx: &Ctx,
-    remote: &Remote,
-    link: &Link,
-    options: &PullOptions,
-    first: Option<transport::Listing>,
-    cycles: Option<u32>,
-) -> Result<()> {
-    ctx.println(&format!(
-        "Watching {}:{} -> {}. Ctrl-C to stop.",
-        link.id,
-        link.remote,
-        link.local.display()
-    ))?;
-    let mut sig = String::new();
-    let mut pending = first;
-    let (mut failures, mut idle, mut waited) = (0u32, 0u32, 0u32);
-    // Warn about each oversized file once per run, not on every cycle.
-    let mut warned: std::collections::BTreeSet<String> = Default::default();
-    loop {
-        let step = (|| -> Result<()> {
-            let listing = match pending.take() {
-                Some(listing) => Some(listing),
-                None if sig.is_empty() => Some(remote.manifest(&link.remote)?),
-                None => {
-                    let found = remote.wait(&link.remote, WATCH_WAIT, &sig)?;
-                    waited += 1;
-                    if found.is_none() {
-                        idle += 1;
-                    }
-                    match found {
-                        Some(listing) => Some(listing),
-                        None if idle >= BACKSTOP_EVERY => {
-                            idle = 0;
-                            Some(remote.manifest(&link.remote)?)
-                        }
-                        None => None,
-                    }
-                }
-            };
-            if let Some(listing) = listing {
-                sig = listing.sig.clone();
-                let mut outcome = pull_once(ctx, remote, link, options, Some(listing))?;
-                outcome
-                    .large
-                    .retain(|(path, _)| warned.insert(path.clone()));
-                say_outcome(ctx, link, &outcome)?;
-            }
-            Ok(())
-        })();
-        match step {
-            Ok(()) => failures = 0,
-            Err(error) => {
-                failures += 1;
-                if failures >= WATCH_RETRIES {
-                    return Err(error);
-                }
-                ctx.eprintln(&format!(
-                    "Sync paused: {}. Retrying in 10s ...",
-                    crate::redact::redact_text(error.summary())
-                ))?;
-                ctx.clock.sleep(10.0);
-            }
-        }
-        if cycles.is_some_and(|limit| waited >= limit) {
-            return Ok(());
-        }
-    }
-}
-
 /// After a destroy: forget links to instances that are now gone.
 pub(crate) fn after_down(ctx: &Ctx, cfg: &Dict, id: &str) {
-    if store::links(&ctx.env).iter().any(|l| l.id == id) {
-        prune(ctx, cfg);
+    let links: Vec<Link> = store::links(&ctx.env)
+        .into_iter()
+        .filter(|l| l.id == id)
+        .collect();
+    if links.is_empty() {
+        return;
     }
+    // The final pull is done: the background syncer has nothing left to do.
+    for link in &links {
+        if let Err(error) = autosync::stop(ctx, link) {
+            let _ = ctx.eprintln(&format!("Warning: {}", error.text()));
+        }
+    }
+    prune(ctx, cfg);
 }
 
 /// `gpu unlink`.
@@ -761,6 +837,9 @@ pub(crate) fn unlink_command(
         )));
     }
     for link in &links {
+        if let Err(error) = autosync::stop(ctx, link) {
+            ctx.eprintln(&format!("Warning: {}", error.text()))?;
+        }
         store::remove_link(&ctx.env, link);
         ctx.println(&format!(
             "Unlinked {id} from {}. Files were left as they are.",

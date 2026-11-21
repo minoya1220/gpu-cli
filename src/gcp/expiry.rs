@@ -358,6 +358,18 @@ pub fn armed(ctx: &Ctx, cfg: &Dict, id: &TpuId) -> Result<bool> {
     queue_for_node(cfg, id, &node)?.has_tasks(ctx, id)
 }
 
+/// The earliest pending deletion time for `id`, if any task is pending.
+pub fn deadline(ctx: &Ctx, cfg: &Dict, id: &TpuId) -> Result<Option<Timestamp>> {
+    let node = gcp::find_node(&gcp::nodes(ctx, &id.project, &id.zone)?, &id.name)
+        .cloned()
+        .unwrap_or_default();
+    let tasks = queue_for_node(cfg, id, &node)?.tasks(ctx, id)?;
+    Ok(tasks
+        .iter()
+        .filter_map(|task| text(task, "scheduleTime")?.parse::<Timestamp>().ok())
+        .min())
+}
+
 pub fn manage(
     ctx: &Ctx,
     cfg: &Dict,

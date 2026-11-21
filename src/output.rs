@@ -14,6 +14,8 @@ pub(crate) struct CommandOutput {
     pub command_timeout: Option<f64>,
     /// `gpu up --dir`: offer the editor once the directory has been copied.
     pub defer_editor_offer: bool,
+    /// The picker's answer to the autosync question, once it was asked.
+    pub autosync_choice: Option<bool>,
 }
 
 pub(crate) fn envelope(ctx: &Ctx, command: &str, outcome: &Result<()>) -> Value {

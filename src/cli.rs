@@ -160,6 +160,9 @@ pub enum Command {
     Sync(SyncFlags),
     /// Link a running instance to a local directory: copy it up once, then mirror the GPU copy back
     Link(LinkFlags),
+    /// The background syncer that `--autosync` starts; not meant to be run by hand
+    #[command(name = "autosync-run", hide = true)]
+    AutosyncRun(AutosyncRunFlags),
     /// Stop syncing a local directory with an instance (files stay where they are)
     Unlink {
         /// Instance ID (picker if omitted)
@@ -201,6 +204,7 @@ impl Command {
             Self::Sync(_) => "sync",
             Self::Link(_) => "link",
             Self::Unlink { .. } => "unlink",
+            Self::AutosyncRun(_) => "autosync-run",
         }
     }
 }
@@ -208,7 +212,9 @@ impl Command {
 const SYNC_HELP: &str = "The GPU copy leads: edit on the instance (Zed or VS Code remote, or Neovim over SSH) and sync pulls its changes here. \
 A local file edited since the last sync is never overwritten: it stays, and the GPU version is saved beside it as NAME.gpu-ID-TIME.EXT. \
 Local files are never deleted. Gitignored GPU files (outputs/) are pulled only with --include.\n\
-Examples: gpu sync; gpu sync --watch; gpu sync 12345678 --include outputs; gpu sync --list";
+Autosync does the same as --watch in the background, surviving a closed terminal, laptop sleep and dropped connections: \
+gpu sync --autosync starts it, gpu sync --no-autosync stops it, gpu sync shows whether it runs and its recent errors; its log is under ~/.local/state/gpu/sync.\n\
+Examples: gpu sync; gpu sync --watch; gpu sync --autosync; gpu sync 12345678 --include outputs; gpu sync --list";
 
 #[derive(clap::Args, Clone, Debug, Default)]
 pub struct SyncFlags {
@@ -218,8 +224,14 @@ pub struct SyncFlags {
     #[arg(long)]
     pub dir: Option<String>,
     /// Keep pulling as the GPU copy changes until Ctrl-C
-    #[arg(long, conflicts_with = "list")]
+    #[arg(long, conflicts_with_all = ["list", "autosync", "no_autosync"])]
     pub watch: bool,
+    /// Start autosync: keep pulling in the background until the instance or link is gone
+    #[arg(long, conflicts_with_all = ["list", "no_autosync"])]
+    pub autosync: bool,
+    /// Stop the background autosync of this link (after pulling what it has not seen)
+    #[arg(long, conflicts_with = "list")]
+    pub no_autosync: bool,
     /// Only show linked instances and whether they are in sync; pull nothing
     #[arg(long)]
     pub list: bool,
@@ -250,6 +262,22 @@ pub struct LinkFlags {
     /// Maximum SSH readiness wait in seconds
     #[arg(long, default_value = "120", value_parser = positive_seconds)]
     pub timeout: f64,
+    /// Keep pulling the GPU copy into the directory in the background (see gpu sync)
+    #[arg(long)]
+    pub autosync: bool,
+}
+
+/// The detached syncer's arguments.
+#[derive(clap::Args, Clone, Debug)]
+pub struct AutosyncRunFlags {
+    /// Instance ID of the link
+    pub id: String,
+    /// The link's local directory
+    #[arg(long)]
+    pub dir: String,
+    /// Do not pull files larger than this
+    #[arg(long, default_value = "256M")]
+    pub max_file: String,
 }
 
 #[derive(clap::Args, Debug, Default)]
@@ -312,6 +340,9 @@ pub struct UpFlags {
     /// With --dir: maximum size of the one-time copy up
     #[arg(long, default_value = "1G")]
     pub max_upload: String,
+    /// With --dir: keep pulling the GPU copy into the directory in the background (a terminal is asked otherwise)
+    #[arg(long, requires = "dir")]
+    pub autosync: bool,
     /// Workspace type (required for non-terminal Vast launches)
     #[arg(long, value_parser = ["container", "vm"])]
     pub mode: Option<String>,

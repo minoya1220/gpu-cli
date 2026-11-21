@@ -125,6 +125,13 @@ impl Runner for FakeRunner {
         (self.handler)(cmd)
     }
 
+    /// Recorded and shown to the handler, never started: no test launches a
+    /// real background process.
+    fn spawn_detached(&self, cmd: &Cmd, _log: &std::path::Path) -> Result<u32, RunError> {
+        self.calls.lock().unwrap().push(cmd.clone());
+        (self.handler)(cmd).map(|_| 4242)
+    }
+
     fn exec(&self, argv: &[String]) -> String {
         self.calls.lock().unwrap().push(Cmd::new(argv));
         "exec is not available in tests".into()

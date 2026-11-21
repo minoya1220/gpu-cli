@@ -464,6 +464,16 @@ impl Ctx {
         self.output.lock_recover().defer_editor_offer
     }
 
+    pub(crate) fn set_autosync_choice(&self, choice: Option<bool>) {
+        if choice.is_some() {
+            self.output.lock_recover().autosync_choice = choice;
+        }
+    }
+
+    pub(crate) fn autosync_chosen(&self) -> bool {
+        self.output.lock_recover().autosync_choice == Some(true)
+    }
+
     pub(crate) fn set_ssh_timeout(&self, seconds: f64) {
         self.output.lock_recover().ssh_timeout = Some(seconds);
     }
@@ -546,6 +556,15 @@ impl Ctx {
             &self.interrupts,
             threshold,
         )
+    }
+
+    pub(crate) fn spawn_detached(
+        &self,
+        cmd: &Cmd,
+        log: &std::path::Path,
+    ) -> std::result::Result<u32, RunError> {
+        self.authorize(cmd.program())?;
+        self.runner.spawn_detached(cmd, log)
     }
 
     pub fn exec(&self, argv: &[String]) -> String {

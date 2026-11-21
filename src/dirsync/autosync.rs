@@ -72,7 +72,7 @@ impl<'a> Background<'a> {
 
     fn save(&self, ctx: &Ctx, link: &Link) {
         // A removed link's record is gone for good; do not bring it back.
-        if store::links(&ctx.env).contains(link) {
+        if store::current(&ctx.env, link).is_some() {
             let _ = store::save_status(&ctx.env, link, &self.status);
         }
     }
@@ -379,7 +379,7 @@ pub(super) fn stop(ctx: &Ctx, link: &Link) -> Result<bool> {
     if let Some(mut status) = store::load_status(&ctx.env, link) {
         status.state = "stopped: stopped by you".into();
         status.errors.clear();
-        if store::links(&ctx.env).contains(link) {
+        if store::current(&ctx.env, link).is_some() {
             let _ = store::save_status(&ctx.env, link, &status);
         }
     }
@@ -427,7 +427,7 @@ pub(crate) fn run_command(ctx: &Ctx, cfg: &Dict, flags: &AutosyncRunFlags) -> Re
     background.save(ctx, &link);
     let mut syncing = Loop {
         ctx,
-        link: &link,
+        link,
         options: &options,
         alias: None,
         retries: None,
@@ -437,6 +437,7 @@ pub(crate) fn run_command(ctx: &Ctx, cfg: &Dict, flags: &AutosyncRunFlags) -> Re
     };
     let stop = syncing.run(None);
     let mut background = syncing.background.take().expect("a background run");
+    let link = syncing.link;
     match stop {
         Ok(Stop::LinkRemoved) => background.stopped(ctx, &link, "the link was removed"),
         Ok(Stop::Bound) => background.stopped(ctx, &link, "asked to stop"),

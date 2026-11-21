@@ -42,7 +42,7 @@ struct State {
 
 pub(super) struct Loop<'a> {
     pub ctx: &'a Ctx,
-    pub link: &'a Link,
+    pub link: Link,
     pub options: &'a PullOptions,
     /// The SSH alias to start with; `None` looks the instance up first.
     pub alias: Option<String>,
@@ -74,14 +74,21 @@ impl Loop<'_> {
         let mut passes = 0u32;
         loop {
             passes += 1;
-            if self.background.is_some() && !store::links(&self.ctx.env).contains(self.link) {
-                return Ok(Stop::LinkRemoved);
+            if self.background.is_some() {
+                let Some(link) = store::current(&self.ctx.env, &self.link) else {
+                    return Ok(Stop::LinkRemoved);
+                };
+                if link != self.link {
+                    st.sig.clear();
+                    st.pending = None;
+                }
+                self.link = link;
             }
             match self.step(&mut st) {
                 Ok(()) => {
                     if st.failures > 0 {
                         if let Some(background) = self.background.as_mut() {
-                            background.recovered(self.ctx, self.link, st.failures);
+                            background.recovered(self.ctx, &self.link, st.failures);
                         }
                     }
                     st.failures = 0;
@@ -114,7 +121,7 @@ impl Loop<'_> {
     /// One look at the instance and, when it changed, one pull.
     fn step(&mut self, st: &mut State) -> Result<()> {
         let ctx = self.ctx;
-        let link = self.link;
+        let link = &self.link;
         if st.alias.is_none() {
             st.alias = Some(crate::provider::parse(&link.id)?.wait_ssh(ctx, 60.0)?);
             st.sig.clear();
@@ -170,7 +177,7 @@ impl Loop<'_> {
     fn failed(&mut self, error: &Error, failures: u32, delay: f64) -> Result<()> {
         let text = crate::redact::redact_text(error.summary());
         match self.background.as_mut() {
-            Some(background) => background.failed(self.ctx, self.link, &text, failures, delay),
+            Some(background) => background.failed(self.ctx, &self.link, &text, failures, delay),
             None => self
                 .ctx
                 .eprintln(&format!("Sync paused: {text}. Retrying in {delay:.0}s ...")),
@@ -184,11 +191,11 @@ impl Loop<'_> {
             return false;
         };
         super::prune(self.ctx, background.cfg());
-        let gone = !store::links(&self.ctx.env).contains(self.link);
+        let gone = store::current(&self.ctx.env, &self.link).is_none();
         if gone {
             self.background.as_mut().expect("checked above").stopped(
                 self.ctx,
-                self.link,
+                &self.link,
                 "the instance no longer exists",
             );
         }
@@ -213,7 +220,7 @@ pub(super) fn watch(
     ))?;
     Loop {
         ctx,
-        link,
+        link: link.clone(),
         options,
         alias: Some(remote.alias.clone()),
         retries: Some(WATCH_RETRIES),

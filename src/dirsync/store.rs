@@ -127,6 +127,14 @@ pub(crate) fn links(env: &Env) -> Vec<Link> {
     links
 }
 
+/// The current record of `link`'s instance and directory, whatever its other
+/// fields now say.
+pub(crate) fn current(env: &Env, link: &Link) -> Option<Link> {
+    links(env)
+        .into_iter()
+        .find(|l| l.id == link.id && l.local == link.local)
+}
+
 pub(crate) fn save_link(env: &Env, link: &Link) -> Result<()> {
     let text = pyjson::dumps(&link.value(), Some(2)) + "\n";
     crate::atomic_file::update(&file(env, link, "json"), |_| Ok(text.clone().into_bytes()))

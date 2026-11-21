@@ -1087,13 +1087,13 @@ fn options() -> PullOptions {
 fn autosync_loop<'a>(
     ctx: &'a Ctx,
     cfg: &'a Dict,
-    link: &'a Link,
+    link: &Link,
     options: &'a PullOptions,
     passes: Option<u32>,
 ) -> Loop<'a> {
     Loop {
         ctx,
-        link,
+        link: link.clone(),
         options,
         alias: None,
         retries: None,
@@ -1322,6 +1322,41 @@ fn the_background_loop_stops_by_itself_when_the_link_is_removed() {
         .unwrap();
     assert_eq!(stop, Stop::LinkRemoved);
     assert!(store::load_status(&w.t.env(), &link).is_none());
+}
+
+#[test]
+fn the_background_loop_follows_a_changed_include_instead_of_stopping() {
+    let w = Twin::new();
+    w.put(".gitignore", "outputs/\n");
+    w.put("train.py", "t\n");
+    w.git_init();
+    let ctx = w.ctx();
+    let link = w.link(&ctx);
+    out(&ctx);
+    w.remote_put("outputs/model.bin", "weights\n");
+    let (fake, env, linked) = (w.instance.clone(), w.t.env(), link.clone());
+    let runner = FakeRunner::new(move |cmd| {
+        if cmd.program() == "ssh" && cmd.argv.last().unwrap().contains(" wait ") {
+            let mut changed = linked.clone();
+            changed.include = vec!["outputs".into()];
+            changed.linked_at = "later".into();
+            store::save_link(&env, &changed).unwrap();
+        }
+        fake.answer(cmd)
+    });
+    let ctx =
+        w.t.ctx()
+            .runner(&runner)
+            .clock(&FakeClock::now_real())
+            .build();
+    let (cfg, options) = (Dict::new(), options());
+    let stop = autosync_loop(&ctx, &cfg, &link, &options, Some(4))
+        .run(None)
+        .unwrap();
+    assert_eq!(stop, Stop::Bound);
+    assert_eq!(w.local("outputs/model.bin"), "weights\n");
+    let status = store::load_status(&w.t.env(), &link).unwrap();
+    assert_eq!(status.state, "syncing");
 }
 
 #[test]

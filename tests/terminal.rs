@@ -735,8 +735,9 @@ fn test_arrow_keys_navigate_and_special_keys_never_reach_the_filter() {
         term.press(key);
     }
     term.press_until(LEFT, on("Repository"));
-    term.press(DOWN);
-    term.press(DOWN);
+    for _ in 0..3 {
+        term.press(DOWN);
+    }
     term.press_until(RIGHT, on("Clone from URL"));
     for c in ["o", "/", "r"] {
         term.press(c);

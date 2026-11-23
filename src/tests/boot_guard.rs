@@ -607,3 +607,34 @@ fn test_back_from_the_resumed_offer_list_with_a_gpu_flag_quits() {
     let titles: Vec<String> = ctx.ui.shown().into_iter().map(|s| s.title).collect();
     assert!(titles.iter().all(|t| t != "GPU"), "{titles:?}");
 }
+
+#[test]
+fn test_back_from_the_resumed_offer_list_returns_through_the_gpu_category() {
+    let t = TestEnv::new();
+    let runner = gone_then_created();
+    let ctx = t
+        .ctx()
+        .runner(&runner)
+        .interactive(true)
+        .pickers(&[
+            "\0\x1b[B\0\r\0Tesla T4\r\0\r\0yes\r",
+            "\0\x1b[D\0\x1b[D\0\x03",
+        ])
+        .build();
+    let args = ["up", "--no-repo", "--mode", "container", "--expire", "2h"];
+    assert_ne!(main(&ctx, &args), 0);
+    assert_eq!(create_calls(&runner).len(), 1);
+    let shown = ctx.ui.shown();
+    let notice = shown
+        .iter()
+        .rposition(|s| !s.notice.is_empty())
+        .expect("offer-gone notice shown");
+    let titles: Vec<&str> = shown[notice..].iter().map(|s| s.title.as_str()).collect();
+    let mut steps = titles.clone();
+    steps.dedup();
+    assert_eq!(
+        steps,
+        ["Offer: Tesla T4", "Datacenter Ampere/Ada/older", "GPU"],
+        "{titles:?}"
+    );
+}

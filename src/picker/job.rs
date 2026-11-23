@@ -62,6 +62,9 @@ impl Waker {
 trait Pending {
     /// Settle if the work finished; true when settled.
     fn poll(&self) -> bool;
+    /// The runtime is ending: keep a finished result, or let the next
+    /// runtime start the work again. Listeners belong to this runtime's loop.
+    fn abandon(&self);
 }
 
 /// The picker loop's job bookkeeping, current on the picker thread.
@@ -105,6 +108,14 @@ impl Runtime {
         CURRENT
             .with(|c| c.borrow().clone())
             .expect("a picker Job can only start while a picker runs")
+    }
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        for job in self.pending.take() {
+            job.abandon();
+        }
     }
 }
 
@@ -258,6 +269,15 @@ impl<T: Clone + Send + 'static> Pending for PendingJob<T> {
                 true
             }
             None => false,
+        }
+    }
+
+    fn abandon(&self) {
+        self.job.inner.listeners.borrow_mut().clear();
+        let outcome = self.slot.lock_recover().take();
+        match outcome {
+            Some(outcome) => self.job.settle(outcome),
+            None => self.job.set_state(JobState::Idle),
         }
     }
 }

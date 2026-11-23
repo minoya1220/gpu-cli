@@ -46,6 +46,8 @@ pub struct Picks {
     pub dir: Option<std::path::PathBuf>,
     pub mode: Option<String>,
     pub gpu: Option<String>,
+    /// The GPU list category the model was chosen from, if any.
+    pub category: Option<String>,
     pub offer: Option<Dict>,
     pub tpu: Option<TpuChoice>,
     pub modal: Option<String>,
@@ -317,18 +319,24 @@ impl LaunchWizard {
             if picks.repo.is_none() && chosen.repo.is_some() {
                 picks.repo = chosen.repo.clone();
                 picks.dir = chosen.dir.clone();
+                below.push(screen);
             } else if picks.repo.is_some() && picks.mode.is_none() && chosen.mode.is_some() {
                 picks.mode = chosen.mode.clone();
+                below.push(screen);
             } else if picks.repo.is_some()
                 && picks.mode.is_some()
                 && picks.gpu.is_none()
                 && chosen.gpu.is_some()
             {
+                below.push(screen);
+                if let Some(category) = &chosen.category {
+                    below.push(self.category_screen(picks.clone(), category.clone()));
+                }
                 picks.gpu = chosen.gpu.clone();
+                picks.category = chosen.category.clone();
             } else {
                 return (below, Next::Screen(screen));
             }
-            below.push(screen);
         }
     }
 
@@ -862,10 +870,11 @@ impl LaunchWizard {
                 .collect();
             hardware_options(rows, None)
         };
-        let wizard = self.clone();
+        let (wizard, from) = (self.clone(), category.clone());
         let select = move |choice: Choice| match choice {
             Choice::Gpu(gpu) => wizard.next(Picks {
                 gpu: Some(gpu),
+                category: Some(from.clone()),
                 ..picks.clone()
             }),
             _ => Next::Done(picks.clone()),

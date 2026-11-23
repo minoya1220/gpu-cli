@@ -1,6 +1,7 @@
 //! `gpu up`: validate, pick, search offers, build the request, confirm,
 //! create, arm expiry, open an editor.
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use jiff::Timestamp;
@@ -20,7 +21,7 @@ use crate::vast::offers::{
     gpu_stats, known_gpu_models, offer_label, offer_price, OfferSearch, NO_OFFERS,
 };
 use crate::vast::{argv, RequestArgs, Vast};
-use crate::wizard::{LaunchWizard, Picks, TpuOptions, WizardOptions, MODES};
+use crate::wizard::{Choice, LaunchWizard, Picks, TpuOptions, WizardOptions, MODES};
 
 const CLONE_URL: &str = ":clone-url:";
 
@@ -610,13 +611,13 @@ fn pick(
     search: &OfferSearch,
     retry: Option<Retry>,
 ) -> Result<Picked> {
-    let (picks, notice, resumed) = match retry {
-        Some(Retry { picks, notice }) => (picks, notice, true),
-        None => (
-            Picks::new(args.repo.clone(), args.mode.as_deref(), args.gpu.as_deref()),
-            String::new(),
-            false,
-        ),
+    let start = Picks::new(args.repo.clone(), args.mode.as_deref(), args.gpu.as_deref());
+    let (picks, notice, adopted) = match retry {
+        Some(Retry { picks, notice }) => {
+            let adopted = picks.dir.clone();
+            (picks, notice, adopted)
+        }
+        None => (start.clone(), String::new(), None),
     };
     if !ctx.interactive() {
         let (picks, offers) = prompt_for_picks(ctx, picks, search, owner)?;
@@ -632,17 +633,23 @@ fn pick(
         let worker = ctx.clone();
         let config = cfg.clone();
         let flags = args.clone();
-        let first = match wizard.next(picks) {
+        let (below, top) = wizard.resume(start, &picks);
+        let top = match top {
             Next::Screen(screen) if !notice.is_empty() => Next::Screen(screen.notice(notice)),
             step => step,
         };
-        let step = crate::picker::then(first, move |picks| {
-            confirmation(&worker, &flags, &config, picks, deadline)
-        });
-        return Ok(match crate::picker::resolve(ctx, step)? {
+        let same: Rc<dyn Fn(Choice) -> Choice> = Rc::new(|choice| choice);
+        let approve: Rc<dyn Fn(Picks) -> Next<Choice, ApprovedLaunch>> =
+            Rc::new(move |picks| confirmation(&worker, &flags, &config, picks, deadline));
+        let below = below
+            .into_iter()
+            .map(|screen| screen.remap(same.clone(), same.clone(), approve.clone()))
+            .collect();
+        let top = crate::picker::map_next(top, same.clone(), same, approve);
+        return Ok(match crate::picker::resolve_under(ctx, below, top)? {
             ApprovedLaunch::Vast(plan) => {
                 let (picks, offer) = *plan;
-                if !resumed {
+                if picks.dir != adopted {
                     adopt_dir(ctx, args, picks.dir.as_deref())?;
                 }
                 Picked::Vast {
@@ -684,6 +691,7 @@ fn pick(
 /// and `dispatch` then copies and links it after the launch.
 fn adopt_dir(ctx: &Ctx, args: &UpArgs, dir: Option<&std::path::Path>) -> Result<()> {
     let Some(dir) = dir else {
+        ctx.forget_picked_dir();
         return Ok(());
     };
     if !args.dry_run {

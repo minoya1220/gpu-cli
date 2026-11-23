@@ -303,6 +303,35 @@ impl LaunchWizard {
         }
     }
 
+    /// Return to where `chosen` stopped, starting again from `start`: the
+    /// screens the user passed through on the way, bottom first, and the
+    /// step that still needs an answer.
+    pub fn resume(&self, start: Picks, chosen: &Picks) -> (Vec<WizardScreen>, Step) {
+        let mut picks = start;
+        let mut below = Vec::new();
+        loop {
+            let step = self.next(picks.clone());
+            let Next::Screen(screen) = step else {
+                return (below, step);
+            };
+            if picks.repo.is_none() && chosen.repo.is_some() {
+                picks.repo = chosen.repo.clone();
+                picks.dir = chosen.dir.clone();
+            } else if picks.repo.is_some() && picks.mode.is_none() && chosen.mode.is_some() {
+                picks.mode = chosen.mode.clone();
+            } else if picks.repo.is_some()
+                && picks.mode.is_some()
+                && picks.gpu.is_none()
+                && chosen.gpu.is_some()
+            {
+                picks.gpu = chosen.gpu.clone();
+            } else {
+                return (below, Next::Screen(screen));
+            }
+            below.push(screen);
+        }
+    }
+
     fn next_step(&self, picks: Picks) -> Step {
         let s = &self.state;
         if picks.repo.is_none() {

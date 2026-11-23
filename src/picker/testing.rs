@@ -159,7 +159,7 @@ pub fn drive<V: PickValue, R: 'static>(
         abort: Some(abort),
         sigwinch: false,
     };
-    let end = run_loop(first, &mut io, options);
+    let end = run_loop(vec![first], &mut io, options);
     let (result, _keyboard) = handle.join().expect("script thread");
     if let Err(panic) = result {
         std::panic::resume_unwind(panic);

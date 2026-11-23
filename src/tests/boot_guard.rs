@@ -565,3 +565,45 @@ fn test_explicit_offer_failure_still_exits_in_a_terminal() {
     assert_eq!(create_calls(&runner).len(), 1);
     assert!(err(&ctx).contains("Vast has no capacity for this offer"));
 }
+
+#[test]
+fn test_back_from_the_resumed_offer_list_returns_to_the_gpu_list() {
+    let t = TestEnv::new();
+    let runner = gone_then_created();
+    let ctx = t
+        .ctx()
+        .runner(&runner)
+        .interactive(true)
+        .pickers(&[
+            "\0Tesla T4\r\0\r\0yes\r",
+            "\0\x1b[D\0Tesla T4\r\0\r\0yes\r",
+            "2",
+        ])
+        .build();
+    let args = ["up", "--no-repo", "--mode", "container", "--expire", "2h"];
+    assert_eq!(main(&ctx, &args), 0, "{}", err(&ctx));
+    assert_eq!(create_calls(&runner).len(), 2);
+    let shown = ctx.ui.shown();
+    let notice = shown
+        .iter()
+        .rposition(|s| !s.notice.is_empty())
+        .expect("offer-gone notice shown");
+    assert_eq!(shown[notice].title, "Offer: Tesla T4", "{shown:#?}");
+    assert_eq!(shown[notice + 1].title, "GPU", "{shown:#?}");
+}
+
+#[test]
+fn test_back_from_the_resumed_offer_list_with_a_gpu_flag_quits() {
+    let t = TestEnv::new();
+    let runner = gone_then_created();
+    let ctx = t
+        .ctx()
+        .runner(&runner)
+        .interactive(true)
+        .pickers(&["\0\r\0yes\r", "\0\x1b[D\x1b[D"])
+        .build();
+    assert_ne!(main(&ctx, &PICK), 0);
+    assert_eq!(create_calls(&runner).len(), 1);
+    let titles: Vec<String> = ctx.ui.shown().into_iter().map(|s| s.title).collect();
+    assert!(titles.iter().all(|t| t != "GPU"), "{titles:?}");
+}

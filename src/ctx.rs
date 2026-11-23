@@ -489,6 +489,14 @@ impl Ctx {
         self.output.lock_recover().picked_dir = Some(dir);
     }
 
+    /// Drop a directory the picker chose earlier, and the editor offer it deferred.
+    pub(crate) fn forget_picked_dir(&self) {
+        let mut output = self.output.lock_recover();
+        if output.picked_dir.take().is_some() {
+            output.defer_editor_offer = false;
+        }
+    }
+
     pub(crate) fn picked_dir(&self) -> Option<std::path::PathBuf> {
         self.output.lock_recover().picked_dir.clone()
     }

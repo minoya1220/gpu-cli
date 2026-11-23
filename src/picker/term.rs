@@ -83,7 +83,7 @@ fn aborted(abort: &Option<Arc<Abort>>, now: Instant) -> bool {
 }
 
 pub fn run_loop<V: PickValue, R: 'static>(
-    first: Screen<V, R>,
+    path: Vec<Screen<V, R>>,
     io: &mut dyn Io,
     options: LoopOptions,
 ) -> LoopEnd<R> {
@@ -97,8 +97,7 @@ pub fn run_loop<V: PickValue, R: 'static>(
     };
     let runtime = Runtime::new(Arc::new(Waker::new(wake_write)));
     let _entered = runtime.enter();
-    let core = Core::new(first);
-    core.borrow_mut().open(false);
+    let core = Core::new(path);
     let mut decoder = Decoder::new();
     let mut renderer = Renderer::default();
     let mut input_open = true;
@@ -466,7 +465,7 @@ impl Io for TerminalIo {
 }
 
 /// Run on the real terminal (stdin and stdout are TTYs).
-pub fn run_terminal<V: PickValue, R: 'static>(first: Screen<V, R>) -> Result<Outcome<R>> {
+pub fn run_terminal<V: PickValue, R: 'static>(path: Vec<Screen<V, R>>) -> Result<Outcome<R>> {
     terminal::enable_raw_mode().map_err(|e| Error::msg(os_message(&e, None)))?;
     ACTIVE.store(true, Ordering::SeqCst);
     let mut io = TerminalIo;
@@ -477,7 +476,7 @@ pub fn run_terminal<V: PickValue, R: 'static>(first: Screen<V, R>) -> Result<Out
         abort: None,
         sigwinch: true,
     };
-    let end = run_loop(first, &mut io, options);
+    let end = run_loop(path, &mut io, options);
     restore_terminal();
     match end {
         LoopEnd::Finished(outcome) => Ok(outcome),
@@ -578,7 +577,7 @@ impl Io for ScriptIo {
 /// Run on scripted key bytes; when they run out, the picker quits like
 /// Ctrl-D. The outcome, and each distinct state the picker showed.
 pub fn run_scripted<V: PickValue, R: 'static>(
-    first: Screen<V, R>,
+    path: Vec<Screen<V, R>>,
     keys: &[u8],
 ) -> (Outcome<R>, Vec<Snapshot>) {
     let (read, write) = rustix::pipe::pipe().expect("create key pipe");
@@ -600,7 +599,7 @@ pub fn run_scripted<V: PickValue, R: 'static>(
         abort: None,
         sigwinch: false,
     };
-    let outcome = match run_loop(first, &mut io, options) {
+    let outcome = match run_loop(path, &mut io, options) {
         LoopEnd::Finished(outcome) => outcome,
         LoopEnd::Aborted => Outcome::Cancelled(1),
     };

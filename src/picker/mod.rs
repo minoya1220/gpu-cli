@@ -338,6 +338,22 @@ pub(crate) fn then<V: PickValue, R: 'static, S: 'static>(
     map_next(step, Rc::new(|v| v), Rc::new(|v| v), Rc::new(done))
 }
 
+/// Resolve `step` with `below` already on the navigation stack beneath it,
+/// so back leaves the step for those screens, the topmost first.
+pub(crate) fn resolve_under<V: PickValue, R: 'static>(
+    ctx: &Ctx,
+    mut below: Vec<Screen<V, R>>,
+    step: Next<V, R>,
+) -> Result<R> {
+    match step {
+        Next::Screen(screen) => {
+            below.push(screen);
+            pick_path(ctx, below)
+        }
+        step => resolve(ctx, step),
+    }
+}
+
 pub(crate) fn resolve<V: PickValue, R: 'static>(ctx: &Ctx, step: Next<V, R>) -> Result<R> {
     match step {
         Next::Screen(screen) => pick(ctx, screen),
@@ -485,14 +501,23 @@ pub struct Core<V, R> {
 }
 
 impl<V: PickValue, R: 'static> Core<V, R> {
-    pub fn new(first: Screen<V, R>) -> Rc<RefCell<Core<V, R>>> {
+    /// A picker on `path`, a navigation stack listed bottom first. Each
+    /// screen opens in turn, as if the user had chosen their way to the top.
+    pub fn new(path: Vec<Screen<V, R>>) -> Rc<RefCell<Core<V, R>>> {
+        assert!(!path.is_empty(), "picker stack is never empty");
         let core = Rc::new(RefCell::new(Core {
-            stack: vec![View::new(first)],
+            stack: Vec::new(),
             quit_pending: false,
             outcome: None,
             this: Weak::new(),
         }));
-        core.borrow_mut().this = Rc::downgrade(&core);
+        let mut state = core.borrow_mut();
+        state.this = Rc::downgrade(&core);
+        for screen in path {
+            state.stack.push(View::new(screen));
+            state.open(false);
+        }
+        drop(state);
         core
     }
 
@@ -919,13 +944,17 @@ impl<V: PickValue, R: 'static> Core<V, R> {
 /// Run a picker flow from `first` on the terminal (or the scripted keys
 /// tests provide); its result, or `Error::Cancelled` when the user quits.
 pub fn pick<V: PickValue, R: 'static>(ctx: &Ctx, first: Screen<V, R>) -> Result<R> {
+    pick_path(ctx, vec![first])
+}
+
+fn pick_path<V: PickValue, R: 'static>(ctx: &Ctx, path: Vec<Screen<V, R>>) -> Result<R> {
     let outcome = match ctx.ui.next_script() {
         Some(keys) => {
-            let (outcome, shown) = term::run_scripted(first, &keys);
+            let (outcome, shown) = term::run_scripted(path, &keys);
             ctx.ui.record(shown);
             outcome
         }
-        None => term::run_terminal(first)?,
+        None => term::run_terminal(path)?,
     };
     match outcome {
         Outcome::Done(result) => Ok(result),

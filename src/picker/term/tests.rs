@@ -211,5 +211,5 @@ fn a_scripted_picker_that_never_finishes_loading_fails_instead_of_hanging() {
     })
     .load(job)
     .loading("Loading...");
-    run_scripted(first, b"\0\r");
+    run_scripted(vec![first], b"\0\r");
 }

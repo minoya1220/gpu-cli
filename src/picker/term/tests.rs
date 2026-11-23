@@ -198,3 +198,18 @@ fn restore_terminal_without_active_picker_does_not_wait_for_stdout() {
         "restore_terminal blocked on stdout with no active picker"
     );
 }
+
+#[test]
+#[should_panic(expected = "scripted picker stalled")]
+fn a_scripted_picker_that_never_finishes_loading_fails_instead_of_hanging() {
+    let job: crate::picker::Job<Vec<String>> = crate::picker::Job::new(|| {
+        std::thread::sleep(Duration::from_secs(5));
+        Ok(Vec::new())
+    });
+    let first = crate::picker::Screen::<String, String>::new("Stuck", Vec::new, |_| {
+        crate::picker::Next::Done(String::new())
+    })
+    .load(job)
+    .loading("Loading...");
+    run_scripted(first, b"\0\r");
+}

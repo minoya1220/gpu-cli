@@ -114,6 +114,7 @@ pub fn run_loop<V: PickValue, R: 'static>(
         if let Some(script) = io.script() {
             let core = core.borrow();
             script.shown(core.snapshot());
+            script.check_stalled();
             if core.idle() && decoder.deadline().is_none() {
                 script.release();
             }
@@ -135,6 +136,11 @@ pub fn run_loop<V: PickValue, R: 'static>(
             continue;
         }
         let mut deadline = decoder.deadline();
+        if io.script().is_some() {
+            // Wake to notice a stalled script instead of waiting forever.
+            let tick = now + Duration::from_millis(250);
+            deadline = Some(deadline.map_or(tick, |d| d.min(tick)));
+        }
         if options.abort.is_some() {
             let tick = now + Duration::from_millis(20);
             deadline = Some(deadline.map_or(tick, |d| d.min(tick)));
@@ -169,6 +175,11 @@ pub fn run_loop<V: PickValue, R: 'static>(
             }
         }
         keys.extend(decoder.flush(Instant::now()));
+        if !keys.is_empty() {
+            if let Some(script) = io.script() {
+                script.handled();
+            }
+        }
         for key in keys {
             core.borrow_mut().handle_key(key);
             if core.borrow().finished() {
@@ -480,14 +491,29 @@ pub struct Script {
     keys: Option<OwnedFd>,
     chunks: VecDeque<Vec<u8>>,
     shown: Vec<Snapshot>,
+    /// A chunk was written and the picker has not read it yet.
+    unread: bool,
+    /// When the picker last changed what it showed or received keys.
+    progress: Instant,
 }
+
+/// A scripted picker that neither redraws nor gets keys for this long is stuck.
+#[cfg(not(test))]
+const STALLED: Duration = Duration::from_secs(20);
+#[cfg(test)]
+const STALLED: Duration = Duration::from_secs(1);
 
 impl Script {
     fn release(&mut self) {
         let Some(keys) = &self.keys else {
             return;
         };
+        if self.unread {
+            return;
+        }
+        self.progress = Instant::now();
         if let Some(chunk) = self.chunks.pop_front() {
+            self.unread = !chunk.is_empty();
             let mut written = 0;
             while written < chunk.len() {
                 match rustix::io::write(keys, &chunk[written..]) {
@@ -501,9 +527,29 @@ impl Script {
         }
     }
 
+    /// The picker read and handled the chunk it was waiting on.
+    fn handled(&mut self) {
+        self.unread = false;
+    }
+
     fn shown(&mut self, snapshot: Snapshot) {
         if self.shown.last() != Some(&snapshot) {
             self.shown.push(snapshot);
+            self.progress = Instant::now();
+        }
+    }
+
+    /// Fail a stuck script with what it was waiting on, not a CI timeout.
+    fn check_stalled(&self) {
+        if self.progress.elapsed() > STALLED {
+            let last = self.shown.last().cloned().unwrap_or_default();
+            panic!(
+                "scripted picker stalled for {STALLED:?} on screen {:?} with {} key chunk(s) \
+                 unsent and its load unfinished; labels: {:?}",
+                last.title,
+                self.chunks.len(),
+                last.labels
+            );
         }
     }
 }
@@ -540,6 +586,8 @@ pub fn run_scripted<V: PickValue, R: 'static>(
         keys: Some(write),
         chunks: keys.split(|b| *b == 0).map(<[u8]>::to_vec).collect(),
         shown: Vec::new(),
+        unread: false,
+        progress: Instant::now(),
     };
     script.release();
     let mut io = ScriptIo {

@@ -73,7 +73,6 @@ pub struct UpArgs {
     pub unverified: bool,
     /// For a directory chosen in the picker, as `--dir` has them.
     pub max_upload: String,
-    pub autosync: bool,
 }
 
 impl From<&crate::cli::UpFlags> for UpArgs {
@@ -97,7 +96,6 @@ impl From<&crate::cli::UpFlags> for UpArgs {
             reliability: flags.reliability,
             unverified: flags.unverified,
             max_upload: flags.max_upload.clone(),
-            autosync: flags.autosync,
         }
     }
 }
@@ -609,7 +607,7 @@ fn adopt_dir(ctx: &Ctx, args: &UpArgs, dir: Option<&std::path::Path>) -> Result<
     };
     if !args.dry_run {
         crate::dirsync::preflight(ctx, dir, &args.max_upload)?;
-        if !args.autosync && !args.yes {
+        if !args.yes {
             crate::dirsync::ask_autosync(ctx, dir)?;
         }
     }

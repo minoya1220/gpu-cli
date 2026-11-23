@@ -150,6 +150,7 @@ struct State {
     recent_gpus: Vec<String>,
     choose_offer: bool,
     local_dir: bool,
+    home: std::path::PathBuf,
     tpu: TpuOptions,
     /// `tpu.prices`, or a job that reports TPUs as not set up.
     tpu_prices: Job<Arc<crate::gcp::prices::Prices>>,
@@ -237,6 +238,7 @@ impl LaunchWizard {
                 recent_gpus,
                 choose_offer: options.choose_offer,
                 local_dir: options.local_dir,
+                home: env.home(),
                 tpu_prices: options
                     .tpu
                     .prices
@@ -505,8 +507,21 @@ impl LaunchWizard {
     }
 
     fn dir_screen(&self, picks: Picks) -> WizardScreen {
-        // Empty means the current directory, as `gpu up --dir .` would.
-        let path = |value: &str| (!value.trim().is_empty()).then(|| value.trim().to_string());
+        // Empty means the current directory, as `gpu up --dir .` would, and
+        // a leading `~` is HOME, as the shell expands it for `--dir ~/proj`.
+        let home = self.state.home.clone();
+        let path = move |value: &str| -> Option<String> {
+            let value = value.trim();
+            if value.is_empty() {
+                return None;
+            }
+            let rest = match value.strip_prefix('~') {
+                Some(rest) if rest.is_empty() || rest.starts_with('/') => rest,
+                _ => return Some(value.to_string()),
+            };
+            Some(format!("{}{rest}", home.display()))
+        };
+        let path_for_select = path.clone();
         let validate = move |value: &str| -> std::result::Result<(), String> {
             crate::dirsync::resolve_dir(path(value).as_deref())
                 .map(|_| ())
@@ -517,7 +532,7 @@ impl LaunchWizard {
             let Choice::Text(text) = choice else {
                 return Next::Done(picks.clone());
             };
-            let Ok(dir) = crate::dirsync::resolve_dir(path(&text).as_deref()) else {
+            let Ok(dir) = crate::dirsync::resolve_dir(path_for_select(&text).as_deref()) else {
                 return Next::Notice("Not a directory".into());
             };
             wizard.state.selected_repo.set(true);

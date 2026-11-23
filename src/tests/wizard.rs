@@ -953,3 +953,24 @@ fn test_local_directory_defaults_to_the_current_directory() {
         Some(std::env::current_dir().unwrap().canonicalize().unwrap())
     );
 }
+
+#[test]
+fn test_local_directory_expands_a_leading_tilde_to_home() {
+    for typed in ["~/proj", "~"] {
+        let t = TestEnv::new();
+        let target = t.home.join("proj");
+        std::fs::create_dir_all(&target).unwrap();
+        let expected = if typed == "~" { t.home.clone() } else { target };
+        let flow = dir_wizard(&t, 2);
+        let result = run(&flow, dir_picks(), move |keys| {
+            keys.wait(|s| s.labels.contains(&"From local directory...".to_string()));
+            keys.press_until("7", on("From local directory"));
+            keys.type_text(typed);
+            keys.press(RIGHT);
+        });
+        let Outcome::Done(picks) = result else {
+            panic!("{result:?}");
+        };
+        assert_eq!(picks.dir, Some(expected.canonicalize().unwrap()));
+    }
+}

@@ -481,14 +481,22 @@ impl Io for ScriptIo {
 /// Run on scripted key bytes; when they run out, the picker quits like Ctrl-D.
 pub fn run_scripted<V: PickValue, R: 'static>(first: Screen<V, R>, keys: &[u8]) -> Outcome<R> {
     let (read, write) = rustix::pipe::pipe().expect("create key pipe");
-    let mut written = 0;
-    while written < keys.len() {
-        match rustix::io::write(&write, &keys[written..]) {
-            Ok(n) => written += n,
-            Err(_) => break,
+    // A NUL byte pauses the script so background jobs can finish first.
+    let chunks: Vec<Vec<u8>> = keys.split(|b| *b == 0).map(<[u8]>::to_vec).collect();
+    std::thread::spawn(move || {
+        for (i, chunk) in chunks.iter().enumerate() {
+            if i > 0 {
+                std::thread::sleep(Duration::from_millis(300));
+            }
+            let mut written = 0;
+            while written < chunk.len() {
+                match rustix::io::write(&write, &chunk[written..]) {
+                    Ok(n) => written += n,
+                    Err(_) => return,
+                }
+            }
         }
-    }
-    drop(write);
+    });
     let mut io = ScriptIo { input: read };
     let options = LoopOptions {
         eof_cancels: true,

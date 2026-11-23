@@ -447,3 +447,83 @@ fn test_request_dict_shape_for_refusal_is_redacted() {
     ]);
     assert_eq!(reply, expected);
 }
+
+const PICK: [&str; 8] = [
+    "up",
+    "--no-repo",
+    "--mode",
+    "container",
+    "--gpu",
+    "Tesla T4",
+    "--expire",
+    "2h",
+];
+
+/// The first create is refused as gone; later ones succeed.
+fn gone_then_created() -> Arc<FakeRunner> {
+    let creates = std::sync::atomic::AtomicUsize::new(0);
+    FakeRunner::new(move |cmd| match strs(&cmd.argv)[..] {
+        ["vastai", "search", "offers", ..] => {
+            ok(r#"[{"id": 42, "gpu_name": "Tesla T4", "num_gpus": 1, "dph_total": 0.1}]"#)
+        }
+        ["vastai", "create", "instance", ..] => {
+            if creates.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                refused(REFUSED)
+            } else {
+                ok(CREATED)
+            }
+        }
+        ["vastai", "show", "instances", "--raw"] => ok(
+            r#"[{"id": 123, "actual_status": "running", "ssh_host": "ssh1.vast.ai", "ssh_port": 22}]"#,
+        ),
+        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", ..] => ok(ARMED),
+        _ => ssh_ready(cmd),
+    })
+}
+
+#[test]
+fn test_picker_returns_to_the_offer_list_when_the_offer_is_gone() {
+    let t = TestEnv::new();
+    let runner = gone_then_created();
+    let ctx = t
+        .ctx()
+        .runner(&runner)
+        .interactive(true)
+        .pickers(&["\0\r\0yes\r", "\0\r\0yes\r", "2"])
+        .build();
+    let code = main(&ctx, &PICK);
+    assert_eq!(code, 0, "{}", err(&ctx));
+    // Offers are searched again, and the second create succeeded.
+    assert_eq!(create_calls(&runner).len(), 2);
+    let searches = runner
+        .argvs()
+        .iter()
+        .filter(|a| a[..3] == ["vastai", "search", "offers"])
+        .count();
+    assert!(searches >= 2, "{searches}");
+    assert!(!err(&ctx).contains("no capacity"), "{}", err(&ctx));
+}
+
+#[test]
+fn test_picker_cancel_after_the_offer_is_gone_exits_cancelled() {
+    let t = TestEnv::new();
+    let runner = gone_then_created();
+    let ctx = t
+        .ctx()
+        .runner(&runner)
+        .interactive(true)
+        .pickers(&["\0\r\0yes\r", "\0\x03"])
+        .build();
+    assert_ne!(main(&ctx, &PICK), 0);
+    assert_eq!(create_calls(&runner).len(), 1);
+}
+
+#[test]
+fn test_explicit_offer_failure_still_exits_in_a_terminal() {
+    let t = TestEnv::new();
+    let runner = launch(refused(REFUSED));
+    let ctx = t.ctx().runner(&runner).interactive(true).build();
+    assert_eq!(main(&ctx, &UP), 10, "{}", err(&ctx));
+    assert_eq!(create_calls(&runner).len(), 1);
+    assert!(err(&ctx).contains("Vast has no capacity for this offer"));
+}

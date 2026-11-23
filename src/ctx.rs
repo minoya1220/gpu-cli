@@ -464,6 +464,14 @@ impl Ctx {
         self.output.lock_recover().defer_editor_offer
     }
 
+    pub(crate) fn set_picked_dir(&self, dir: std::path::PathBuf) {
+        self.output.lock_recover().picked_dir = Some(dir);
+    }
+
+    pub(crate) fn picked_dir(&self) -> Option<std::path::PathBuf> {
+        self.output.lock_recover().picked_dir.clone()
+    }
+
     pub(crate) fn set_autosync_choice(&self, choice: Option<bool>) {
         if choice.is_some() {
             self.output.lock_recover().autosync_choice = choice;

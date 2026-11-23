@@ -42,6 +42,8 @@ pub enum TpuChoice {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Picks {
     pub repo: Option<Repo>,
+    /// A local directory to copy up and link, as `gpu up --dir`.
+    pub dir: Option<std::path::PathBuf>,
     pub mode: Option<String>,
     pub gpu: Option<String>,
     pub offer: Option<Dict>,
@@ -77,6 +79,7 @@ pub enum Choice {
     Repo(Repo),
     AllRepos,
     CloneUrl,
+    LocalDir,
     Text(String),
     Cloud(String),
     Mode(String),
@@ -146,6 +149,7 @@ struct State {
     categories: Vec<(String, Vec<String>)>,
     recent_gpus: Vec<String>,
     choose_offer: bool,
+    local_dir: bool,
     tpu: TpuOptions,
     /// `tpu.prices`, or a job that reports TPUs as not set up.
     tpu_prices: Job<Arc<crate::gcp::prices::Prices>>,
@@ -176,6 +180,8 @@ pub struct WizardOptions {
     pub choose_offer: bool,
     pub owner: String,
     pub tpu: TpuOptions,
+    /// Offer "From local directory..." (only `gpu up` can link one).
+    pub local_dir: bool,
 }
 
 impl Default for WizardOptions {
@@ -188,6 +194,7 @@ impl Default for WizardOptions {
             choose_offer: false,
             owner: String::new(),
             tpu: TpuOptions::default(),
+            local_dir: false,
         }
     }
 }
@@ -229,6 +236,7 @@ impl LaunchWizard {
                 models: options.models,
                 recent_gpus,
                 choose_offer: options.choose_offer,
+                local_dir: options.local_dir,
                 tpu_prices: options
                     .tpu
                     .prices
@@ -383,9 +391,11 @@ impl LaunchWizard {
         }
         .unwrap_or_default();
         let count = names.len();
+        // A fixed "From local directory" row takes the seventh recent slot.
+        let recent = if s.local_dir { 6 } else { 7 };
         let mut options: Vec<_> = names
             .into_iter()
-            .take(if all || searching { usize::MAX } else { 7 })
+            .take(if all || searching { usize::MAX } else { recent })
             .enumerate()
             .map(|(i, n)| {
                 let option = Opt::new(Choice::Repo(Repo::Named(n.clone())), n);
@@ -397,7 +407,10 @@ impl LaunchWizard {
             })
             .collect();
         if !all {
-            if count > 7 && !searching {
+            if s.local_dir {
+                options.push(Opt::new(Choice::LocalDir, "From local directory...").digit(7));
+            }
+            if count > recent && !searching {
                 options.push(Opt::new(Choice::AllRepos, "All repositories...").digit(8));
             }
             options.push(Opt::new(Choice::CloneUrl, "Clone from URL...").digit(9));
@@ -427,6 +440,7 @@ impl LaunchWizard {
                     ))
                 }
                 Choice::CloneUrl => return Next::Screen(wizard.url_screen(picks.clone())),
+                Choice::LocalDir => return Next::Screen(wizard.dir_screen(picks.clone())),
                 Choice::Repo(repo) => repo,
                 _ => return Next::Done(picks.clone()),
             };
@@ -487,6 +501,37 @@ impl LaunchWizard {
             .text_input(Some(Box::new(validate)))
             .input_label("Repository")
             .input_hint("HTTPS/git@ URL or owner/name")
+            .quick_select(false)
+    }
+
+    fn dir_screen(&self, picks: Picks) -> WizardScreen {
+        // Empty means the current directory, as `gpu up --dir .` would.
+        let path = |value: &str| (!value.trim().is_empty()).then(|| value.trim().to_string());
+        let validate = move |value: &str| -> std::result::Result<(), String> {
+            crate::dirsync::resolve_dir(path(value).as_deref())
+                .map(|_| ())
+                .map_err(|e| e.text().to_string())
+        };
+        let wizard = self.clone();
+        let select = move |choice: Choice| -> Step {
+            let Choice::Text(text) = choice else {
+                return Next::Done(picks.clone());
+            };
+            let Ok(dir) = crate::dirsync::resolve_dir(path(&text).as_deref()) else {
+                return Next::Notice("Not a directory".into());
+            };
+            wizard.state.selected_repo.set(true);
+            *wizard.state.chosen_cached.borrow_mut() = None;
+            wizard.next(Picks {
+                repo: Some(Repo::NoRepo),
+                dir: Some(dir),
+                ..picks.clone()
+            })
+        };
+        Screen::new("From local directory", Vec::new, select)
+            .text_input(Some(Box::new(validate)))
+            .input_label("Directory")
+            .input_hint("Enter for the current directory, or type a path")
             .quick_select(false)
     }
 

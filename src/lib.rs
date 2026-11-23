@@ -245,13 +245,14 @@ fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
             };
             let id = launched.id.clone();
             remote::after_up(ctx, launched, wait && !dry_run, timeout, wait_setup)?;
-            match (&flags.dir, id) {
-                (Some(dir), _) if dry_run => {
-                    dirsync::dry_run(ctx, std::path::Path::new(dir), &flags.max_upload)
-                }
-                (Some(dir), Some(id)) => {
-                    dirsync::after_up(ctx, &cfg, &flags, &id, std::path::Path::new(dir))
-                }
+            let dir = flags
+                .dir
+                .as_ref()
+                .map(std::path::PathBuf::from)
+                .or_else(|| ctx.picked_dir());
+            match (dir, id) {
+                (Some(dir), _) if dry_run => dirsync::dry_run(ctx, &dir, &flags.max_upload),
+                (Some(dir), Some(id)) => dirsync::after_up(ctx, &cfg, &flags, &id, &dir),
                 _ => Ok(()),
             }
         }

@@ -123,7 +123,7 @@ Omit the ID to pick an instance.
 
 ## Attach a GPU to a local directory
 
-For code that lives only on your computer: copy it up once, edit on the GPU (Zed or VS Code remote, or Neovim over SSH), and let `gpu sync` mirror the GPU's changes back. The GPU copy leads; the local directory is a mirror. Vast, Runpod, DigitalOcean and Google Cloud only; Modal has no SSH.
+For code that lives only on your computer: copy it up once, edit on the GPU (Zed or VS Code remote, or Neovim over SSH), and let `gpu sync` mirror the GPU's changes back. The GPU copy leads; the local directory is a mirror. Vast, Runpod, DigitalOcean and Google Cloud only; Modal has no SSH. In the interactive `gpu up` Repository picker, "From local directory..." (key 7) does the same: it asks for a path (Enter for the current directory), then asks about autosync.
 
 ```sh
 gpu up --dir .                          # normal picker (it asks about autosync), then copy this folder to /workspace/NAME

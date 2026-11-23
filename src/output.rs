@@ -16,6 +16,8 @@ pub(crate) struct CommandOutput {
     pub defer_editor_offer: bool,
     /// The picker's answer to the autosync question, once it was asked.
     pub autosync_choice: Option<bool>,
+    /// The directory the launch picker chose, as `--dir` would have given.
+    pub picked_dir: Option<std::path::PathBuf>,
 }
 
 pub(crate) fn envelope(ctx: &Ctx, command: &str, outcome: &Result<()>) -> Value {

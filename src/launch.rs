@@ -71,6 +71,9 @@ pub struct UpArgs {
     pub expire: Option<String>,
     pub reliability: Option<f64>,
     pub unverified: bool,
+    /// For a directory chosen in the picker, as `--dir` has them.
+    pub max_upload: String,
+    pub autosync: bool,
 }
 
 impl From<&crate::cli::UpFlags> for UpArgs {
@@ -93,6 +96,8 @@ impl From<&crate::cli::UpFlags> for UpArgs {
             expire: flags.expire.clone(),
             reliability: flags.reliability,
             unverified: flags.unverified,
+            max_upload: flags.max_upload.clone(),
+            autosync: flags.autosync,
         }
     }
 }
@@ -322,7 +327,13 @@ fn interrupt_notice(ctx: &Ctx, id: Option<&str>, deadline: Option<Timestamp>) ->
 #[derive(Clone)]
 enum ApprovedLaunch {
     Vast(Box<(Picks, Dict)>),
-    Gcp(Box<(crate::gcp::TpuArgs, crate::gcp::Prepared)>),
+    Gcp(
+        Box<(
+            crate::gcp::TpuArgs,
+            crate::gcp::Prepared,
+            Option<std::path::PathBuf>,
+        )>,
+    ),
 }
 
 fn confirmation(
@@ -342,6 +353,7 @@ fn confirmation(
             Ok(flags) => flags,
             Err(e) => return Next::Notice(e.text().into()),
         };
+        let dir = picks.dir.clone();
         let prepared = crate::gcp::wizard::complete(
             &flags,
             cfg,
@@ -354,7 +366,11 @@ fn confirmation(
                     std::rc::Rc::new(|v| v),
                     std::rc::Rc::new(|v| v),
                     std::rc::Rc::new(move |prepared| {
-                        Next::Done(ApprovedLaunch::Gcp(Box::new((flags.clone(), prepared))))
+                        Next::Done(ApprovedLaunch::Gcp(Box::new((
+                            flags.clone(),
+                            prepared,
+                            dir.clone(),
+                        ))))
                     }),
                 ),
             ),
@@ -549,6 +565,7 @@ fn pick(
         return Ok(match crate::picker::resolve(ctx, step)? {
             ApprovedLaunch::Vast(plan) => {
                 let (picks, offer) = *plan;
+                adopt_dir(ctx, args, picks.dir.as_deref())?;
                 Picked::Vast {
                     picks: Box::new(picks),
                     offer,
@@ -556,12 +573,14 @@ fn pick(
                 }
             }
             ApprovedLaunch::Gcp(plan) => {
-                let (flags, prepared) = *plan;
+                let (flags, prepared, dir) = *plan;
+                adopt_dir(ctx, args, dir.as_deref())?;
                 Picked::Gcp(crate::gcp::launch_prepared(ctx, &flags, cfg, prepared)?)
             }
         });
     }
     let picks = wizard.run(ctx, picks)?;
+    adopt_dir(ctx, args, picks.dir.as_deref())?;
     if picks.tpu.is_some() {
         return Ok(Picked::Gcp(crate::gcp::launch_from_picker(
             ctx, args, &picks, cfg, deadline,
@@ -579,6 +598,24 @@ fn pick(
         offer,
         confirmed: false,
     })
+}
+
+/// A directory chosen in the picker continues as `gpu up --dir PATH` does:
+/// the same upload check and autosync question before anything is rented,
+/// and `dispatch` then copies and links it after the launch.
+fn adopt_dir(ctx: &Ctx, args: &UpArgs, dir: Option<&std::path::Path>) -> Result<()> {
+    let Some(dir) = dir else {
+        return Ok(());
+    };
+    if !args.dry_run {
+        crate::dirsync::preflight(ctx, dir, &args.max_upload)?;
+        if !args.autosync && !args.yes {
+            crate::dirsync::ask_autosync(ctx, dir)?;
+        }
+    }
+    ctx.set_picked_dir(dir.to_path_buf());
+    ctx.defer_editor_offer();
+    Ok(())
 }
 
 /// The TTY launch wizard over Vast offers, Google Cloud TPUs and Modal GPUs.
@@ -606,6 +643,7 @@ fn launch_wizard(
             recent_gpus: recent,
             choose_offer: !args.yes && args.offer.is_none(),
             owner: owner.to_string(),
+            local_dir: true,
             tpu: TpuOptions {
                 prices: Some(crate::gcp::prices::job(ctx, cfg)),
                 cached_prices: crate::gcp::prices::cached_default(ctx, cfg),

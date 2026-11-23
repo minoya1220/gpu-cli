@@ -99,6 +99,7 @@ fn wizard(
                 types: vec!["v5e-1".into(), "v6e-1".into()],
                 ..Default::default()
             },
+            ..Default::default()
         },
     )
 }
@@ -219,6 +220,7 @@ fn hardware_grid_aligns_recents_categories_search_and_models_without_new_jobs() 
                 types: vec!["v6e-1".into()],
                 ..Default::default()
             },
+            ..Default::default()
         },
     );
     let result = run(
@@ -477,6 +479,7 @@ fn test_back_walks_every_screen_without_refetching_or_quitting() {
         modal: None,
         tpu: None,
         cloud: None,
+        ..Default::default()
     };
     assert_eq!(result, Outcome::Done(expected));
     assert_eq!(repo_calls.load(Ordering::SeqCst), 1);
@@ -689,6 +692,7 @@ fn test_auto_prices_are_shared_by_gpu_screens_and_loaded_once_per_mode() {
         modal: None,
         tpu: None,
         cloud: None,
+        ..Default::default()
     };
     assert_eq!(result, Outcome::Done(expected));
     let labels = gpu_labels.lock().unwrap();
@@ -822,5 +826,130 @@ fn test_recent_gpus_come_first_and_digits_filter_gpu_names() {
             gpu: Some("RTX 5090".into()),
             ..start
         })
+    );
+}
+
+fn dir_wizard(t: &TestEnv, count: usize) -> LaunchWizard {
+    LaunchWizard::new(
+        &t.env(),
+        WizardOptions {
+            repos: Job::new(move || Ok((1..=count).map(|i| format!("project-{i}")).collect())),
+            owner: "sampleuser".into(),
+            local_dir: true,
+            ..Default::default()
+        },
+    )
+}
+
+fn dir_picks() -> Picks {
+    Picks::new(None, Some("container"), Some("B200"))
+}
+
+#[test]
+fn test_local_directory_row_shortens_the_recent_list_by_one() {
+    let t = TestEnv::new();
+    let flow = dir_wizard(&t, 12);
+    let result = run(&flow, dir_picks(), move |keys| {
+        keys.wait(|s| s.labels.len() == 10);
+        assert_eq!(
+            keys.labels(),
+            [
+                "project-1",
+                "project-2",
+                "project-3",
+                "project-4",
+                "project-5",
+                "project-6",
+                "From local directory...",
+                "All repositories...",
+                "Clone from URL...",
+                "No repository"
+            ]
+        );
+        let body = keys.snapshot().body;
+        assert!(body[6].contains("7. From local directory..."));
+        assert!(body[7].contains("8. All repositories..."));
+        keys.press("6");
+    });
+    assert_eq!(
+        result,
+        Outcome::Done(Picks::new(
+            Some(Repo::from_arg("project-6")),
+            Some("container"),
+            Some("B200")
+        ))
+    );
+}
+
+#[test]
+fn test_all_repositories_row_follows_the_shortened_list() {
+    for (count, all) in [(0, false), (6, false), (7, true)] {
+        let t = TestEnv::new();
+        let flow = dir_wizard(&t, count);
+        let result = run(&flow, dir_picks(), move |keys| {
+            keys.wait(|s| s.labels.contains(&"No repository".to_string()));
+            assert_eq!(
+                keys.labels().contains(&"All repositories...".to_string()),
+                all
+            );
+            assert_eq!(keys.labels().len(), count.min(6) + 3 + usize::from(all));
+            keys.press("0");
+        });
+        assert_eq!(
+            result,
+            Outcome::Done(Picks::new(
+                Some(Repo::NoRepo),
+                Some("container"),
+                Some("B200")
+            ))
+        );
+    }
+}
+
+#[test]
+fn test_local_directory_row_asks_for_a_valid_path() {
+    let t = TestEnv::new();
+    let target = t.home.join("proj");
+    std::fs::create_dir_all(&target).unwrap();
+    let file = t.home.join("note.txt");
+    std::fs::write(&file, "x").unwrap();
+    let (typed, bad_file) = (target.display().to_string(), file.display().to_string());
+    let flow = dir_wizard(&t, 2);
+    let result = run(&flow, dir_picks(), move |keys| {
+        keys.wait(|s| s.labels.contains(&"From local directory...".to_string()));
+        keys.press_until("7", on("From local directory"));
+        keys.type_text("/definitely/missing/dir");
+        keys.press(RIGHT);
+        assert_eq!(keys.title(), "From local directory");
+        keys.press(BACK);
+        keys.type_text(&bad_file);
+        keys.press(RIGHT);
+        assert_eq!(keys.title(), "From local directory");
+        keys.press(BACK);
+        keys.type_text(&typed);
+        keys.press(RIGHT);
+    });
+    let Outcome::Done(picks) = result else {
+        panic!("{result:?}");
+    };
+    assert_eq!(picks.repo, Some(Repo::NoRepo));
+    assert_eq!(picks.dir, Some(target.canonicalize().unwrap()));
+}
+
+#[test]
+fn test_local_directory_defaults_to_the_current_directory() {
+    let t = TestEnv::new();
+    let flow = dir_wizard(&t, 2);
+    let result = run(&flow, dir_picks(), move |keys| {
+        keys.wait(|s| s.labels.contains(&"From local directory...".to_string()));
+        keys.press_until("7", on("From local directory"));
+        keys.press(RIGHT);
+    });
+    let Outcome::Done(picks) = result else {
+        panic!("{result:?}");
+    };
+    assert_eq!(
+        picks.dir,
+        Some(std::env::current_dir().unwrap().canonicalize().unwrap())
     );
 }

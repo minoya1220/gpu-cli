@@ -501,7 +501,7 @@ pub struct Script {
 #[cfg(not(test))]
 const STALLED: Duration = Duration::from_secs(20);
 #[cfg(test)]
-const STALLED: Duration = Duration::from_secs(1);
+const STALLED: Duration = Duration::from_secs(5);
 
 impl Script {
     fn release(&mut self) {

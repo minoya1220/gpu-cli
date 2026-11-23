@@ -19,6 +19,11 @@ publish() {
     mv -f "$ROOT/status.tmp" "$ROOT/status"
 }
 
+# Renew atomically: the supervisor must never read a truncated heartbeat as 0.
+heartbeat() {
+    date +%s >"$ROOT/attached.$$" && mv -f "$ROOT/attached.$$" "$ROOT/attached"
+}
+
 supervise() {
     # Written at runtime by the launcher, not a checked-in shell library.
     # shellcheck source=/dev/null
@@ -139,7 +144,7 @@ main() {
                 printf '%s' "$GPU_RUN_OUTPUTS_HOOK" >"$ROOT/outputs-hook.sh"
             fi
             : >"$ROOT/log"
-            date +%s >"$ROOT/attached"
+            heartbeat
             setsid bash "$ROOT/runner.sh" supervise "$ROOT" "$TOKEN" </dev/null >/dev/null 2>&1 &
             while [ ! -f "$ROOT/status" ] && [ "$count" -lt 50 ]; do sleep 0.1; count=$((count+1)); done
             [ -f "$ROOT/status" ] || exit 1
@@ -148,7 +153,7 @@ main() {
         supervise) supervise ;;
         task) task ;;
         status)
-            date +%s >"$ROOT/attached"
+            heartbeat
             [ -f "$ROOT/status" ] || exit 1
             IFS=$'\t' read -r phase rc timed <"$ROOT/status"
             # The supervisor publishes completion atomically, but the task

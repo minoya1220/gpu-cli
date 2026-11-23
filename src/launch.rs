@@ -1,6 +1,7 @@
 //! `gpu up`: validate, pick, search offers, build the request, confirm,
 //! create, arm expiry, open an editor.
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use jiff::Timestamp;
@@ -9,7 +10,7 @@ use crate::config;
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use crate::history::{recent_picks, record_picks_best_effort as record_picks};
-use crate::picker::Job;
+use crate::picker::{Job, Next};
 use crate::process::run;
 use crate::prompt::{choose, choose_gpu, confirm, Choices, Pick};
 use crate::pyfmt::{fixed, py_str};
@@ -20,7 +21,7 @@ use crate::vast::offers::{
     gpu_stats, known_gpu_models, offer_label, offer_price, OfferSearch, NO_OFFERS,
 };
 use crate::vast::{argv, RequestArgs, Vast};
-use crate::wizard::{LaunchWizard, Picks, TpuOptions, WizardOptions, MODES};
+use crate::wizard::{Choice, LaunchWizard, Picks, TpuOptions, WizardOptions, MODES};
 
 const CLONE_URL: &str = ":clone-url:";
 
@@ -442,14 +443,78 @@ pub(crate) fn launch(
     }
     let vast = Vast::new(ctx);
     let search = OfferSearch::new(vast.clone(), args, cfg)?;
-    let (picks, offer, tty_confirmed) = match pick(ctx, args, cfg, deadline, &owner, &search)? {
-        Picked::Vast {
-            picks,
+    let mut again: Option<Retry> = None;
+    loop {
+        let (picks, offer, tty_confirmed) =
+            match pick(ctx, args, cfg, deadline, &owner, &search, again.take())? {
+                Picked::Vast {
+                    picks,
+                    offer,
+                    confirmed,
+                } => (*picks, offer, confirmed),
+                Picked::Gcp(launched) => return Ok(launched),
+            };
+        let refused = match launch_offer(
+            ctx,
+            args,
+            cfg,
+            deadline,
+            &vast,
+            picks.clone(),
             offer,
-            confirmed,
-        } => (*picks, offer, confirmed),
-        Picked::Gcp(launched) => return Ok(launched),
-    };
+            tty_confirmed,
+        )? {
+            Attempt::Launched(launched) => return Ok(launched),
+            Attempt::CreateFailed(error) => error,
+        };
+        match refused {
+            Error::Status(crate::error::ExitCode::NoCapacity, text)
+                if tty_confirmed && ctx.interactive() && args.offer.is_none() =>
+            {
+                // Nothing was rented: the offer is gone. Back to the offer list.
+                ctx.set_interrupt_notice(None);
+                again = Some(Retry {
+                    picks: Picks {
+                        offer: None,
+                        ..picks
+                    },
+                    notice: crate::redact::redact_text(text.as_str())
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .to_string(),
+                });
+            }
+            error => return Err(error),
+        }
+    }
+}
+
+/// How one create attempt ended: launched (or stopped before renting), or
+/// the create request itself failed.
+enum Attempt {
+    Launched(Launched),
+    CreateFailed(Error),
+}
+
+/// Where the picker resumes after a failed create: the earlier answers,
+/// the offer list, and why the chosen offer failed.
+struct Retry {
+    picks: Picks,
+    notice: String,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn launch_offer(
+    ctx: &Ctx,
+    args: &UpArgs,
+    cfg: &Dict,
+    deadline: Option<Timestamp>,
+    vast: &Vast,
+    picks: Picks,
+    offer: Dict,
+    tty_confirmed: bool,
+) -> Result<Attempt> {
     let repo = picks.repo.clone().unwrap_or(Repo::NoRepo);
     let mode = picks.mode.clone().unwrap_or_default();
     let gpu = picks.gpu.clone().unwrap_or_default();
@@ -481,7 +546,7 @@ pub(crate) fn launch(
                 "Auto-destroy requested after {expire}; no timer installed (dry run)."
             ))?;
         }
-        return Ok(Launched::default());
+        return Ok(Attempt::Launched(Launched::default()));
     }
     if !tty_confirmed {
         ctx.println(&format!(
@@ -492,7 +557,7 @@ pub(crate) fn launch(
         ))?;
         if !args.yes && !confirm(ctx, None)? {
             ctx.println("Cancelled.")?;
-            return Ok(Launched::default());
+            return Ok(Attempt::Launched(Launched::default()));
         }
     }
     if deadline.is_some_and(|at| at <= ctx.clock.now()) {
@@ -500,7 +565,10 @@ pub(crate) fn launch(
             Error::msg("Expiry deadline passed; no instance created").next("gpu up --expire 2h")
         );
     }
-    let (summary, instance_id) = create(ctx, &vast, &request, deadline)?;
+    let (summary, instance_id) = match create(ctx, vast, &request, deadline) {
+        Ok(created) => created,
+        Err(error) => return Ok(Attempt::CreateFailed(error)),
+    };
     // Preserve the created ID and attempt expiry before propagating a failed announcement.
     let announced = ctx.println(&summary);
     if ctx.json() && instance_id.is_none() {
@@ -515,10 +583,10 @@ pub(crate) fn launch(
     if let Some(id) = &instance_id {
         crate::editors::offer_after_launch(ctx, cfg, &crate::provider::VastId(id.clone()))?;
     }
-    Ok(Launched {
+    Ok(Attempt::Launched(Launched {
         id: instance_id,
         ready_alias,
-    })
+    }))
 }
 
 /// What `gpu up` launches: a Vast offer (`confirmed` when the TTY
@@ -541,8 +609,16 @@ fn pick(
     deadline: Option<Timestamp>,
     owner: &str,
     search: &OfferSearch,
+    retry: Option<Retry>,
 ) -> Result<Picked> {
-    let picks = Picks::new(args.repo.clone(), args.mode.as_deref(), args.gpu.as_deref());
+    let start = Picks::new(args.repo.clone(), args.mode.as_deref(), args.gpu.as_deref());
+    let (picks, notice, adopted) = match retry {
+        Some(Retry { picks, notice }) => {
+            let adopted = picks.dir.clone();
+            (picks, notice, adopted)
+        }
+        None => (start.clone(), String::new(), None),
+    };
     if !ctx.interactive() {
         let (picks, offers) = prompt_for_picks(ctx, picks, search, owner)?;
         let offer = select_offer(ctx, offers, args)?;
@@ -557,13 +633,25 @@ fn pick(
         let worker = ctx.clone();
         let config = cfg.clone();
         let flags = args.clone();
-        let step = crate::picker::then(wizard.next(picks), move |picks| {
-            confirmation(&worker, &flags, &config, picks, deadline)
-        });
-        return Ok(match crate::picker::resolve(ctx, step)? {
+        let (below, top) = wizard.resume(start, &picks);
+        let top = match top {
+            Next::Screen(screen) if !notice.is_empty() => Next::Screen(screen.notice(notice)),
+            step => step,
+        };
+        let same: Rc<dyn Fn(Choice) -> Choice> = Rc::new(|choice| choice);
+        let approve: Rc<dyn Fn(Picks) -> Next<Choice, ApprovedLaunch>> =
+            Rc::new(move |picks| confirmation(&worker, &flags, &config, picks, deadline));
+        let below = below
+            .into_iter()
+            .map(|screen| screen.remap(same.clone(), same.clone(), approve.clone()))
+            .collect();
+        let top = crate::picker::map_next(top, same.clone(), same, approve);
+        return Ok(match crate::picker::resolve_under(ctx, below, top)? {
             ApprovedLaunch::Vast(plan) => {
                 let (picks, offer) = *plan;
-                adopt_dir(ctx, args, picks.dir.as_deref())?;
+                if picks.dir != adopted {
+                    adopt_dir(ctx, args, picks.dir.as_deref())?;
+                }
                 Picked::Vast {
                     picks: Box::new(picks),
                     offer,
@@ -572,7 +660,9 @@ fn pick(
             }
             ApprovedLaunch::Gcp(plan) => {
                 let (flags, prepared, dir) = *plan;
-                adopt_dir(ctx, args, dir.as_deref())?;
+                if dir != adopted {
+                    adopt_dir(ctx, args, dir.as_deref())?;
+                }
                 Picked::Gcp(crate::gcp::launch_prepared(ctx, &flags, cfg, prepared)?)
             }
         });
@@ -603,6 +693,7 @@ fn pick(
 /// and `dispatch` then copies and links it after the launch.
 fn adopt_dir(ctx: &Ctx, args: &UpArgs, dir: Option<&std::path::Path>) -> Result<()> {
     let Some(dir) = dir else {
+        ctx.forget_picked_dir();
         return Ok(());
     };
     if !args.dry_run {

@@ -38,14 +38,26 @@ pub enum TpuChoice {
     Type(String),
 }
 
+/// The repository screen a repository was chosen on, below the list.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum RepoFrom {
+    AllRepos,
+    CloneUrl,
+    LocalDir,
+}
+
 /// Launch choices; `None` means not chosen yet.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Picks {
     pub repo: Option<Repo>,
     /// A local directory to copy up and link, as `gpu up --dir`.
     pub dir: Option<std::path::PathBuf>,
+    /// The repository screen the repository was chosen on, if not the list.
+    pub repo_from: Option<RepoFrom>,
     pub mode: Option<String>,
     pub gpu: Option<String>,
+    /// The GPU list category the model was chosen from, if any.
+    pub category: Option<String>,
     pub offer: Option<Dict>,
     pub tpu: Option<TpuChoice>,
     pub modal: Option<String>,
@@ -303,6 +315,47 @@ impl LaunchWizard {
         }
     }
 
+    /// Return to where `chosen` stopped, starting again from `start`: the
+    /// screens the user passed through on the way, bottom first, and the
+    /// step that still needs an answer.
+    pub fn resume(&self, start: Picks, chosen: &Picks) -> (Vec<WizardScreen>, Step) {
+        let mut picks = start;
+        let mut below = Vec::new();
+        loop {
+            let step = self.next(picks.clone());
+            let Next::Screen(screen) = step else {
+                return (below, step);
+            };
+            if picks.repo.is_none() && chosen.repo.is_some() {
+                below.push(screen);
+                below.extend(chosen.repo_from.map(|from| match from {
+                    RepoFrom::AllRepos => self.repo_list_screen(picks.clone(), String::new(), true),
+                    RepoFrom::CloneUrl => self.url_screen(picks.clone()),
+                    RepoFrom::LocalDir => self.dir_screen(picks.clone()),
+                }));
+                picks.repo = chosen.repo.clone();
+                picks.dir = chosen.dir.clone();
+                picks.repo_from = chosen.repo_from;
+            } else if picks.repo.is_some() && picks.mode.is_none() && chosen.mode.is_some() {
+                picks.mode = chosen.mode.clone();
+                below.push(screen);
+            } else if picks.repo.is_some()
+                && picks.mode.is_some()
+                && picks.gpu.is_none()
+                && chosen.gpu.is_some()
+            {
+                below.push(screen);
+                if let Some(category) = &chosen.category {
+                    below.push(self.category_screen(picks.clone(), category.clone()));
+                }
+                picks.gpu = chosen.gpu.clone();
+                picks.category = chosen.category.clone();
+            } else {
+                return (below, Next::Screen(screen));
+            }
+        }
+    }
+
     fn next_step(&self, picks: Picks) -> Step {
         let s = &self.state;
         if picks.repo.is_none() {
@@ -454,6 +507,7 @@ impl LaunchWizard {
             };
             wizard.next(Picks {
                 repo: Some(repo),
+                repo_from: all.then_some(RepoFrom::AllRepos),
                 ..picks.clone()
             })
         };
@@ -496,6 +550,7 @@ impl LaunchWizard {
             *wizard.state.chosen_cached.borrow_mut() = None;
             wizard.next(Picks {
                 repo: Some(Repo::from_arg(&text)),
+                repo_from: Some(RepoFrom::CloneUrl),
                 ..picks.clone()
             })
         };
@@ -540,6 +595,7 @@ impl LaunchWizard {
             wizard.next(Picks {
                 repo: Some(Repo::NoRepo),
                 dir: Some(dir),
+                repo_from: Some(RepoFrom::LocalDir),
                 ..picks.clone()
             })
         };
@@ -833,10 +889,11 @@ impl LaunchWizard {
                 .collect();
             hardware_options(rows, None)
         };
-        let wizard = self.clone();
+        let (wizard, from) = (self.clone(), category.clone());
         let select = move |choice: Choice| match choice {
             Choice::Gpu(gpu) => wizard.next(Picks {
                 gpu: Some(gpu),
+                category: Some(from.clone()),
                 ..picks.clone()
             }),
             _ => Next::Done(picks.clone()),

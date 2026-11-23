@@ -198,3 +198,51 @@ fn restore_terminal_without_active_picker_does_not_wait_for_stdout() {
         "restore_terminal blocked on stdout with no active picker"
     );
 }
+
+#[test]
+#[should_panic(expected = "scripted picker stalled")]
+fn a_scripted_picker_that_never_finishes_loading_fails_instead_of_hanging() {
+    let job: crate::picker::Job<Vec<String>> = crate::picker::Job::new(|| {
+        std::thread::sleep(Duration::from_secs(60));
+        Ok(Vec::new())
+    });
+    let first = crate::picker::Screen::<String, String>::new("Stuck", Vec::new, |_| {
+        crate::picker::Next::Done(String::new())
+    })
+    .load(job)
+    .loading("Loading...");
+    run_scripted(vec![first], b"\0\r");
+}
+
+#[test]
+fn a_job_still_running_when_its_picker_ends_runs_again_in_the_next_picker() {
+    use crate::picker::{Job, Next, Opt, Outcome, Screen};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let release = Arc::new(AtomicBool::new(false));
+    let gate = release.clone();
+    let job: Job<String> = Job::new(move || {
+        while !gate.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        Ok("ready".into())
+    });
+    let screen = |job: &Job<String>| {
+        let rows = job.clone();
+        Screen::<String, String>::new(
+            "Prices",
+            move || {
+                rows.result()
+                    .map(|value| vec![Opt::new(value.clone(), value)])
+                    .unwrap_or_default()
+            },
+            Next::Done,
+        )
+    };
+    let first = screen(&job).background(job.clone());
+    let (outcome, _) = run_scripted(vec![first], b"\x04");
+    assert_eq!(outcome, Outcome::Cancelled(1));
+    release.store(true, Ordering::SeqCst);
+    let second = screen(&job).load(job.clone());
+    let (outcome, _) = run_scripted(vec![second], b"\0\r");
+    assert_eq!(outcome, Outcome::Done("ready".into()));
+}

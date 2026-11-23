@@ -1857,3 +1857,69 @@ fn test_local_directory_choice_dry_run_reports_the_upload_in_terminal() {
         );
     }
 }
+
+#[test]
+fn test_gone_offer_shows_the_error_in_the_offer_list_and_a_second_pick_launches() {
+    let sandbox = Sandbox::new();
+    let gone = r#"{"error": true, "status_code": 404, "msg": "error 404/3603: no_such_ask Instance type by id 56377751 is not available."}"#;
+    let created = r#"{"success":true,"new_contract":123,"instance_api_key":"private-test-key"}"#;
+    let attempts = sandbox.root.join("creates");
+    sandbox.stub("vastai", &common::FAKE_CLI.replace(
+        "case \"$tool $1 $2\" in",
+        &format!(
+            "case \"$tool $1 $2\" in\n    \"vastai create instance\")\n        if [ -e '{marker}' ]; then echo '{created}'; else touch '{marker}'; echo '{gone}' >&2; fi ;;",
+            marker = attempts.display(),
+        ),
+    ));
+    let mut term = Terminal::start(
+        &sandbox,
+        &[
+            "up",
+            "--repo",
+            "example/gpu-cli",
+            "--mode",
+            "container",
+            "--gpu",
+            "RTX 4090",
+        ],
+    );
+    term.wait(on("Offer: RTX 4090"));
+    term.wait(shows("id=100"));
+    term.press_until(
+        RIGHT,
+        with_footer(shows("Type 'yes' to confirm:"), "← back"),
+    );
+    term.press("yes");
+    let notice = "Vast has no capacity for this offer: error 404/3603: no_such_ask Instance type by id 56377751 is not available.";
+    term.press_until(ENTER, |t| {
+        on("Offer: RTX 4090")(t) && shows("id=100")(t) && shows("no_such_ask")(t)
+    });
+    let after_failure = term.lines();
+    println!(
+        "--- Offer list after the failed create ---\n{}",
+        after_failure.join("\n")
+    );
+    assert!(term.running(), "the failed create must not exit gpu up");
+    // The notice is wider than the terminal, so it spans two rows.
+    assert!(
+        after_failure.concat().contains(notice),
+        "{}",
+        after_failure.join("\n")
+    );
+    assert!(!term.output_text().contains("Next: gpu up with another"));
+    term.press_until(
+        RIGHT,
+        with_footer(shows("Type 'yes' to confirm:"), "← back"),
+    );
+    term.press("yes");
+    term.press_until(ENTER, shows("Open workspace"));
+    println!("--- After the second pick ---\n{}", term.lines().join("\n"));
+    term.press("2");
+    assert_eq!(term.exit_status(), 0, "{}", term.output_text());
+    let creates = sandbox
+        .calls()
+        .iter()
+        .filter(|a| a.iter().any(|s| s == "create"))
+        .count();
+    assert_eq!(creates, 2);
+}

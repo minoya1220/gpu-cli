@@ -447,3 +447,287 @@ fn test_request_dict_shape_for_refusal_is_redacted() {
     ]);
     assert_eq!(reply, expected);
 }
+
+const PICK: [&str; 8] = [
+    "up",
+    "--no-repo",
+    "--mode",
+    "container",
+    "--gpu",
+    "Tesla T4",
+    "--expire",
+    "2h",
+];
+
+/// The first create is refused as gone; later ones succeed.
+fn gone_then_created() -> Arc<FakeRunner> {
+    gone_for(1)
+}
+
+/// The first `refusals` creates are refused as gone; later ones succeed.
+fn gone_for(refusals: usize) -> Arc<FakeRunner> {
+    let creates = std::sync::atomic::AtomicUsize::new(0);
+    FakeRunner::new(move |cmd| match strs(&cmd.argv)[..] {
+        ["vastai", "search", "offers", ..] => {
+            ok(r#"[{"id": 42, "gpu_name": "Tesla T4", "num_gpus": 1, "dph_total": 0.1}]"#)
+        }
+        ["gh", "repo", "list", ..] => ok(&format!(
+            "[{}]",
+            (1..=8)
+                .map(|i| format!(r#"{{"name": "project-{i}"}}"#))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+        ["git", "-C", _, "rev-parse", "--show-toplevel"] => {
+            Ok(Output::failed(128, "fatal: not a git repository"))
+        }
+        ["vastai", "create", "instance", ..] => {
+            if creates.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < refusals {
+                refused(REFUSED)
+            } else {
+                ok(CREATED)
+            }
+        }
+        ["vastai", "show", "instances", "--raw"] => ok(
+            r#"[{"id": 123, "actual_status": "running", "ssh_host": "ssh1.vast.ai", "ssh_port": 22}]"#,
+        ),
+        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", ..] => ok(ARMED),
+        _ => ssh_ready(cmd),
+    })
+}
+
+#[test]
+fn test_picker_returns_to_the_offer_list_when_the_offer_is_gone() {
+    let t = TestEnv::new();
+    let runner = gone_then_created();
+    let ctx = t
+        .ctx()
+        .runner(&runner)
+        .interactive(true)
+        .pickers(&["\0\r\0yes\r", "\0\r\0yes\r", "2"])
+        .build();
+    let code = main(&ctx, &PICK);
+    assert_eq!(code, 0, "{}", err(&ctx));
+    // Offers are searched again, and the second create succeeded.
+    assert_eq!(create_calls(&runner).len(), 2);
+    let searches = runner
+        .argvs()
+        .iter()
+        .filter(|a| a[..3] == ["vastai", "search", "offers"])
+        .count();
+    assert!(searches >= 2, "{searches}");
+    assert!(!err(&ctx).contains("no capacity"), "{}", err(&ctx));
+    let notice = "Vast has no capacity for this offer: error 410/3907: no_such_ask Instance type 42 is no longer available.";
+    let shown = ctx.ui.shown();
+    assert!(
+        shown
+            .iter()
+            .any(|s| s.notice == notice && s.body.iter().any(|line| line.contains(notice))),
+        "{shown:#?}"
+    );
+}
+
+#[test]
+fn test_picker_does_not_retry_once_the_instance_exists() {
+    let t = TestEnv::new();
+    let runner = FakeRunner::new(move |cmd| match strs(&cmd.argv)[..] {
+        ["vastai", "search", "offers", ..] => {
+            ok(r#"[{"id": 42, "gpu_name": "Tesla T4", "num_gpus": 1, "dph_total": 0.1}]"#)
+        }
+        ["vastai", "create", "instance", ..] => ok(CREATED),
+        ["vastai", "show", "instances", "--raw"] => Ok(Output {
+            code: 1,
+            stdout: String::new(),
+            stderr: "error: instance 123 host is no longer available\n".into(),
+        }),
+        _ => ssh_ready(cmd),
+    });
+    let ctx = t
+        .ctx()
+        .runner(&runner)
+        .interactive(true)
+        .pickers(&["\0\r\0yes\r"])
+        .build();
+    assert_ne!(main(&ctx, &PICK), 0);
+    assert_eq!(create_calls(&runner).len(), 1);
+    let stderr = err(&ctx);
+    assert!(
+        stderr.contains("Instance 123 created but expiry NOT verified; billing continues."),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn test_picker_cancel_after_the_offer_is_gone_exits_cancelled() {
+    let t = TestEnv::new();
+    let runner = gone_then_created();
+    let ctx = t
+        .ctx()
+        .runner(&runner)
+        .interactive(true)
+        .pickers(&["\0\r\0yes\r", "\0\x03"])
+        .build();
+    assert_ne!(main(&ctx, &PICK), 0);
+    assert_eq!(create_calls(&runner).len(), 1);
+}
+
+#[test]
+fn test_explicit_offer_failure_still_exits_in_a_terminal() {
+    let t = TestEnv::new();
+    let runner = launch(refused(REFUSED));
+    let ctx = t.ctx().runner(&runner).interactive(true).build();
+    assert_eq!(main(&ctx, &UP), 10, "{}", err(&ctx));
+    assert_eq!(create_calls(&runner).len(), 1);
+    assert!(err(&ctx).contains("Vast has no capacity for this offer"));
+}
+
+#[test]
+fn test_back_from_the_resumed_offer_list_returns_to_the_gpu_list() {
+    let t = TestEnv::new();
+    let runner = gone_then_created();
+    let ctx = t
+        .ctx()
+        .runner(&runner)
+        .interactive(true)
+        .pickers(&[
+            "\0Tesla T4\r\0\r\0yes\r",
+            "\0\x1b[D\0Tesla T4\r\0\r\0yes\r",
+            "2",
+        ])
+        .build();
+    let args = ["up", "--no-repo", "--mode", "container", "--expire", "2h"];
+    assert_eq!(main(&ctx, &args), 0, "{}", err(&ctx));
+    assert_eq!(create_calls(&runner).len(), 2);
+    let shown = ctx.ui.shown();
+    let notice = shown
+        .iter()
+        .rposition(|s| !s.notice.is_empty())
+        .expect("offer-gone notice shown");
+    assert_eq!(shown[notice].title, "Offer: Tesla T4", "{shown:#?}");
+    assert_eq!(shown[notice + 1].title, "GPU", "{shown:#?}");
+}
+
+#[test]
+fn test_back_from_the_resumed_offer_list_with_a_gpu_flag_quits() {
+    let t = TestEnv::new();
+    let runner = gone_then_created();
+    let ctx = t
+        .ctx()
+        .runner(&runner)
+        .interactive(true)
+        .pickers(&["\0\r\0yes\r", "\0\x1b[D\x1b[D"])
+        .build();
+    assert_ne!(main(&ctx, &PICK), 0);
+    assert_eq!(create_calls(&runner).len(), 1);
+    let titles: Vec<String> = ctx.ui.shown().into_iter().map(|s| s.title).collect();
+    assert!(titles.iter().all(|t| t != "GPU"), "{titles:?}");
+}
+
+#[test]
+fn test_back_from_the_resumed_offer_list_returns_through_the_gpu_category() {
+    let t = TestEnv::new();
+    let runner = gone_then_created();
+    let ctx = t
+        .ctx()
+        .runner(&runner)
+        .interactive(true)
+        .pickers(&[
+            "\0\x1b[B\0\r\0Tesla T4\r\0\r\0yes\r",
+            "\0\x1b[D\0\x1b[D\0\x03",
+        ])
+        .build();
+    let args = ["up", "--no-repo", "--mode", "container", "--expire", "2h"];
+    assert_ne!(main(&ctx, &args), 0);
+    assert_eq!(create_calls(&runner).len(), 1);
+    let shown = ctx.ui.shown();
+    let notice = shown
+        .iter()
+        .rposition(|s| !s.notice.is_empty())
+        .expect("offer-gone notice shown");
+    let titles: Vec<&str> = shown[notice..].iter().map(|s| s.title.as_str()).collect();
+    let mut steps = titles.clone();
+    steps.dedup();
+    assert_eq!(
+        steps,
+        ["Offer: Tesla T4", "Datacenter Ampere/Ada/older", "GPU"],
+        "{titles:?}"
+    );
+}
+
+/// `gpu up` with no `--repo`: the repository is chosen in the picker.
+const PICK_REPO: [&str; 7] = [
+    "up",
+    "--mode",
+    "container",
+    "--gpu",
+    "Tesla T4",
+    "--expire",
+    "2h",
+];
+
+/// Screen titles from the first offer-gone notice on, without repeats.
+fn steps_after_notice(ctx: &crate::ctx::Ctx) -> Vec<String> {
+    let shown = ctx.ui.shown();
+    let notice = shown
+        .iter()
+        .position(|s| !s.notice.is_empty())
+        .expect("offer-gone notice shown");
+    let mut steps: Vec<String> = shown[notice..].iter().map(|s| s.title.clone()).collect();
+    steps.dedup();
+    steps
+}
+
+#[test]
+fn test_back_from_the_resumed_offer_list_returns_to_the_repository_subscreen() {
+    for (keys, screen) in [
+        ("\x009\x00owner/external\r", "Clone from URL"),
+        ("\x008\x00project-8\r", "All repositories"),
+    ] {
+        let t = TestEnv::new();
+        write_config(&t, &defaults());
+        let runner = gone_then_created();
+        let first = format!("{keys}\0\r\0yes\r");
+        let ctx = t
+            .ctx()
+            .runner(&runner)
+            .interactive(true)
+            .pickers(&[&first, "\0\x1b[D\0\x1b[D\0\x03"])
+            .build();
+        assert_ne!(main(&ctx, &PICK_REPO), 0, "{screen}");
+        assert_eq!(create_calls(&runner).len(), 1, "{screen}");
+        assert_eq!(
+            steps_after_notice(&ctx),
+            ["Offer: Tesla T4", screen, "Repository"],
+            "{screen}"
+        );
+    }
+}
+
+#[test]
+fn test_back_from_the_resumed_offer_list_returns_to_the_local_directory() {
+    let t = TestEnv::new();
+    let dir = t.home.join("proj");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.display().to_string();
+    let runner = gone_for(2);
+    let first = format!("\x007\x00{path}\r\0\r\0yes\r");
+    let again = format!("\0\x1b[D\0{path}\r\0\r\0yes\r");
+    let ctx = t
+        .ctx()
+        .runner(&runner)
+        .interactive(true)
+        .pickers(&[&first, "no\r", &again, "\0\x03"])
+        .build();
+    assert_ne!(main(&ctx, &PICK_REPO), 0);
+    assert_eq!(create_calls(&runner).len(), 2);
+    let steps = steps_after_notice(&ctx);
+    assert_eq!(
+        steps[..2],
+        ["Offer: Tesla T4", "From local directory"],
+        "{steps:?}"
+    );
+    let mut titles: Vec<String> = ctx.ui.shown().into_iter().map(|s| s.title).collect();
+    titles.dedup();
+    let asked = titles.iter().filter(|t| t.starts_with("Keep ")).count();
+    assert_eq!(asked, 1, "{titles:?}");
+}

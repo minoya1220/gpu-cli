@@ -15,7 +15,7 @@ use crate::repos::{cache_path, load_cached_repos, resolve_repo, save_cached_repo
 use crate::testing::fixture_config as defaults;
 use crate::testing::*;
 use crate::vast::startup::startup_script;
-use crate::wizard::Picks;
+use crate::wizard::{Picks, RepoFrom};
 
 fn tesla() -> Picks {
     Picks::new(None, None, Some("Tesla T4"))
@@ -294,11 +294,14 @@ fn test_url_entered_inline_and_back_preserves_choices() {
             keys.press_until(RIGHT, on("Mode"));
             keys.press("1");
         });
-        let expected = Picks::new(
-            Some(Repo::from_arg(repo)),
-            Some("container"),
-            Some("Tesla T4"),
-        );
+        let expected = Picks {
+            repo_from: Some(RepoFrom::CloneUrl),
+            ..Picks::new(
+                Some(Repo::from_arg(repo)),
+                Some("container"),
+                Some("Tesla T4"),
+            )
+        };
         assert_eq!(result, Outcome::Done(expected));
     }
 }

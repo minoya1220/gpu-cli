@@ -8,6 +8,7 @@
 //! outlives the picker and a following prompt gets every keystroke.
 
 use crate::sync::MutexExt;
+use std::collections::VecDeque;
 use std::io::Write;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -30,6 +31,10 @@ pub trait Io {
     fn write(&mut self, bytes: &[u8]);
     /// Columns and rows.
     fn size(&self) -> (usize, usize);
+    /// Scripted keys and the record of what the picker showed.
+    fn script(&mut self) -> Option<&mut Script> {
+        None
+    }
 }
 
 /// Lets a test end a loop that would otherwise wait forever.
@@ -78,7 +83,7 @@ fn aborted(abort: &Option<Arc<Abort>>, now: Instant) -> bool {
 }
 
 pub fn run_loop<V: PickValue, R: 'static>(
-    first: Screen<V, R>,
+    path: Vec<Screen<V, R>>,
     io: &mut dyn Io,
     options: LoopOptions,
 ) -> LoopEnd<R> {
@@ -92,8 +97,7 @@ pub fn run_loop<V: PickValue, R: 'static>(
     };
     let runtime = Runtime::new(Arc::new(Waker::new(wake_write)));
     let _entered = runtime.enter();
-    let core = Core::new(first);
-    core.borrow_mut().open(false);
+    let core = Core::new(path);
     let mut decoder = Decoder::new();
     let mut renderer = Renderer::default();
     let mut input_open = true;
@@ -104,6 +108,14 @@ pub fn run_loop<V: PickValue, R: 'static>(
             renderer.draw(io, &core.frame());
             if let Some(snapshot) = &options.snapshot {
                 *snapshot.lock_recover() = core.snapshot();
+            }
+        }
+        if let Some(script) = io.script() {
+            let core = core.borrow();
+            script.shown(core.snapshot());
+            script.check_stalled();
+            if core.idle() && decoder.deadline().is_none() {
+                script.release();
             }
         }
         if let Some(outcome) = core.borrow_mut().take_outcome() {
@@ -123,6 +135,11 @@ pub fn run_loop<V: PickValue, R: 'static>(
             continue;
         }
         let mut deadline = decoder.deadline();
+        if io.script().is_some() {
+            // Wake to notice a stalled script instead of waiting forever.
+            let tick = now + Duration::from_millis(250);
+            deadline = Some(deadline.map_or(tick, |d| d.min(tick)));
+        }
         if options.abort.is_some() {
             let tick = now + Duration::from_millis(20);
             deadline = Some(deadline.map_or(tick, |d| d.min(tick)));
@@ -157,6 +174,11 @@ pub fn run_loop<V: PickValue, R: 'static>(
             }
         }
         keys.extend(decoder.flush(Instant::now()));
+        if !keys.is_empty() {
+            if let Some(script) = io.script() {
+                script.handled();
+            }
+        }
         for key in keys {
             core.borrow_mut().handle_key(key);
             if core.borrow().finished() {
@@ -443,7 +465,7 @@ impl Io for TerminalIo {
 }
 
 /// Run on the real terminal (stdin and stdout are TTYs).
-pub fn run_terminal<V: PickValue, R: 'static>(first: Screen<V, R>) -> Result<Outcome<R>> {
+pub fn run_terminal<V: PickValue, R: 'static>(path: Vec<Screen<V, R>>) -> Result<Outcome<R>> {
     terminal::enable_raw_mode().map_err(|e| Error::msg(os_message(&e, None)))?;
     ACTIVE.store(true, Ordering::SeqCst);
     let mut io = TerminalIo;
@@ -454,7 +476,7 @@ pub fn run_terminal<V: PickValue, R: 'static>(first: Screen<V, R>) -> Result<Out
         abort: None,
         sigwinch: true,
     };
-    let end = run_loop(first, &mut io, options);
+    let end = run_loop(path, &mut io, options);
     restore_terminal();
     match end {
         LoopEnd::Finished(outcome) => Ok(outcome),
@@ -462,8 +484,78 @@ pub fn run_terminal<V: PickValue, R: 'static>(first: Screen<V, R>) -> Result<Out
     }
 }
 
+/// Key bytes split at NUL: each chunk after the first is written once the
+/// picker has handled the previous one and its screen is no longer loading.
+pub struct Script {
+    keys: Option<OwnedFd>,
+    chunks: VecDeque<Vec<u8>>,
+    shown: Vec<Snapshot>,
+    /// A chunk was written and the picker has not read it yet.
+    unread: bool,
+    /// When the picker last changed what it showed or received keys.
+    progress: Instant,
+}
+
+/// A scripted picker that neither redraws nor gets keys for this long is stuck.
+#[cfg(not(test))]
+const STALLED: Duration = Duration::from_secs(20);
+#[cfg(test)]
+const STALLED: Duration = Duration::from_secs(5);
+
+impl Script {
+    fn release(&mut self) {
+        let Some(keys) = &self.keys else {
+            return;
+        };
+        if self.unread {
+            return;
+        }
+        self.progress = Instant::now();
+        if let Some(chunk) = self.chunks.pop_front() {
+            self.unread = !chunk.is_empty();
+            let mut written = 0;
+            while written < chunk.len() {
+                match rustix::io::write(keys, &chunk[written..]) {
+                    Ok(n) => written += n,
+                    Err(_) => break,
+                }
+            }
+        }
+        if self.chunks.is_empty() {
+            self.keys = None;
+        }
+    }
+
+    /// The picker read and handled the chunk it was waiting on.
+    fn handled(&mut self) {
+        self.unread = false;
+    }
+
+    fn shown(&mut self, snapshot: Snapshot) {
+        if self.shown.last() != Some(&snapshot) {
+            self.shown.push(snapshot);
+            self.progress = Instant::now();
+        }
+    }
+
+    /// Fail a stuck script with what it was waiting on, not a CI timeout.
+    fn check_stalled(&self) {
+        if self.progress.elapsed() > STALLED {
+            let last = self.shown.last().cloned().unwrap_or_default();
+            panic!(
+                "scripted picker stalled for {STALLED:?} on screen {:?} with {} key chunk(s) \
+                 unsent and its load unfinished; labels: {:?}",
+                last.title,
+                self.chunks.len(),
+                last.labels
+            );
+        }
+    }
+}
+
 struct ScriptIo {
     input: OwnedFd,
+    script: Script,
 }
 
 impl Io for ScriptIo {
@@ -476,30 +568,42 @@ impl Io for ScriptIo {
     fn size(&self) -> (usize, usize) {
         (100, 30)
     }
+
+    fn script(&mut self) -> Option<&mut Script> {
+        Some(&mut self.script)
+    }
 }
 
-/// Run on scripted key bytes; when they run out, the picker quits like Ctrl-D.
-pub fn run_scripted<V: PickValue, R: 'static>(first: Screen<V, R>, keys: &[u8]) -> Outcome<R> {
+/// Run on scripted key bytes; when they run out, the picker quits like
+/// Ctrl-D. The outcome, and each distinct state the picker showed.
+pub fn run_scripted<V: PickValue, R: 'static>(
+    path: Vec<Screen<V, R>>,
+    keys: &[u8],
+) -> (Outcome<R>, Vec<Snapshot>) {
     let (read, write) = rustix::pipe::pipe().expect("create key pipe");
-    let mut written = 0;
-    while written < keys.len() {
-        match rustix::io::write(&write, &keys[written..]) {
-            Ok(n) => written += n,
-            Err(_) => break,
-        }
-    }
-    drop(write);
-    let mut io = ScriptIo { input: read };
+    let mut script = Script {
+        keys: Some(write),
+        chunks: keys.split(|b| *b == 0).map(<[u8]>::to_vec).collect(),
+        shown: Vec::new(),
+        unread: false,
+        progress: Instant::now(),
+    };
+    script.release();
+    let mut io = ScriptIo {
+        input: read,
+        script,
+    };
     let options = LoopOptions {
         eof_cancels: true,
         snapshot: None,
         abort: None,
         sigwinch: false,
     };
-    match run_loop(first, &mut io, options) {
+    let outcome = match run_loop(path, &mut io, options) {
         LoopEnd::Finished(outcome) => outcome,
         LoopEnd::Aborted => Outcome::Cancelled(1),
-    }
+    };
+    (outcome, io.script.shown)
 }
 
 #[cfg(test)]

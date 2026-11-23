@@ -831,7 +831,7 @@ fn up_dir_conflicts_with_a_repository_and_dry_run_lists_the_upload() {
     let code = w.gpu(&ctx, &["up", "--dir", dir.to_str().unwrap(), "--repo", "x"]);
     assert_eq!(code, 2);
     assert!(w.runner.calls().is_empty());
-    super::dry_run(&ctx, &dir, "1G").unwrap();
+    super::dry_run_report(&ctx, &dir, "1G").unwrap();
     let said = out(&ctx);
     assert!(said.contains("DRY RUN: would copy 1 file"), "{said}");
     assert!(said.contains(".env"), "{said}");
@@ -2101,4 +2101,54 @@ fn a_real_detached_process_keeps_running_and_logs_to_the_file() {
     }
     let text = std::fs::read_to_string(&log).unwrap();
     assert!(text.contains("out") && text.contains("err"), "{text}");
+}
+
+/// A folder chosen in the picker ("From local directory...") takes the same
+/// copy-up and link path as `gpu up --dir PATH`.
+#[test]
+fn a_directory_picked_in_the_launch_picker_is_copied_and_linked_like_up_dir() {
+    let w = Twin::new();
+    w.put("a.py", "a\n");
+    let dir = w.dir();
+    let link = Link {
+        id: ID.into(),
+        local: dir.clone(),
+        remote: String::new(),
+        include: Vec::new(),
+        linked_at: String::new(),
+    };
+    let syncers = syncers();
+    let runner = w.runner_with(&syncers, vec![link]);
+    let ctx =
+        w.t.ctx()
+            .runner(&runner)
+            .clock(&FakeClock::now_real())
+            .build();
+    // The picker records the folder; the flags carry no --dir.
+    ctx.set_picked_dir(dir.clone());
+    ctx.set_autosync_choice(Some(true));
+    let mut flags = up_flags(&dir, &[]);
+    flags.dir = None;
+    super::finish_up(&ctx, &Dict::new(), &flags, Some(ID.into()), false).unwrap();
+    assert_eq!(w.state().len(), 1, "the folder was copied up");
+    let started = runner
+        .argvs()
+        .iter()
+        .any(|a| a.get(1).map(String::as_str) == Some("autosync-run"));
+    assert!(started, "the picker's autosync answer is honoured");
+}
+
+#[test]
+fn a_picked_directory_dry_run_reports_the_upload_and_nothing_without_a_pick() {
+    let w = Twin::new();
+    w.put("a.py", "a\n");
+    let dir = w.dir();
+    let ctx = w.ctx();
+    let mut flags = up_flags(&dir, &[]);
+    flags.dir = None;
+    super::finish_up(&ctx, &Dict::new(), &flags, None, true).unwrap();
+    assert_eq!(out(&ctx), "");
+    ctx.set_picked_dir(dir);
+    super::finish_up(&ctx, &Dict::new(), &flags, None, true).unwrap();
+    assert!(out(&ctx).contains("DRY RUN: would copy 1 file"));
 }

@@ -243,6 +243,7 @@ impl From<&RunFlags> for UpArgs {
             reliability: flags.reliability,
             unverified: flags.unverified,
             interruptible: false,
+            max_upload: String::new(),
         }
     }
 }

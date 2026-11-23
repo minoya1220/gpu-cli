@@ -245,15 +245,7 @@ fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
             };
             let id = launched.id.clone();
             remote::after_up(ctx, launched, wait && !dry_run, timeout, wait_setup)?;
-            match (&flags.dir, id) {
-                (Some(dir), _) if dry_run => {
-                    dirsync::dry_run(ctx, std::path::Path::new(dir), &flags.max_upload)
-                }
-                (Some(dir), Some(id)) => {
-                    dirsync::after_up(ctx, &cfg, &flags, &id, std::path::Path::new(dir))
-                }
-                _ => Ok(()),
-            }
+            dirsync::finish_up(ctx, &cfg, &flags, id, dry_run)
         }
         Command::Ls {
             json,

@@ -155,7 +155,7 @@ fn describe_upload(upload: &run_files::Upload) -> String {
 }
 
 /// What `gpu up --dir --dry-run` reports instead of renting.
-pub(crate) fn dry_run(ctx: &Ctx, dir: &Path, max_upload: &str) -> Result<()> {
+pub(crate) fn dry_run_report(ctx: &Ctx, dir: &Path, max_upload: &str) -> Result<()> {
     let upload = preflight(ctx, dir, max_upload)?;
     ctx.result("dir", Value::str(dir.to_string_lossy()));
     ctx.result("uploaded_files", Value::Int(upload.files.len() as i64));
@@ -307,6 +307,27 @@ pub(crate) fn after_up(
     }
     // The editor offer waited for the directory to exist on the instance.
     crate::editors::offer_after_launch(ctx, cfg, &*crate::provider::parse(id)?)
+}
+
+/// After `gpu up`: attach the directory from `--dir` or the one the launch
+/// picker chose (`Ctx::picked_dir`); both continue the same way.
+pub(crate) fn finish_up(
+    ctx: &Ctx,
+    cfg: &Dict,
+    flags: &crate::cli::UpFlags,
+    id: Option<String>,
+    dry_run: bool,
+) -> Result<()> {
+    let dir = flags
+        .dir
+        .as_ref()
+        .map(PathBuf::from)
+        .or_else(|| ctx.picked_dir());
+    match (dir, id) {
+        (Some(dir), _) if dry_run => dry_run_report(ctx, &dir, &flags.max_upload),
+        (Some(dir), Some(id)) => after_up(ctx, cfg, flags, &id, &dir),
+        _ => Ok(()),
+    }
 }
 
 /// Whether `gpu up` asks about autosync: a directory is attached, and

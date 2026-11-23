@@ -735,8 +735,9 @@ fn test_arrow_keys_navigate_and_special_keys_never_reach_the_filter() {
         term.press(key);
     }
     term.press_until(LEFT, on("Repository"));
-    term.press(DOWN);
-    term.press(DOWN);
+    for _ in 0..3 {
+        term.press(DOWN);
+    }
     term.press_until(RIGHT, on("Clone from URL"));
     for c in ["o", "/", "r"] {
         term.press(c);
@@ -1808,4 +1809,51 @@ fn test_run_with_modal_provider_and_no_gpu_opens_a_modal_only_picker() {
     term.press("\x03");
     assert_eq!(term.exit_status(), 130);
     assert!(sandbox.calls().iter().all(|call| call[0] == "uv"));
+}
+
+#[test]
+fn test_local_directory_choice_dry_run_reports_the_upload_in_terminal() {
+    let sandbox = Sandbox::new();
+    let proj = sandbox.home.join("proj");
+    std::fs::create_dir_all(&proj).unwrap();
+    std::fs::write(proj.join("train.py"), "print('hi')\n").unwrap();
+    let mut term = gpu_up(&sandbox);
+    term.wait(shows("No repository"));
+    let repository = term.lines();
+    assert!(
+        repository
+            .iter()
+            .any(|l| l.contains("7. From local directory...")),
+        "{}",
+        repository.join("\n")
+    );
+    println!("--- Repository ---\n{}", repository.join("\n"));
+    term.press_until("7", on("From local directory"));
+    for c in ["~", "/", "p", "r", "o", "j"] {
+        term.press(c);
+    }
+    term.wait(shows("~/proj"));
+    println!("--- From local directory ---\n{}", term.lines().join("\n"));
+    term.press_until(RIGHT, on("Mode"));
+    term.press_until("1", on("GPU"));
+    for c in ["t", "4"] {
+        term.press(c);
+    }
+    term.press_until(RIGHT, on("Offer: Tesla T4"));
+    term.wait(shows("id=100"));
+    term.press(RIGHT);
+    assert_eq!(term.exit_status(), 0);
+    let output = term.output_text();
+    println!("--- Final screen ---\n{}", term.lines().join("\n"));
+    assert!(output.contains("DRY RUN: no instance created"), "{output}");
+    assert!(output.contains("\"no-repo\""), "{output}");
+    assert!(output.contains("DRY RUN: would copy 1 file"), "{output}");
+    for call in sandbox.calls() {
+        assert!(
+            identity_read(&call)
+                || call[1..3] == ["repo", "list"]
+                || call[1..3] == ["search", "offers"],
+            "{call:?}"
+        );
+    }
 }

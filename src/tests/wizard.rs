@@ -14,7 +14,7 @@ use crate::repos::Repo;
 use crate::testing::{dict, TestEnv};
 use crate::vast::offers::Stats;
 use crate::wizard::{
-    LaunchWizard, Picks, Search, TpuChoice, TpuOptions, WizardOptions, TPU_CATEGORY,
+    LaunchWizard, Picks, RepoFrom, Search, TpuChoice, TpuOptions, WizardOptions, TPU_CATEGORY,
 };
 
 const MODELS: [&str; 5] = ["B200", "H100 SXM", "RTX 4090", "RTX 5090", "Tesla T4"];
@@ -554,9 +554,17 @@ fn test_repository_shortcuts_full_list_and_global_filter() {
             "9" => Repo::from_arg("owner/external"),
             _ => Repo::from_arg("project-12"),
         };
+        let repo_from = match action {
+            "8" => Some(RepoFrom::AllRepos),
+            "9" => Some(RepoFrom::CloneUrl),
+            _ => None,
+        };
         assert_eq!(
             result,
-            Outcome::Done(Picks::new(Some(repo), Some("container"), Some("B200")))
+            Outcome::Done(Picks {
+                repo_from,
+                ..Picks::new(Some(repo), Some("container"), Some("B200"))
+            })
         );
     }
 }

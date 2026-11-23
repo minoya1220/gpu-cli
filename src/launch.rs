@@ -660,7 +660,9 @@ fn pick(
             }
             ApprovedLaunch::Gcp(plan) => {
                 let (flags, prepared, dir) = *plan;
-                adopt_dir(ctx, args, dir.as_deref())?;
+                if dir != adopted {
+                    adopt_dir(ctx, args, dir.as_deref())?;
+                }
                 Picked::Gcp(crate::gcp::launch_prepared(ctx, &flags, cfg, prepared)?)
             }
         });

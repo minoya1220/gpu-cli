@@ -461,13 +461,28 @@ const PICK: [&str; 8] = [
 
 /// The first create is refused as gone; later ones succeed.
 fn gone_then_created() -> Arc<FakeRunner> {
+    gone_for(1)
+}
+
+/// The first `refusals` creates are refused as gone; later ones succeed.
+fn gone_for(refusals: usize) -> Arc<FakeRunner> {
     let creates = std::sync::atomic::AtomicUsize::new(0);
     FakeRunner::new(move |cmd| match strs(&cmd.argv)[..] {
         ["vastai", "search", "offers", ..] => {
             ok(r#"[{"id": 42, "gpu_name": "Tesla T4", "num_gpus": 1, "dph_total": 0.1}]"#)
         }
+        ["gh", "repo", "list", ..] => ok(&format!(
+            "[{}]",
+            (1..=8)
+                .map(|i| format!(r#"{{"name": "project-{i}"}}"#))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+        ["git", "-C", _, "rev-parse", "--show-toplevel"] => {
+            Ok(Output::failed(128, "fatal: not a git repository"))
+        }
         ["vastai", "create", "instance", ..] => {
-            if creates.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+            if creates.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < refusals {
                 refused(REFUSED)
             } else {
                 ok(CREATED)
@@ -637,4 +652,82 @@ fn test_back_from_the_resumed_offer_list_returns_through_the_gpu_category() {
         ["Offer: Tesla T4", "Datacenter Ampere/Ada/older", "GPU"],
         "{titles:?}"
     );
+}
+
+/// `gpu up` with no `--repo`: the repository is chosen in the picker.
+const PICK_REPO: [&str; 7] = [
+    "up",
+    "--mode",
+    "container",
+    "--gpu",
+    "Tesla T4",
+    "--expire",
+    "2h",
+];
+
+/// Screen titles from the first offer-gone notice on, without repeats.
+fn steps_after_notice(ctx: &crate::ctx::Ctx) -> Vec<String> {
+    let shown = ctx.ui.shown();
+    let notice = shown
+        .iter()
+        .position(|s| !s.notice.is_empty())
+        .expect("offer-gone notice shown");
+    let mut steps: Vec<String> = shown[notice..].iter().map(|s| s.title.clone()).collect();
+    steps.dedup();
+    steps
+}
+
+#[test]
+fn test_back_from_the_resumed_offer_list_returns_to_the_repository_subscreen() {
+    for (keys, screen) in [
+        ("\x009\x00owner/external\r", "Clone from URL"),
+        ("\x008\x00project-8\r", "All repositories"),
+    ] {
+        let t = TestEnv::new();
+        write_config(&t, &defaults());
+        let runner = gone_then_created();
+        let first = format!("{keys}\0\r\0yes\r");
+        let ctx = t
+            .ctx()
+            .runner(&runner)
+            .interactive(true)
+            .pickers(&[&first, "\0\x1b[D\0\x1b[D\0\x03"])
+            .build();
+        assert_ne!(main(&ctx, &PICK_REPO), 0, "{screen}");
+        assert_eq!(create_calls(&runner).len(), 1, "{screen}");
+        assert_eq!(
+            steps_after_notice(&ctx),
+            ["Offer: Tesla T4", screen, "Repository"],
+            "{screen}"
+        );
+    }
+}
+
+#[test]
+fn test_back_from_the_resumed_offer_list_returns_to_the_local_directory() {
+    let t = TestEnv::new();
+    let dir = t.home.join("proj");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.display().to_string();
+    let runner = gone_for(2);
+    let first = format!("\x007\x00{path}\r\0\r\0yes\r");
+    let again = format!("\0\x1b[D\0{path}\r\0\r\0yes\r");
+    let ctx = t
+        .ctx()
+        .runner(&runner)
+        .interactive(true)
+        .pickers(&[&first, "no\r", &again, "\0\x03"])
+        .build();
+    assert_ne!(main(&ctx, &PICK_REPO), 0);
+    assert_eq!(create_calls(&runner).len(), 2);
+    let steps = steps_after_notice(&ctx);
+    assert_eq!(
+        steps[..2],
+        ["Offer: Tesla T4", "From local directory"],
+        "{steps:?}"
+    );
+    let mut titles: Vec<String> = ctx.ui.shown().into_iter().map(|s| s.title).collect();
+    titles.dedup();
+    let asked = titles.iter().filter(|t| t.starts_with("Keep ")).count();
+    assert_eq!(asked, 1, "{titles:?}");
 }

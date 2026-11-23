@@ -8,6 +8,7 @@
 //! outlives the picker and a following prompt gets every keystroke.
 
 use crate::sync::MutexExt;
+use std::collections::VecDeque;
 use std::io::Write;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -30,6 +31,10 @@ pub trait Io {
     fn write(&mut self, bytes: &[u8]);
     /// Columns and rows.
     fn size(&self) -> (usize, usize);
+    /// Scripted keys and the record of what the picker showed.
+    fn script(&mut self) -> Option<&mut Script> {
+        None
+    }
 }
 
 /// Lets a test end a loop that would otherwise wait forever.
@@ -104,6 +109,13 @@ pub fn run_loop<V: PickValue, R: 'static>(
             renderer.draw(io, &core.frame());
             if let Some(snapshot) = &options.snapshot {
                 *snapshot.lock_recover() = core.snapshot();
+            }
+        }
+        if let Some(script) = io.script() {
+            let core = core.borrow();
+            script.shown(core.snapshot());
+            if core.idle() && decoder.deadline().is_none() {
+                script.release();
             }
         }
         if let Some(outcome) = core.borrow_mut().take_outcome() {
@@ -462,8 +474,43 @@ pub fn run_terminal<V: PickValue, R: 'static>(first: Screen<V, R>) -> Result<Out
     }
 }
 
+/// Key bytes split at NUL: each chunk after the first is written once the
+/// picker has handled the previous one and its screen is no longer loading.
+pub struct Script {
+    keys: Option<OwnedFd>,
+    chunks: VecDeque<Vec<u8>>,
+    shown: Vec<Snapshot>,
+}
+
+impl Script {
+    fn release(&mut self) {
+        let Some(keys) = &self.keys else {
+            return;
+        };
+        if let Some(chunk) = self.chunks.pop_front() {
+            let mut written = 0;
+            while written < chunk.len() {
+                match rustix::io::write(keys, &chunk[written..]) {
+                    Ok(n) => written += n,
+                    Err(_) => break,
+                }
+            }
+        }
+        if self.chunks.is_empty() {
+            self.keys = None;
+        }
+    }
+
+    fn shown(&mut self, snapshot: Snapshot) {
+        if self.shown.last() != Some(&snapshot) {
+            self.shown.push(snapshot);
+        }
+    }
+}
+
 struct ScriptIo {
     input: OwnedFd,
+    script: Script,
 }
 
 impl Io for ScriptIo {
@@ -476,38 +523,40 @@ impl Io for ScriptIo {
     fn size(&self) -> (usize, usize) {
         (100, 30)
     }
+
+    fn script(&mut self) -> Option<&mut Script> {
+        Some(&mut self.script)
+    }
 }
 
-/// Run on scripted key bytes; when they run out, the picker quits like Ctrl-D.
-pub fn run_scripted<V: PickValue, R: 'static>(first: Screen<V, R>, keys: &[u8]) -> Outcome<R> {
+/// Run on scripted key bytes; when they run out, the picker quits like
+/// Ctrl-D. The outcome, and each distinct state the picker showed.
+pub fn run_scripted<V: PickValue, R: 'static>(
+    first: Screen<V, R>,
+    keys: &[u8],
+) -> (Outcome<R>, Vec<Snapshot>) {
     let (read, write) = rustix::pipe::pipe().expect("create key pipe");
-    // A NUL byte pauses the script so background jobs can finish first.
-    let chunks: Vec<Vec<u8>> = keys.split(|b| *b == 0).map(<[u8]>::to_vec).collect();
-    std::thread::spawn(move || {
-        for (i, chunk) in chunks.iter().enumerate() {
-            if i > 0 {
-                std::thread::sleep(Duration::from_millis(300));
-            }
-            let mut written = 0;
-            while written < chunk.len() {
-                match rustix::io::write(&write, &chunk[written..]) {
-                    Ok(n) => written += n,
-                    Err(_) => return,
-                }
-            }
-        }
-    });
-    let mut io = ScriptIo { input: read };
+    let mut script = Script {
+        keys: Some(write),
+        chunks: keys.split(|b| *b == 0).map(<[u8]>::to_vec).collect(),
+        shown: Vec::new(),
+    };
+    script.release();
+    let mut io = ScriptIo {
+        input: read,
+        script,
+    };
     let options = LoopOptions {
         eof_cancels: true,
         snapshot: None,
         abort: None,
         sigwinch: false,
     };
-    match run_loop(first, &mut io, options) {
+    let outcome = match run_loop(first, &mut io, options) {
         LoopEnd::Finished(outcome) => outcome,
         LoopEnd::Aborted => Outcome::Cancelled(1),
-    }
+    };
+    (outcome, io.script.shown)
 }
 
 #[cfg(test)]

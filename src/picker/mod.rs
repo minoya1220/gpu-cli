@@ -461,7 +461,7 @@ pub struct Frame {
 }
 
 /// The visible state, published for tests after every redraw.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Snapshot {
     pub title: String,
     pub filter: String,
@@ -506,6 +506,17 @@ impl<V: PickValue, R: 'static> Core<V, R> {
 
     pub fn finished(&self) -> bool {
         self.outcome.is_some()
+    }
+
+    /// Nothing left to wait for: finished, or the current screen's load ended.
+    pub fn idle(&self) -> bool {
+        self.finished()
+            || self
+                .view()
+                .screen
+                .load
+                .as_deref()
+                .is_none_or(|l| !matches!(l.state(), JobState::Idle | JobState::Running))
     }
 
     pub fn take_outcome(&mut self) -> Option<Outcome<R>> {
@@ -909,7 +920,11 @@ impl<V: PickValue, R: 'static> Core<V, R> {
 /// tests provide); its result, or `Error::Cancelled` when the user quits.
 pub fn pick<V: PickValue, R: 'static>(ctx: &Ctx, first: Screen<V, R>) -> Result<R> {
     let outcome = match ctx.ui.next_script() {
-        Some(keys) => term::run_scripted(first, &keys),
+        Some(keys) => {
+            let (outcome, shown) = term::run_scripted(first, &keys);
+            ctx.ui.record(shown);
+            outcome
+        }
         None => term::run_terminal(first)?,
     };
     match outcome {

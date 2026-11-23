@@ -251,22 +251,29 @@ impl Console {
 /// Where pickers run: the real terminal, or scripted key bytes per picker.
 pub enum Ui {
     Terminal,
-    Scripted(Mutex<VecDeque<Vec<u8>>>),
+    Scripted(Mutex<Scripted>),
+}
+
+/// Key bytes for each scripted picker, and every state those pickers showed.
+pub struct Scripted {
+    keys: VecDeque<Vec<u8>>,
+    shown: Vec<crate::picker::Snapshot>,
 }
 
 impl Ui {
     pub fn scripted<K: AsRef<[u8]>>(pickers: &[K]) -> Ui {
-        Ui::Scripted(Mutex::new(
-            pickers.iter().map(|k| k.as_ref().to_vec()).collect(),
-        ))
+        Ui::Scripted(Mutex::new(Scripted {
+            keys: pickers.iter().map(|k| k.as_ref().to_vec()).collect(),
+            shown: Vec::new(),
+        }))
     }
 
     /// Keys for the next scripted picker; panics when none was expected.
     pub fn next_script(&self) -> Option<Vec<u8>> {
         match self {
             Ui::Terminal => None,
-            Ui::Scripted(queue) => {
-                let next = queue.lock_recover().pop_front();
+            Ui::Scripted(script) => {
+                let next = script.lock_recover().keys.pop_front();
                 Some(next.unwrap_or_else(|| panic!("unexpected picker")))
             }
         }
@@ -275,7 +282,21 @@ impl Ui {
     pub fn remaining(&self) -> usize {
         match self {
             Ui::Terminal => 0,
-            Ui::Scripted(queue) => queue.lock_recover().len(),
+            Ui::Scripted(script) => script.lock_recover().keys.len(),
+        }
+    }
+
+    pub fn record(&self, shown: Vec<crate::picker::Snapshot>) {
+        if let Ui::Scripted(script) = self {
+            script.lock_recover().shown.extend(shown);
+        }
+    }
+
+    /// Every state the scripted pickers showed, in order.
+    pub fn shown(&self) -> Vec<crate::picker::Snapshot> {
+        match self {
+            Ui::Terminal => Vec::new(),
+            Ui::Scripted(script) => script.lock_recover().shown.clone(),
         }
     }
 }

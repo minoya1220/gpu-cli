@@ -502,6 +502,44 @@ fn test_picker_returns_to_the_offer_list_when_the_offer_is_gone() {
         .count();
     assert!(searches >= 2, "{searches}");
     assert!(!err(&ctx).contains("no capacity"), "{}", err(&ctx));
+    let notice = "Vast has no capacity for this offer: error 410/3907: no_such_ask Instance type 42 is no longer available.";
+    let shown = ctx.ui.shown();
+    assert!(
+        shown
+            .iter()
+            .any(|s| s.notice == notice && s.body.iter().any(|line| line.contains(notice))),
+        "{shown:#?}"
+    );
+}
+
+#[test]
+fn test_picker_does_not_retry_once_the_instance_exists() {
+    let t = TestEnv::new();
+    let runner = FakeRunner::new(move |cmd| match strs(&cmd.argv)[..] {
+        ["vastai", "search", "offers", ..] => {
+            ok(r#"[{"id": 42, "gpu_name": "Tesla T4", "num_gpus": 1, "dph_total": 0.1}]"#)
+        }
+        ["vastai", "create", "instance", ..] => ok(CREATED),
+        ["vastai", "show", "instances", "--raw"] => Ok(Output {
+            code: 1,
+            stdout: String::new(),
+            stderr: "error: instance 123 host is no longer available\n".into(),
+        }),
+        _ => ssh_ready(cmd),
+    });
+    let ctx = t
+        .ctx()
+        .runner(&runner)
+        .interactive(true)
+        .pickers(&["\0\r\0yes\r"])
+        .build();
+    assert_ne!(main(&ctx, &PICK), 0);
+    assert_eq!(create_calls(&runner).len(), 1);
+    let stderr = err(&ctx);
+    assert!(
+        stderr.contains("Instance 123 created but expiry NOT verified; billing continues."),
+        "{stderr}"
+    );
 }
 
 #[test]

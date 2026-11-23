@@ -453,7 +453,7 @@ pub(crate) fn launch(
                 } => (*picks, offer, confirmed),
                 Picked::Gcp(launched) => return Ok(launched),
             };
-        match launch_offer(
+        let refused = match launch_offer(
             ctx,
             args,
             cfg,
@@ -462,8 +462,12 @@ pub(crate) fn launch(
             picks.clone(),
             offer,
             tty_confirmed,
-        ) {
-            Err(Error::Status(crate::error::ExitCode::NoCapacity, text))
+        )? {
+            Attempt::Launched(launched) => return Ok(launched),
+            Attempt::CreateFailed(error) => error,
+        };
+        match refused {
+            Error::Status(crate::error::ExitCode::NoCapacity, text)
                 if tty_confirmed && ctx.interactive() && args.offer.is_none() =>
             {
                 // Nothing was rented: the offer is gone. Back to the offer list.
@@ -480,9 +484,16 @@ pub(crate) fn launch(
                         .to_string(),
                 });
             }
-            done => return done,
+            error => return Err(error),
         }
     }
+}
+
+/// How one create attempt ended: launched (or stopped before renting), or
+/// the create request itself failed.
+enum Attempt {
+    Launched(Launched),
+    CreateFailed(Error),
 }
 
 /// Where the picker resumes after a failed create: the earlier answers,
@@ -502,7 +513,7 @@ fn launch_offer(
     picks: Picks,
     offer: Dict,
     tty_confirmed: bool,
-) -> Result<Launched> {
+) -> Result<Attempt> {
     let repo = picks.repo.clone().unwrap_or(Repo::NoRepo);
     let mode = picks.mode.clone().unwrap_or_default();
     let gpu = picks.gpu.clone().unwrap_or_default();
@@ -534,7 +545,7 @@ fn launch_offer(
                 "Auto-destroy requested after {expire}; no timer installed (dry run)."
             ))?;
         }
-        return Ok(Launched::default());
+        return Ok(Attempt::Launched(Launched::default()));
     }
     if !tty_confirmed {
         ctx.println(&format!(
@@ -545,7 +556,7 @@ fn launch_offer(
         ))?;
         if !args.yes && !confirm(ctx, None)? {
             ctx.println("Cancelled.")?;
-            return Ok(Launched::default());
+            return Ok(Attempt::Launched(Launched::default()));
         }
     }
     if deadline.is_some_and(|at| at <= ctx.clock.now()) {
@@ -553,7 +564,10 @@ fn launch_offer(
             Error::msg("Expiry deadline passed; no instance created").next("gpu up --expire 2h")
         );
     }
-    let (summary, instance_id) = create(ctx, vast, &request, deadline)?;
+    let (summary, instance_id) = match create(ctx, vast, &request, deadline) {
+        Ok(created) => created,
+        Err(error) => return Ok(Attempt::CreateFailed(error)),
+    };
     // Preserve the created ID and attempt expiry before propagating a failed announcement.
     let announced = ctx.println(&summary);
     if ctx.json() && instance_id.is_none() {
@@ -568,10 +582,10 @@ fn launch_offer(
     if let Some(id) = &instance_id {
         crate::editors::offer_after_launch(ctx, cfg, &crate::provider::VastId(id.clone()))?;
     }
-    Ok(Launched {
+    Ok(Attempt::Launched(Launched {
         id: instance_id,
         ready_alias,
-    })
+    }))
 }
 
 /// What `gpu up` launches: a Vast offer (`confirmed` when the TTY

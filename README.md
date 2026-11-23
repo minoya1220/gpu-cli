@@ -27,7 +27,7 @@ gpu up --repo gpu-kernels --mode container --gpu 'RTX 4090' \
 
 A container suits general work; a VM adds CUDA 12.8 and Nsight Compute for profiling. The repo is cloned to `/workspace/<name>` without `.git`, and `uv sync` runs if it has `pyproject.toml`.
 
-In the picker, type to filter, use arrows to move, and type `yes` then Enter to approve a paid launch. Ctrl-C quits.
+In the picker, type to filter, use arrows to move, and type `yes` then Enter to approve a paid launch. If the offer is gone by then, nothing is rented and the picker returns to the offer list with the reason. Ctrl-C quits.
 
 - `--yes` without `--offer` takes the cheapest matching offer. Flag launches use verified hosts only; `--unverified` adds the rest.
 - `--repo NAME` uses your configured owner or `gh` login. Other HTTPS hosts work; `git@` URLs need keys already on the instance.

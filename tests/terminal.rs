@@ -1873,18 +1873,32 @@ fn test_gone_offer_shows_the_error_in_the_offer_list_and_a_second_pick_launches(
     ));
     let mut term = Terminal::start(
         &sandbox,
-        &["up", "--repo", "example/gpu-cli", "--mode", "container", "--gpu", "RTX 4090"],
+        &[
+            "up",
+            "--repo",
+            "example/gpu-cli",
+            "--mode",
+            "container",
+            "--gpu",
+            "RTX 4090",
+        ],
     );
     term.wait(on("Offer: RTX 4090"));
     term.wait(shows("id=100"));
-    term.press_until(RIGHT, with_footer(shows("Type 'yes' to confirm:"), "← back"));
+    term.press_until(
+        RIGHT,
+        with_footer(shows("Type 'yes' to confirm:"), "← back"),
+    );
     term.press("yes");
     let notice = "Vast has no capacity for this offer: error 404/3603: no_such_ask Instance type by id 56377751 is not available.";
     term.press_until(ENTER, |t| {
         on("Offer: RTX 4090")(t) && shows("id=100")(t) && shows("no_such_ask")(t)
     });
     let after_failure = term.lines();
-    println!("--- Offer list after the failed create ---\n{}", after_failure.join("\n"));
+    println!(
+        "--- Offer list after the failed create ---\n{}",
+        after_failure.join("\n")
+    );
     assert!(term.running(), "the failed create must not exit gpu up");
     // The notice is wider than the terminal, so it spans two rows.
     assert!(
@@ -1893,7 +1907,10 @@ fn test_gone_offer_shows_the_error_in_the_offer_list_and_a_second_pick_launches(
         after_failure.join("\n")
     );
     assert!(!term.output_text().contains("Next: gpu up with another"));
-    term.press_until(RIGHT, with_footer(shows("Type 'yes' to confirm:"), "← back"));
+    term.press_until(
+        RIGHT,
+        with_footer(shows("Type 'yes' to confirm:"), "← back"),
+    );
     term.press("yes");
     term.press_until(ENTER, shows("Open workspace"));
     println!("--- After the second pick ---\n{}", term.lines().join("\n"));

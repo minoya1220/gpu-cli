@@ -750,9 +750,13 @@ fn test_run_redacts_secrets_from_a_real_failing_process() {
 fn test_real_timeout_does_not_wait_for_a_grandchild_holding_the_pipes() {
     use crate::process::{Cmd, RealRunner, RunError, Runner};
     let t = TestEnv::new();
+    // Run via `sh` rather than exec'ing the freshly written file: on Linux a
+    // concurrent fork in another test thread can hold the file open for
+    // writing, making exec fail with ETXTBSY instead of reaching the timeout.
     let script = t.executable("proxy", "#!/bin/sh\nsleep 5 &\nsleep 5\n");
     let started = std::time::Instant::now();
-    let result = RealRunner.run(&Cmd::new(&[script.to_str().unwrap()]).timeout(Some(0.2)));
+    let result =
+        RealRunner.run(&Cmd::new(&["/bin/sh", script.to_str().unwrap()]).timeout(Some(0.2)));
     assert!(matches!(result, Err(RunError::TimedOut)));
     assert!(started.elapsed() < std::time::Duration::from_secs(3));
 }
@@ -761,9 +765,11 @@ fn test_real_timeout_does_not_wait_for_a_grandchild_holding_the_pipes() {
 fn test_real_timeout_bounds_the_pipe_drain_after_the_child_exits() {
     use crate::process::{Cmd, RealRunner, RunError, Runner};
     let t = TestEnv::new();
+    // Run via `sh`; exec'ing a freshly written file can fail with ETXTBSY.
     let script = t.executable("helper", "#!/bin/sh\nsleep 5 &\nexit 0\n");
     let started = std::time::Instant::now();
-    let result = RealRunner.run(&Cmd::new(&[script.to_str().unwrap()]).timeout(Some(0.2)));
+    let result =
+        RealRunner.run(&Cmd::new(&["/bin/sh", script.to_str().unwrap()]).timeout(Some(0.2)));
     assert!(matches!(result, Err(RunError::TimedOut)));
     assert!(started.elapsed() < std::time::Duration::from_secs(3));
 }

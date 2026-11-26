@@ -116,6 +116,7 @@ fn git_file(ctx: &Ctx, cwd: &Path, args: &[&str]) -> Result<Option<Vec<u8>>> {
 /// The upload is always the current directory's subtree. Inside a git repo,
 /// git decides which of those files are visible (ignores apply, edits and
 /// untracked files are included); elsewhere, a walk minus built-in excludes.
+#[cfg(test)]
 pub(crate) fn prepare(ctx: &Ctx, cwd: &Path, cap: u64) -> Result<Upload> {
     prepare_with(ctx, cwd, cap, false)
 }
@@ -123,6 +124,59 @@ pub(crate) fn prepare(ctx: &Ctx, cwd: &Path, cap: u64) -> Result<Upload> {
 /// `prepare`; with `drop_secrets`, secret-looking files are left out (and
 /// listed in `skipped_secrets`) instead of being the caller's problem.
 pub(crate) fn prepare_with(ctx: &Ctx, cwd: &Path, cap: u64, drop_secrets: bool) -> Result<Upload> {
+    prepare_including(ctx, cwd, cap, drop_secrets, &[])
+}
+
+/// Files under `root` named by `--include`, sent even when git ignores or
+/// does not track them, and even under `gpu-runs/`. Only files inside the
+/// working directory are accepted; directories and `.git` are never sent.
+fn included(root: &Path, include: &[String]) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    for text in include {
+        let path: PathBuf = Path::new(text)
+            .components()
+            .filter(|c| !matches!(c, Component::CurDir))
+            .collect();
+        if !relative(&path) {
+            return Err(Error::usage(format!(
+                "--include {text:?} must be a path inside the current directory, such as gpu-runs/job.sh"
+            )));
+        }
+        if path.components().any(|c| c.as_os_str() == ".git") {
+            return Err(Error::usage(format!(
+                "--include {text:?} must not be inside .git."
+            )));
+        }
+        let disk = root.join(&path);
+        fs::symlink_metadata(&disk)
+            .map_err(|_| Error::usage(format!("--include {text:?} does not exist.")))?;
+        // A link (or a link in a parent) must not lead outside the working directory.
+        let target = disk
+            .canonicalize()
+            .map_err(|_| Error::usage(format!("--include {text:?} is a broken symlink.")))?;
+        if !target.starts_with(root) {
+            return Err(Error::usage(format!(
+                "--include {text:?} resolves outside the current directory."
+            )));
+        }
+        if target.is_dir() {
+            return Err(Error::usage(format!(
+                "--include {text:?} is a directory; name each file to upload."
+            )));
+        }
+        files.push(path);
+    }
+    Ok(files)
+}
+
+/// `prepare_with`, plus `include`d paths added to the git/walk selection.
+pub(crate) fn prepare_including(
+    ctx: &Ctx,
+    cwd: &Path,
+    cap: u64,
+    drop_secrets: bool,
+    include: &[String],
+) -> Result<Upload> {
     let root = cwd.canonicalize()?;
     let mut files = Vec::new();
     if git_file(ctx, &root, &["rev-parse", "--show-toplevel"])?.is_some() {
@@ -156,6 +210,7 @@ pub(crate) fn prepare_with(ctx: &Ctx, cwd: &Path, cap: u64, drop_secrets: bool) 
         walk(&root, Path::new(""), &mut files)?;
     }
     files.retain(|p| !excluded(p) && fs::symlink_metadata(root.join(p)).is_ok());
+    files.extend(included(&root, include)?);
     let mut skipped_secrets = Vec::new();
     if drop_secrets {
         let (secret, rest): (Vec<_>, Vec<_>) = files.into_iter().partition(|p| secret_path(p));

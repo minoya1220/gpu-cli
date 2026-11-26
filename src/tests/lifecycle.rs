@@ -91,11 +91,11 @@ fn test_lifecycle_verifies_before_reporting() {
     }
 }
 
-#[test]
-fn test_destroy_without_cost_data_keeps_the_plain_message() {
+fn down_once(record: &str, json: bool) -> String {
     let t = TestEnv::new();
     let asked = Arc::new(AtomicBool::new(false));
     let flag = asked.clone();
+    let listed = format!("[{record}]");
     let runner = FakeRunner::new(move |cmd| {
         if cmd.argv[1] == "destroy" {
             flag.store(true, Ordering::SeqCst);
@@ -104,15 +104,38 @@ fn test_destroy_without_cost_data_keeps_the_plain_message() {
         if flag.load(Ordering::SeqCst) {
             return ok("[]");
         }
-        ok(r#"[{"id": 12, "gpu_name": "RTX 4090", "actual_status": "running"}]"#)
+        ok(&listed)
     });
     let ctx = t
         .ctx()
         .runner(&runner)
         .clock(&FakeClock::now_real())
         .build();
-    assert_eq!(main(&ctx, &["down", "12", "--yes"]), 0);
-    assert!(out(&ctx).contains("Instance 12 (RTX 4090) destroyed; billing stopped."));
+    let mut args = vec!["down", "12", "--yes"];
+    if json {
+        args.push("--json");
+    }
+    assert_eq!(main(&ctx, &args), 0, "{}", err(&ctx));
+    out(&ctx)
+}
+
+#[test]
+fn test_destroy_without_a_running_estimate_keeps_the_plain_message() {
+    for record in [
+        r#"{"id": 12, "gpu_name": "RTX 4090", "actual_status": "running"}"#,
+        r#"{"id": 12, "gpu_name": "RTX 4090", "actual_status": "stopped", "dph_total": 0.36, "duration": 93600}"#,
+    ] {
+        assert!(
+            down_once(record, false).contains("Instance 12 (RTX 4090) destroyed; billing stopped.")
+        );
+        let reply = dict(&down_once(record, true));
+        let result = reply.get("result").unwrap().as_dict().unwrap();
+        assert_eq!(
+            result.get("state"),
+            Some(&crate::pyjson::Value::str("destroyed"))
+        );
+        assert!(result.get("billed_usd").is_none(), "{record}");
+    }
 }
 
 #[test]

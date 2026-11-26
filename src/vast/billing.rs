@@ -2,13 +2,14 @@
 //! destroy request (the record may be gone afterwards). Vast's instance list
 //! carries no per-instance charge total, so the figure is the instance's own
 //! hourly price times its own runtime, and is always labelled an estimate.
+//! A stopped instance bills only storage for its stopped time, so no figure
+//! is given unless the instance is running.
 
 use jiff::Timestamp;
 
 use crate::ctx::Ctx;
 use crate::pyfmt::{fixed, py_float};
 use crate::pyjson::{Dict, Value};
-use crate::vast::{find_instance, list_instances};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Billed {
@@ -25,8 +26,12 @@ fn number(instance: &Dict, key: &str) -> Option<f64> {
 }
 
 /// Estimate from `dph_total` x runtime. Runtime comes from `start_date` (epoch
-/// seconds) against `now`, else Vast's own `duration` seconds.
+/// seconds) against `now`, else Vast's own `duration` seconds. `None` unless
+/// the instance is running.
 pub(crate) fn estimate(instance: &Dict, now: Timestamp) -> Option<Billed> {
+    if instance.get("actual_status").and_then(Value::as_str) != Some("running") {
+        return None;
+    }
     let price = number(instance, "dph_total").or_else(|| number(instance, "dph"))?;
     let started = number(instance, "start_date")
         .filter(|s| *s > 0.0)
@@ -37,12 +42,6 @@ pub(crate) fn estimate(instance: &Dict, now: Timestamp) -> Option<Billed> {
         amount: price * runtime_seconds / 3600.0,
         runtime_seconds,
     })
-}
-
-/// Best effort: any failure just means no figure is shown.
-pub(crate) fn lookup(ctx: &Ctx, id: &str) -> Option<Billed> {
-    let live = list_instances(ctx, Some(10.0)).ok()?;
-    estimate(find_instance(&live, id)?, ctx.clock.now())
 }
 
 pub(crate) fn format_runtime(seconds: f64) -> String {
@@ -100,16 +99,32 @@ mod tests {
         let now: Timestamp = "2026-01-01T03:12:00Z".parse().unwrap();
         let start = now.as_second() - 3 * 3600 - 12 * 60;
         let item = dict(&format!(
-            r#"{{"dph_total": 0.325, "start_date": {start}.5, "duration": 5}}"#
+            r#"{{"actual_status": "running", "dph_total": 0.325, "start_date": {start}.5, "duration": 5}}"#
         ));
         let billed = estimate(&item, now).unwrap();
         assert_eq!(billed.runtime_seconds, 11520.0 - 0.5);
         assert!((billed.amount - 0.325 * 11519.5 / 3600.0).abs() < 1e-9);
-        let item = dict(r#"{"dph_total": 0.36, "duration": 7200}"#);
+        let running = |fields: &str| dict(&format!(r#"{{"actual_status": "running", {fields}}}"#));
+        let item = running(r#""dph_total": 0.36, "duration": 7200"#);
         assert_eq!(estimate(&item, now).unwrap().amount, 0.72);
-        assert!(estimate(&dict(r#"{"duration": 7200}"#), now).is_none());
-        assert!(estimate(&dict(r#"{"dph_total": 0.3}"#), now).is_none());
-        assert!(estimate(&dict(r#"{"dph_total": true, "duration": 1}"#), now).is_none());
+        assert!(estimate(&running(r#""duration": 7200"#), now).is_none());
+        assert!(estimate(&running(r#""dph_total": 0.3"#), now).is_none());
+        assert!(estimate(&running(r#""dph_total": true, "duration": 1"#), now).is_none());
+    }
+
+    #[test]
+    fn no_estimate_unless_running() {
+        let now: Timestamp = "2026-01-01T03:12:00Z".parse().unwrap();
+        for status in [
+            r#""actual_status": "stopped", "#,
+            r#""actual_status": "exited", "#,
+            "",
+        ] {
+            let item = dict(&format!(
+                r#"{{{status}"dph_total": 0.36, "duration": 7200}}"#
+            ));
+            assert!(estimate(&item, now).is_none());
+        }
     }
 
     #[test]

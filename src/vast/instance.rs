@@ -225,8 +225,6 @@ const DESTROY_VERIFY_SECONDS: f64 = 60.0;
 /// Only ever called with the ID this invocation just created. A successful
 /// mutation is not enough: verify disappearance. Always remove the local alias.
 pub(crate) fn destroy_created(ctx: &Ctx, id: &str) -> Result<()> {
-    // Read the cost first (bounded, best effort); the record may vanish after.
-    let billed = crate::vast::billing::lookup(ctx, id);
     let cleanup = || -> Result<()> {
         // This invocation owns the freshly created ID. A lagging or broken
         // inventory must never suppress the paid-resource cleanup request.
@@ -255,13 +253,6 @@ pub(crate) fn destroy_created(ctx: &Ctx, id: &str) -> Result<()> {
     };
     let outcome = cleanup();
     let _ = remove_host(&ctx.env, id);
-    if let (Ok(()), Some(billed)) = (&outcome, &billed) {
-        crate::vast::billing::record(ctx, billed);
-        let _ = ctx.eprintln(&format!(
-            "Instance {id} destroyed{}.",
-            crate::vast::billing::describe(billed)
-        ));
-    }
     outcome.map_err(|_| {
         Error::status(
             ExitCode::CleanupUnverified,

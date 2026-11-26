@@ -269,12 +269,13 @@ pub fn created_summary(reply: Option<&Dict>) -> Result<String> {
             .map(py_str)
             .unwrap_or_else(|| "unknown error".into());
         if let Some(error) = crate::provider_errors::vast(&reason) {
-            return Err(error);
+            return Err(error.rejected());
         }
         return Err(Error::msg(format!(
             "Vast did not create the instance: {}",
             redact_text(&reason)
-        )));
+        ))
+        .rejected());
     }
     match created_id(response) {
         None => Ok("Created instance. Next: `gpu ls` to find it.".into()),

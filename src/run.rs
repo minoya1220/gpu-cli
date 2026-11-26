@@ -396,8 +396,8 @@ struct Prepared {
 /// What a run owns once a paid instance may exist.
 struct Session {
     created_id: Option<String>,
-    /// The launch estimate to record once the instance exists.
-    ledger: Option<f64>,
+    /// The launch estimate to reserve right before create.
+    ledger: Option<crate::spend::Budget>,
     run_id: String,
     local: PathBuf,
     /// The remote state root and job directory, once known.
@@ -634,7 +634,7 @@ fn approve(
     selected: &RunFlags,
     job: &Prepared,
     backend: &dyn RunBackend,
-) -> Result<Option<(Value, Option<f64>)>> {
+) -> Result<Option<(Value, Option<crate::spend::Budget>)>> {
     let label = job
         .upload
         .root
@@ -728,11 +728,16 @@ fn execute(
             READINESS_TIMEOUT
         });
     let backend_key = backend.provider().key();
-    let id = backend.launch(ctx, request, job.deadline, timeout, &mut |id, named| {
+    let mut reservation = crate::spend::reserve(ctx, session.ledger)?;
+    let launched = backend.launch(ctx, request, job.deadline, timeout, &mut |id, named| {
         // Record ownership before any local I/O can fail. Launch readiness
         // failures must still reach provider-state-verified destruction.
         session.created_id = Some(id.to_string());
-        crate::spend::record_best_effort(ctx, &crate::spend::key(backend_key, id), session.ledger);
+        crate::spend::claim_best_effort(
+            ctx,
+            reservation.take(),
+            &crate::spend::key(backend_key, id),
+        );
         session.run_id = match named {
             Some(named) => named.into(),
             None => format!("{}-{id}", job.now.strftime("%Y%m%dT%H%M%SZ")),
@@ -746,7 +751,14 @@ fn execute(
             Value::str(session.local.join("log.txt").to_string_lossy()),
         );
         Ok(())
-    })?;
+    });
+    let id = match launched {
+        Err(error) if error.is_rejection() && session.created_id.is_none() => {
+            crate::spend::release_best_effort(ctx, reservation.take());
+            return Err(error);
+        }
+        launched => launched?,
+    };
     let run_id = session.run_id.clone();
     let jobdir = format!("/workspace/gpu-run-{run_id}");
     let root = format!("/root/.local/state/gpu-run/{run_id}");

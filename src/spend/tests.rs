@@ -58,7 +58,8 @@ fn a_damaged_ledger_is_refused_and_left_alone() {
         let error = window_total(&ctx).unwrap_err();
         assert_eq!(error.exit_code(), 15, "{}", error.text());
         assert!(error.text().contains("max_daily_spend"), "{}", error.text());
-        assert!(record(&ctx, "vast:2", 0.5).is_err());
+        let error = reserve(&ctx, budget(5.0, 0.5)).unwrap_err();
+        assert_eq!(error.exit_code(), 15, "{}", error.text());
         assert!(settle(&ctx, "vast:1", 0.5).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
     }
@@ -74,8 +75,12 @@ fn an_unreadable_ledger_is_refused() {
     assert!(error.text().contains("cannot be read"), "{}", error.text());
 }
 
+fn budget(cap: f64, estimate: f64) -> Option<Budget> {
+    Some(Budget { cap, estimate })
+}
+
 #[test]
-fn record_prunes_old_entries_and_replaces_the_same_launch() {
+fn reserve_prunes_old_entries_and_claim_files_it_under_the_launch() {
     let t = TestEnv::new();
     let ctx = t.ctx().build();
     let now = ctx.clock.now().as_second();
@@ -86,12 +91,50 @@ fn record_prunes_old_entries_and_replaces_the_same_launch() {
             ("vast:1", now - 60, 1.0),
         ],
     );
-    record(&ctx, "vast:2", 0.75).unwrap();
-    record(&ctx, "vast:2", 0.5).unwrap();
+    let first = reserve(&ctx, budget(2.0, 0.75)).unwrap();
+    let second = reserve(&ctx, budget(2.0, 0.25)).unwrap();
+    assert_eq!(window_total(&ctx).unwrap(), 2.0);
+    claim_best_effort(&ctx, first, "vast:2");
+    release_best_effort(&ctx, second);
     assert_eq!(
         stored(&ctx),
-        [("vast:1".to_string(), 1.0), ("vast:2".to_string(), 0.5)]
+        [("vast:1".to_string(), 1.0), ("vast:2".to_string(), 0.75)]
     );
+}
+
+#[test]
+fn reserve_refuses_over_the_cap_and_writes_nothing() {
+    let t = TestEnv::new();
+    let ctx = t.ctx().build();
+    let now = ctx.clock.now().as_second();
+    seed(&ctx, &[("vast:1", now - 60, 1.5)]);
+    let before = std::fs::read(ledger_path(&ctx.env)).unwrap();
+    let error = reserve(&ctx, budget(2.0, 0.75)).unwrap_err();
+    assert_eq!(error.exit_code(), 15, "{}", error.text());
+    assert!(error.text().contains("$1.50"), "{}", error.text());
+    assert_eq!(std::fs::read(ledger_path(&ctx.env)).unwrap(), before);
+    assert!(reserve(&ctx, None).unwrap().is_none());
+}
+
+#[test]
+fn an_unwritable_ledger_refuses_the_reservation() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = TestEnv::new();
+    let ctx = t.ctx().build();
+    let now = ctx.clock.now().as_second();
+    seed(&ctx, &[("vast:1", now - 60, 0.5)]);
+    let dir = ledger_path(&ctx.env).parent().unwrap().to_path_buf();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let result = reserve(&ctx, budget(5.0, 0.5));
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let error = result.unwrap_err();
+    assert_eq!(error.exit_code(), 15, "{}", error.text());
+    assert!(
+        error.text().contains("cannot be written"),
+        "{}",
+        error.text()
+    );
+    assert_eq!(stored(&ctx), [("vast:1".to_string(), 0.5)]);
 }
 
 #[test]

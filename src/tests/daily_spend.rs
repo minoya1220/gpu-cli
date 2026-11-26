@@ -101,6 +101,52 @@ fn a_damaged_ledger_refuses_the_launch() {
 }
 
 #[test]
+fn an_unwritable_ledger_refuses_the_launch() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_t, ctx, runner) = fixture("50");
+    seed(&ctx, &[]);
+    let dir = crate::spend::ledger_path(&ctx.env)
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let code = main(&ctx, UP);
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(code, 15, "{}", err(&ctx));
+    assert!(err(&ctx).contains("cannot be written"), "{}", err(&ctx));
+    assert!(!created(&runner));
+}
+
+fn failing_create(create: fn() -> Result<Output, crate::process::RunError>) -> (TestEnv, Ctx) {
+    let t = TestEnv::new();
+    let runner = FakeRunner::new(move |cmd| match strs(&cmd.argv)[..] {
+        ["vastai", "search", "offers", ..] => ok(OFFER),
+        ["vastai", "create", "instance", ..] => create(),
+        _ => panic!("unexpected command: {:?}", cmd.argv),
+    });
+    let ctx = t.ctx().runner(&runner).build();
+    let path = crate::config::config_path(&ctx.env);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, r#"{"max_daily_spend":50}"#).unwrap();
+    (t, ctx)
+}
+
+#[test]
+fn a_rejected_create_releases_its_reservation() {
+    let (_t, ctx) = failing_create(|| ok(r#"{"success":false,"msg":"bad image"}"#));
+    assert_ne!(main(&ctx, UP), 0);
+    assert_eq!(crate::spend::window_total(&ctx).unwrap(), 0.0);
+}
+
+#[test]
+fn an_unverified_create_keeps_its_reservation() {
+    let (_t, ctx) = failing_create(|| Err(crate::process::RunError::TimedOut));
+    assert_ne!(main(&ctx, UP), 0);
+    let total = crate::spend::window_total(&ctx).unwrap();
+    assert!((total - ESTIMATE).abs() < 0.01, "{total}");
+}
+
+#[test]
 fn launches_older_than_24_hours_do_not_count() {
     let (_t, ctx, runner) = fixture("0.3");
     let now = ctx.clock.now().as_second();

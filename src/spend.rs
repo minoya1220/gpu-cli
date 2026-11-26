@@ -1,6 +1,7 @@
 //! `spend.json`: the estimated cost of every launch in the last 24 hours, for
-//! the opt-in `max_daily_spend` cap. Each launch is recorded at its estimate
-//! to its deadline; a destroy that knows the billed amount replaces it.
+//! the opt-in `max_daily_spend` cap. Each launch reserves its estimate to its
+//! deadline before its create request; a destroy that knows the billed amount
+//! replaces it.
 
 use std::path::PathBuf;
 
@@ -116,19 +117,101 @@ pub(crate) fn key(provider: &str, id: &str) -> String {
     format!("{provider}:{id}")
 }
 
-/// Record a started launch at its estimate and prune entries past the window.
-pub(crate) fn record(ctx: &Ctx, key: &str, estimate: f64) -> Result<()> {
+/// A launch's estimate checked against `max_daily_spend`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Budget {
+    pub(crate) cap: f64,
+    pub(crate) estimate: f64,
+}
+
+/// A ledger entry holding a launch's estimate from before its create request.
+#[must_use]
+#[derive(Debug)]
+pub(crate) struct Reservation(String);
+
+/// Recheck the cap and record the estimate under one lock, before anything
+/// is rented, so a ledger that cannot be written refuses the launch and
+/// concurrent launches cannot both pass. Prunes entries past the window.
+pub(crate) fn reserve(ctx: &Ctx, budget: Option<Budget>) -> Result<Option<Reservation>> {
+    let Some(Budget { cap, estimate }) = budget else {
+        return Ok(None);
+    };
     let now = ctx.clock.now().as_second();
+    let mut reserved = String::new();
     crate::atomic_file::update(&ledger_path(&ctx.env), |original| {
         let mut entries = parse(&ctx.env, original)?;
-        entries.retain(|e| in_window(e, now) && e.key != key);
+        entries.retain(|e| in_window(e, now));
+        let spent = entries.iter().fold(0.0, |total, e| total + e.usd);
+        if spent + estimate > cap {
+            return Err(crate::guardrails::daily_refusal(spent, estimate, cap));
+        }
+        reserved = (0..)
+            .map(|n| format!("pending:{now}:{n}"))
+            .find(|k| entries.iter().all(|e| &e.key != k))
+            .expect("unused key");
         entries.push(Entry {
-            key: key.to_string(),
+            key: reserved.clone(),
             at: now,
             usd: estimate,
         });
         Ok(dump(&entries))
     })
+    .map_err(|error| match error {
+        Error::Status(ExitCode::SpendLimit, _) => error,
+        error => unreadable(
+            &ctx.env,
+            &format!(
+                "cannot be written ({})",
+                crate::redact::redact_text(error.text())
+            ),
+        ),
+    })?;
+    Ok(Some(Reservation(reserved)))
+}
+
+fn rewrite(ctx: &Ctx, change: impl FnOnce(&mut Vec<Entry>)) -> Result<()> {
+    crate::atomic_file::update(&ledger_path(&ctx.env), |original| {
+        let mut entries = parse(&ctx.env, original)?;
+        change(&mut entries);
+        Ok(dump(&entries))
+    })
+}
+
+fn warn(ctx: &Ctx, result: Result<()>) {
+    if let Err(error) = result {
+        let _ = ctx.eprintln(&format!(
+            "Warning: could not update launch spend: {}",
+            crate::redact::redact_text(error.text())
+        ));
+    }
+}
+
+/// File a reservation under the launch it became, keeping its time and
+/// estimate. A failed write leaves the reservation counted.
+pub(crate) fn claim_best_effort(ctx: &Ctx, reservation: Option<Reservation>, key: &str) {
+    let Some(Reservation(reserved)) = reservation else {
+        return;
+    };
+    warn(
+        ctx,
+        rewrite(ctx, |entries| {
+            entries.retain(|e| e.key != key);
+            for entry in entries.iter_mut().filter(|e| e.key == reserved) {
+                entry.key = key.to_string();
+            }
+        }),
+    );
+}
+
+/// Drop a reservation once nothing can have been rented.
+pub(crate) fn release_best_effort(ctx: &Ctx, reservation: Option<Reservation>) {
+    let Some(Reservation(reserved)) = reservation else {
+        return;
+    };
+    warn(
+        ctx,
+        rewrite(ctx, |entries| entries.retain(|e| e.key != reserved)),
+    );
 }
 
 /// Replace a launch's estimate with the amount it was billed. An unknown or
@@ -148,24 +231,8 @@ pub(crate) fn settle(ctx: &Ctx, key: &str, billed: f64) -> Result<()> {
     })
 }
 
-/// Ledger writes never turn a successful paid operation into a failure.
-pub(crate) fn record_best_effort(ctx: &Ctx, key: &str, estimate: Option<f64>) {
-    let Some(estimate) = estimate else { return };
-    if let Err(error) = record(ctx, key, estimate) {
-        let _ = ctx.eprintln(&format!(
-            "Warning: could not record launch spend: {}",
-            crate::redact::redact_text(error.text())
-        ));
-    }
-}
-
 pub(crate) fn settle_best_effort(ctx: &Ctx, key: &str, billed: f64) {
-    if let Err(error) = settle(ctx, key, billed) {
-        let _ = ctx.eprintln(&format!(
-            "Warning: could not update launch spend: {}",
-            crate::redact::redact_text(error.text())
-        ));
-    }
+    warn(ctx, settle(ctx, key, billed));
 }
 
 #[cfg(test)]

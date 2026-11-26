@@ -125,13 +125,13 @@ fn dollars(amount: f64) -> String {
 /// bounds this launch, `max_daily_spend` this launch plus every launch started
 /// in the last 24 hours. Refuse unknown rates/deadlines rather than pretending
 /// to enforce a cap. Returns the launch's estimate when `max_daily_spend` is
-/// set, for the caller to record in the ledger once the launch exists.
+/// set, for the caller to reserve in the ledger right before creating.
 pub(crate) fn spending(
     ctx: &Ctx,
     cfg: &Dict,
     rate: Option<f64>,
     deadline: Option<Timestamp>,
-) -> Result<Option<f64>> {
+) -> Result<Option<crate::spend::Budget>> {
     let session = cap_setting(cfg, "max_session_spend")?;
     let daily = cap_setting(cfg, "max_daily_spend")?;
     if session.is_none() && daily.is_none() {
@@ -166,18 +166,22 @@ pub(crate) fn spending(
     ctx.result("daily_cap_usd", Value::Float(cap));
     ctx.result("daily_remaining_usd", Value::Float((cap - spent).max(0.0)));
     if spent + estimate > cap {
-        return Err(Error::status(
-            ExitCode::SpendLimit,
-            format!(
-                "Cannot satisfy max_daily_spend: {} estimated spent in the last 24h + {} this launch exceeds the {} cap. \
-                 Wait for earlier launches to leave the window, choose cheaper hardware/a shorter duration, or change the opt-in cap in config.json.",
-                dollars(spent),
-                dollars(estimate),
-                dollars(cap)
-            ),
-        ));
+        return Err(daily_refusal(spent, estimate, cap));
     }
-    Ok(Some(estimate))
+    Ok(Some(crate::spend::Budget { cap, estimate }))
+}
+
+pub(crate) fn daily_refusal(spent: f64, estimate: f64, cap: f64) -> Error {
+    Error::status(
+        ExitCode::SpendLimit,
+        format!(
+            "Cannot satisfy max_daily_spend: {} estimated spent in the last 24h + {} this launch exceeds the {} cap. \
+             Wait for earlier launches to leave the window, choose cheaper hardware/a shorter duration, or change the opt-in cap in config.json.",
+            dollars(spent),
+            dollars(estimate),
+            dollars(cap)
+        ),
+    )
 }
 
 /// Dry-run line for `max_daily_spend`: the window total and what is left.

@@ -1259,11 +1259,11 @@ fn download(
 ) -> Result<()> {
     let archive = tempfile::NamedTempFile::new()?;
     let seconds = (deadline.as_second() - ctx.clock.now().as_second()).max(1) as f64;
+    let attached = shell_quote(&format!("{root}/attached"));
     let command = format!(
-        "tar -C {} -cf - -- {} & p=$!; while kill -0 $p 2>/dev/null; do date +%s >{}; sleep 5; done; wait $p",
+        "tar -C {} -cf - -- {} & p=$!; while kill -0 $p 2>/dev/null; do date +%s >{attached}.$$ && mv -f {attached}.$$ {attached}; sleep 5; done; wait $p",
         shell_quote(jobdir),
         shell_quote(&backend.archive_operand(outputs)),
-        shell_quote(&format!("{root}/attached"))
     );
     let poll = ctx.polling(seconds, 0.0);
     let message = "Results download failed; instance will still be destroyed.";

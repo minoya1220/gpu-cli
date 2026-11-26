@@ -284,6 +284,9 @@ pub fn lifecycle(ctx: &Ctx, instance_id: &str, destroy: bool, yes: bool) -> Resu
         return ctx.println("Cancelled.");
     }
     let action = if destroy { "destroy" } else { "stop" };
+    let billed = destroy
+        .then(|| crate::vast::billing::estimate(instance, ctx.clock.now()))
+        .flatten();
     if let Err(err) = request(ctx, instance_id, action, 60.0) {
         let message = format!(
             "Instance {instance_id}: {action} failed; completion not verified: {}",
@@ -298,8 +301,15 @@ pub fn lifecycle(ctx: &Ctx, instance_id: &str, destroy: bool, yes: bool) -> Resu
     if destroy {
         remove_host(&ctx.env, instance_id)?;
         ctx.result("state", Value::str("destroyed"));
+        let Some(billed) = billed else {
+            return ctx.println(&format!(
+                "Instance {instance_id} ({gpu}) destroyed; billing stopped."
+            ));
+        };
+        crate::vast::billing::record(ctx, &billed);
         ctx.println(&format!(
-            "Instance {instance_id} ({gpu}) destroyed; billing stopped."
+            "Instance {instance_id} ({gpu}) destroyed{}.",
+            crate::vast::billing::describe(&billed)
         ))
     } else {
         ctx.result("state", Value::str("stopped"));

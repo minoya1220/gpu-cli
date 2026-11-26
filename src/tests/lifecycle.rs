@@ -4,6 +4,7 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use crate::ctx::Clock;
 use crate::process::Output;
 use crate::testing::*;
 use crate::vast::instance::wait_for_lifecycle;
@@ -15,6 +16,7 @@ fn test_lifecycle_verifies_before_reporting() {
         for outcome in ["success", "timeout", "failure", "poll_failure"] {
             let t = TestEnv::new();
             let clock = FakeClock::now_real();
+            let started = clock.now().as_second() - 7200;
             let polls = Arc::new(AtomicUsize::new(0));
             let requested = Arc::new(AtomicBool::new(false));
             let (counter, asked) = (polls.clone(), requested.clone());
@@ -44,7 +46,7 @@ fn test_lifecycle_verifies_before_reporting() {
                     "running"
                 };
                 ok(&format!(
-                    r#"[{{"id": 12, "gpu_name": "RTX 4090", "actual_status": "{status}"}}]"#
+                    r#"[{{"id": 12, "gpu_name": "RTX 4090", "actual_status": "{status}", "dph_total": 0.36, "start_date": {started}}}]"#
                 ))
             });
             // A managed alias that only a verified destroy may remove.
@@ -68,7 +70,7 @@ fn test_lifecycle_verifies_before_reporting() {
                 assert_eq!(polls.load(Ordering::SeqCst), 3);
                 assert!(stdout.contains("Instance 12 (RTX 4090)"));
                 let done = if action == "destroy" {
-                    "destroyed; billing stopped."
+                    "destroyed after 2h00m; billed about $0.72 (estimate)."
                 } else {
                     "stopped; storage charges may continue."
                 };
@@ -88,6 +90,53 @@ fn test_lifecycle_verifies_before_reporting() {
                 }
             }
         }
+    }
+}
+
+fn down_once(record: &str, json: bool) -> String {
+    let t = TestEnv::new();
+    let asked = Arc::new(AtomicBool::new(false));
+    let flag = asked.clone();
+    let listed = format!("[{record}]");
+    let runner = FakeRunner::new(move |cmd| {
+        if cmd.argv[1] == "destroy" {
+            flag.store(true, Ordering::SeqCst);
+            return ok("success");
+        }
+        if flag.load(Ordering::SeqCst) {
+            return ok("[]");
+        }
+        ok(&listed)
+    });
+    let ctx = t
+        .ctx()
+        .runner(&runner)
+        .clock(&FakeClock::now_real())
+        .build();
+    let mut args = vec!["down", "12", "--yes"];
+    if json {
+        args.push("--json");
+    }
+    assert_eq!(main(&ctx, &args), 0, "{}", err(&ctx));
+    out(&ctx)
+}
+
+#[test]
+fn test_destroy_without_a_running_estimate_keeps_the_plain_message() {
+    for record in [
+        r#"{"id": 12, "gpu_name": "RTX 4090", "actual_status": "running"}"#,
+        r#"{"id": 12, "gpu_name": "RTX 4090", "actual_status": "stopped", "dph_total": 0.36, "start_date": 1}"#,
+    ] {
+        assert!(
+            down_once(record, false).contains("Instance 12 (RTX 4090) destroyed; billing stopped.")
+        );
+        let reply = dict(&down_once(record, true));
+        let result = reply.get("result").unwrap().as_dict().unwrap();
+        assert_eq!(
+            result.get("state"),
+            Some(&crate::pyjson::Value::str("destroyed"))
+        );
+        assert!(result.get("billed_usd").is_none(), "{record}");
     }
 }
 

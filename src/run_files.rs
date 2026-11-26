@@ -127,9 +127,9 @@ pub(crate) fn prepare_with(ctx: &Ctx, cwd: &Path, cap: u64, drop_secrets: bool) 
     prepare_including(ctx, cwd, cap, drop_secrets, &[])
 }
 
-/// Files (or trees) under `root` named by `--include`, sent even when git
-/// ignores or does not track them, and even under `gpu-runs/`. Only paths
-/// inside the working directory are accepted; `.git` is never sent.
+/// Files under `root` named by `--include`, sent even when git ignores or
+/// does not track them, and even under `gpu-runs/`. Only files inside the
+/// working directory are accepted; directories and `.git` are never sent.
 fn included(root: &Path, include: &[String]) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     for text in include {
@@ -147,32 +147,26 @@ fn included(root: &Path, include: &[String]) -> Result<Vec<PathBuf>> {
                 "--include {text:?} must not be inside .git."
             )));
         }
-        include_path(root, &path, text, &mut files)?;
+        let disk = root.join(&path);
+        fs::symlink_metadata(&disk)
+            .map_err(|_| Error::usage(format!("--include {text:?} does not exist.")))?;
+        // A link (or a link in a parent) must not lead outside the working directory.
+        let target = disk
+            .canonicalize()
+            .map_err(|_| Error::usage(format!("--include {text:?} is a broken symlink.")))?;
+        if !target.starts_with(root) {
+            return Err(Error::usage(format!(
+                "--include {text:?} resolves outside the current directory."
+            )));
+        }
+        if target.is_dir() {
+            return Err(Error::usage(format!(
+                "--include {text:?} is a directory; name each file to upload."
+            )));
+        }
+        files.push(path);
     }
     Ok(files)
-}
-
-fn include_path(root: &Path, path: &Path, text: &str, files: &mut Vec<PathBuf>) -> Result<()> {
-    let disk = root.join(path);
-    let meta = fs::symlink_metadata(&disk)
-        .map_err(|_| Error::usage(format!("--include {text:?} does not exist.")))?;
-    // A link (or a link in a parent) must not lead outside the working directory.
-    if !disk.canonicalize()?.starts_with(root) {
-        return Err(Error::usage(format!(
-            "--include {text:?} resolves outside the current directory."
-        )));
-    }
-    if meta.is_dir() {
-        for entry in fs::read_dir(&disk)? {
-            let name = entry?.file_name();
-            if name != ".git" {
-                include_path(root, &path.join(name), text, files)?;
-            }
-        }
-    } else {
-        files.push(path.to_path_buf());
-    }
-    Ok(())
 }
 
 /// `prepare_with`, plus `include`d paths added to the git/walk selection.

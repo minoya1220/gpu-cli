@@ -277,7 +277,7 @@ fn include_adds_untracked_and_gitignored_files_inside_the_working_directory_only
     let env = TestEnv::new();
     let root = env.root.join("project");
     fs::create_dir_all(root.join("gpu-runs")).unwrap();
-    fs::create_dir_all(root.join("data/deep")).unwrap();
+    fs::create_dir_all(root.join("data")).unwrap();
     let runner = FakeRunner::new(|cmd| RealRunner.run(cmd));
     let ctx = env.ctx().runner(&runner).build();
     let git = |args: &[&str]| {
@@ -293,7 +293,9 @@ fn include_adds_untracked_and_gitignored_files_inside_the_working_directory_only
     fs::write(root.join(".gitignore"), "ignored\ndata/\n").unwrap();
     fs::write(root.join("ignored"), "hidden").unwrap();
     fs::write(root.join("gpu-runs/job.sh"), "echo").unwrap();
-    fs::write(root.join("data/deep/a.txt"), "a").unwrap();
+    fs::write(root.join("data/a.txt"), "a").unwrap();
+    std::os::unix::fs::symlink("data", root.join("data-link")).unwrap();
+    std::os::unix::fs::symlink("gone", root.join("dangling")).unwrap();
     let outside = env.root.join("outside");
     fs::write(&outside, "x").unwrap();
     std::os::unix::fs::symlink(&outside, root.join("escape")).unwrap();
@@ -301,13 +303,21 @@ fn include_adds_untracked_and_gitignored_files_inside_the_working_directory_only
         let paths: Vec<String> = paths.iter().map(|s| s.to_string()).collect();
         run_files::prepare_including(&ctx, &root, 1024, false, &paths)
     };
-    let upload = inc(&["gpu-runs/job.sh", "ignored", "data", "gpu-runs/job.sh"]).unwrap();
+    let upload = inc(&[
+        "gpu-runs/job.sh",
+        "ignored",
+        "data/a.txt",
+        "gpu-runs/job.sh",
+    ])
+    .unwrap();
     let names: Vec<_> = upload.files.iter().map(|p| p.to_str().unwrap()).collect();
     assert_eq!(
         names,
         [
             ".gitignore",
-            "data/deep/a.txt",
+            "dangling",
+            "data/a.txt",
+            "data-link",
             "escape",
             "gpu-runs/job.sh",
             "ignored"
@@ -315,6 +325,20 @@ fn include_adds_untracked_and_gitignored_files_inside_the_working_directory_only
     );
     // Counted against --max-upload like any other file.
     assert!(run_files::prepare_including(&ctx, &root, 1, false, &["ignored".into()]).is_err());
+    for (bad, why) in [
+        ("data", "is a directory"),
+        ("./data/", "is a directory"),
+        ("data-link", "is a directory"),
+        ("dangling", "is a broken symlink"),
+    ] {
+        let error = inc(&[bad]).unwrap_err();
+        assert_eq!(error.exit_code(), 2);
+        assert!(
+            error.text().contains(&format!("{bad:?} {why}")),
+            "{bad:?}: {}",
+            error.text()
+        );
+    }
     for bad in [
         outside.to_str().unwrap(),
         "../outside",

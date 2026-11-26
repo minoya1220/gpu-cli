@@ -76,6 +76,9 @@ pub enum Command {
         /// Limit listing to one provider
         #[arg(long, value_parser = Provider::parser(&Provider::ALL))]
         provider: Option<Provider>,
+        /// Only list instances launched with this owner (see gpu up --owner)
+        #[arg(long)]
+        owner: Option<String>,
     },
     /// Wait until the instance answers a non-interactive SSH probe
     Wait {
@@ -388,6 +391,9 @@ pub struct UpFlags {
     /// include verified, unverified, and deverified hosts
     #[arg(long)]
     pub unverified: bool,
+    /// Label the instance with who launched it (default: $GPU_OWNER); shown by gpu ls
+    #[arg(long)]
+    pub owner: Option<String>,
 }
 
 impl UpFlags {
@@ -443,6 +449,9 @@ pub struct RunFlags {
     /// Include unverified and deverified hosts
     #[arg(long)]
     pub unverified: bool,
+    /// Label the job with who launched it (default: $GPU_OWNER); shown by gpu ls
+    #[arg(long)]
+    pub owner: Option<String>,
     /// Approve renting and choose the cheapest matching offer
     #[arg(long)]
     pub yes: bool,

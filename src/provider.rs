@@ -364,7 +364,16 @@ fn inventory(ctx: &Ctx, cfg: &Dict, only: Option<Provider>) -> Result<Inventory>
             Err(error) => inventory.failed.push((provider, error)),
         }
     }
+    for item in &mut inventory.items {
+        let owner = crate::owner::of(item);
+        item.insert("owner", owner.map_or(Value::Null, Value::Str));
+    }
     Ok(inventory)
+}
+
+/// Every listed instance, for the same-owner duplicate warning.
+pub(crate) fn listed_items(ctx: &Ctx, cfg: &Dict) -> Result<Vec<Dict>> {
+    Ok(inventory(ctx, cfg, None)?.items)
 }
 
 /// Live instances, and the providers whose answer is complete.
@@ -474,10 +483,16 @@ pub fn ls(
     long: bool,
     only: Option<Provider>,
     envelope: bool,
+    owner: Option<&str>,
 ) -> Result<()> {
     let Inventory {
-        items, mut failed, ..
+        mut items,
+        mut failed,
+        ..
     } = inventory(ctx, cfg, only)?;
+    if let Some(owner) = owner {
+        items.retain(|item| crate::owner::of(item).as_deref() == Some(owner));
+    }
     if json {
         let value = crate::redact::redact(&Value::List(
             items.iter().cloned().map(Value::Dict).collect(),

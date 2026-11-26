@@ -19,8 +19,9 @@ static CLONE: LazyLock<Regex> = LazyLock::new(|| {
 /// Use metadata stored on the instance by `gpu up`, never local history.
 pub fn repo_name(instance: &Dict) -> Option<String> {
     if let Some(Value::Str(label)) = instance.get("label") {
+        let label = crate::owner::split(label).0;
         if label != "no-repo" && crate::repos::is_name(label) {
-            return Some(label.clone());
+            return Some(label.to_string());
         }
     }
     // Older instances may have a clone command but no label.
@@ -122,7 +123,10 @@ pub(crate) fn render_table(ctx: &Ctx, items: &[Dict], long: bool) -> Result<()> 
         return ctx.println(NO_INSTANCES);
     }
     let ids = display_ids(items, long)?;
-    let mut cells = vec![["ID", "Provider", "Type", "Status", "Price", "Uptime"].map(String::from)];
+    let mut cells = vec![[
+        "ID", "Provider", "Type", "Status", "Price", "Uptime", "Owner",
+    ]
+    .map(String::from)];
     for (item, id) in items.iter().zip(ids) {
         let field = |key| {
             item.get(key)
@@ -144,6 +148,7 @@ pub(crate) fn render_table(ctx: &Ctx, items: &[Dict], long: bool) -> Result<()> 
                 field("actual_status").to_ascii_lowercase(),
                 table_price(item),
                 format_uptime(item.get("duration")),
+                crate::owner::of(item).unwrap_or_default(),
             ]
             .map(|cell| {
                 crate::redact::redact_text(&cell)
@@ -154,7 +159,7 @@ pub(crate) fn render_table(ctx: &Ctx, items: &[Dict], long: bool) -> Result<()> 
         );
     }
     use crate::table::Column::{Left, Plain};
-    for line in crate::table::aligned_rows(&cells, [Left, Left, Left, Left, Left, Plain]) {
+    for line in crate::table::aligned_rows(&cells, [Left, Left, Left, Left, Left, Left, Plain]) {
         ctx.println(line.trim_end())?;
     }
     Ok(())

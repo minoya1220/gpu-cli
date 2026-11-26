@@ -648,6 +648,7 @@ fn approve(
         .unwrap_or_default()
         .to_string_lossy()
         .to_string();
+    let label = crate::owner::tag(&label, &job.cfg);
     let plan = backend.plan(ctx, selected, &job.cfg, job.deadline, label)?;
     let rate = plan.rate;
     let ledger = crate::guardrails::spending(ctx, &job.cfg, Some(rate), Some(job.deadline))?;

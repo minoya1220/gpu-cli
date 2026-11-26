@@ -108,10 +108,21 @@ Manual AMD workspaces have **no auto-destroy**. `--yes` approves renting until m
 
 `--max-price` checks the hourly estimate: Runpod includes container disk ($0.10/GB-month, estimated at 730h/month); DO includes its fixed boot disk. Network/tax and independent retained resources are extra. Runpod stop loses the container filesystem and still bills retained storage; DO power-off continues **full GPU billing**. `down` deletes the Pod/Droplet, not independent volumes, snapshots or backups. IDs are `runpod:ID` and `do:REGION:ID`; bare numbers remain Vast.
 
+## Owners
+
+Several agents can rent through one account. Label your launches so `gpu ls` shows who started what: pass `--owner NAME` to `gpu up` or `gpu run`, or set `GPU_OWNER=NAME` (the flag wins). NAME is 1-32 letters, digits, `.`, `_` or `-`. The owner is stored in the instance label as `REPO@NAME`, so it survives across processes.
+
+```sh
+GPU_OWNER=firstmate gpu up --no-repo --gpu 'RTX 4090' --expire 2h --yes
+gpu ls --owner firstmate        # only that owner's instances; `--json` rows carry "owner"
+```
+
+If the same owner already has a running instance, `gpu up`/`gpu run` print a warning naming its ID and still launch (`owner_warning` with `--json`). Other owners' instances never trigger it. Instances without an owner show a blank Owner column.
+
 ## Connect and edit
 
 ```sh
-gpu ls                          # IDs, status, price, uptime
+gpu ls                          # IDs, status, price, uptime, owner
 gpu ssh 12345678 --exec         # connect; without --exec, print the command
 gpu edit 12345678 --editor code # cursor, code, zed or nvim
 gpu edit 12345678 --editor nvim --nvim-config ~/.config/nvim

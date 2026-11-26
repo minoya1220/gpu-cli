@@ -2,6 +2,8 @@
 use super::*;
 
 const SIZE: &str = "gpu-mi300x1-192gb";
+/// Droplet tag prefix carrying the launch's owner: names must be hostnames.
+const OWNER_TAG: &str = "gpu-owner:";
 
 pub(super) fn catalog(ctx: &Ctx) -> Result<Vec<Quote>> {
     // doctl traverses API pagination internally; do not pass --page/--per-page.
@@ -81,6 +83,11 @@ pub(super) fn plan(
             ));
         }
     }
+    let (name, owner) = crate::owner::split(label);
+    let tags = match owner {
+        Some(owner) => format!("gpu-cli,{OWNER_TAG}{owner}"),
+        None => "gpu-cli".into(),
+    };
     let mut data = tempfile::Builder::new()
         .prefix("gpu-amd-")
         .suffix(".sh")
@@ -93,7 +100,7 @@ pub(super) fn plan(
             "compute",
             "droplet",
             "create",
-            label,
+            name,
             "--size",
             SIZE,
             "--region",
@@ -103,7 +110,7 @@ pub(super) fn plan(
             "--ssh-keys",
             keys,
             "--tag-names",
-            "gpu-cli",
+            &tags,
             "--user-data-file",
             &data.path().to_string_lossy(),
         ],
@@ -159,10 +166,17 @@ pub(super) fn list(ctx: &Ctx) -> Result<Vec<Dict>> {
             let mut item = Dict::new();
             item.insert("id", Value::str(qualified(row)?));
             item.insert("provider", Value::str("do"));
-            for (from, to) in [("name", "label"), ("status", "actual_status")] {
-                if let Some(v) = row.get(from) {
-                    item.insert(to, v.clone());
-                }
+            if let Some(v) = row.get("status") {
+                item.insert("actual_status", v.clone());
+            }
+            if let Some(name) = row.get("name").and_then(Value::as_str) {
+                let owner = row
+                    .get("tags")
+                    .and_then(Value::as_list)
+                    .into_iter()
+                    .flatten()
+                    .find_map(|tag| tag.as_str()?.strip_prefix(OWNER_TAG));
+                item.insert("label", Value::str(crate::owner::labeled(name, owner)));
             }
             if row.get("size_slug").and_then(Value::as_str) == Some(SIZE) {
                 item.insert("gpu_name", Value::str("MI300X"));

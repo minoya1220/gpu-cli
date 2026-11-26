@@ -267,6 +267,9 @@ pub(crate) fn launch_with_retry(
     launch_loop(ctx, flags, cfg, deadline, None, retry)
 }
 
+/// The TPU label carrying the launch's owner (see `crate::owner`).
+pub(crate) const OWNER_LABEL: &str = "gpu-owner";
+
 fn launch_loop(
     ctx: &Ctx,
     flags: &TpuArgs,
@@ -288,6 +291,9 @@ fn launch_loop(
         None => wizard::choose(ctx, flags, &settings, cfg, deadline)?,
     };
     let deadline = picks.deadline;
+    if !flags.dry_run {
+        crate::owner::warn_duplicate(ctx, cfg, Provider::Gcp)?;
+    }
     let mut confirm = !flags.yes;
     let mut approved_rate = None;
     let mut check_rate = false;
@@ -313,7 +319,10 @@ fn launch_loop(
         args.extend([
             format!("--accelerator-type={}", picks.tpu),
             format!("--version={}", picks.runtime),
-            "--labels=gpu-cli=true".into(),
+            match crate::owner::from_cfg(cfg) {
+                Some(owner) => format!("--labels=gpu-cli=true,{OWNER_LABEL}={owner}"),
+                None => "--labels=gpu-cli=true".into(),
+            },
         ]);
         if picks.spot {
             args.push("--spot".into());

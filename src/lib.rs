@@ -18,6 +18,7 @@ pub mod instances;
 pub mod launch;
 pub(crate) mod modal;
 mod output;
+pub(crate) mod owner;
 mod packing;
 pub mod picker;
 mod poll;
@@ -177,6 +178,14 @@ fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
         return Err(Error::usage("Interactive SSH/editor sessions cannot use --json. Use gpu exec ID -- COMMAND for terminal-free execution."));
     }
     guardrails::nonterminal(ctx, &command, &cfg)?;
+    let launch_owner = match &command {
+        Command::Up(flags) => owner::resolve(ctx, flags.owner.as_deref())?,
+        Command::Run(flags) => owner::resolve(ctx, flags.owner.as_deref())?,
+        _ => None,
+    };
+    if let Some(name) = &launch_owner {
+        cfg.insert(owner::CFG_KEY, pyjson::Value::str(name));
+    }
     if let Command::Up(flags) = &command {
         if !flags.target().amd() {
             config::infer_identity(ctx, &mut cfg);
@@ -253,7 +262,8 @@ fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
             long,
             provider,
             envelope,
-        } => provider::ls(ctx, &cfg, json, long, provider, envelope),
+            owner,
+        } => provider::ls(ctx, &cfg, json, long, provider, envelope, owner.as_deref()),
         Command::Expire { .. } => {
             let (id, action, deadline) = expire_plan.expect("parsed above");
             ctx.result("action", pyjson::Value::str(&action));

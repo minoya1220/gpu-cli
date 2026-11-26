@@ -12,6 +12,7 @@ mod instances;
 mod lifecycle;
 mod listing;
 mod not_found;
+mod owner;
 mod picker;
 mod properties;
 mod repo_cache;

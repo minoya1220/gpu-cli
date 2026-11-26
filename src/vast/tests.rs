@@ -21,7 +21,8 @@ fn unreadable_instances_reply_has_retry_hint_without_raw_output() {
                     json,
                     false,
                     Some(crate::provider::Provider::Vast),
-                    false
+                    false,
+                    None
                 )
                 .unwrap_err()
                 .text(),

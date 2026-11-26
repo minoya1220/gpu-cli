@@ -154,6 +154,7 @@ pub fn request(offer: &Dict, args: &RequestArgs, cfg: &Dict) -> Result<Vec<Value
     let mode = args.mode;
     let script = startup_script(args.repo, mode, cfg, args.deadline)?;
     let label = resolve_repo(args.repo.as_arg(), &py_str(config::get(cfg, "owner")?))?.1;
+    let label = crate::owner::tag(&label, cfg);
     request_script(offer, args, cfg, script, label)
 }
 

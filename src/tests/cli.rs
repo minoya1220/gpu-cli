@@ -422,7 +422,10 @@ fn test_ls_table_and_json_output() {
     assert!(output.contains("Uptime") && output.contains("2h 02m"));
     assert!(!output.contains("7342"));
     assert_eq!(main(&ctx, &["ls", "--json"]), 0);
-    let listed = payload.replace(r#"7342.81}"#, r#"7342.81, "provider": "vast"}"#);
+    let listed = payload.replace(
+        r#"7342.81}"#,
+        r#"7342.81, "provider": "vast", "owner": null}"#,
+    );
     assert_eq!(json(&out(&ctx)), json(&listed));
     let empty = FakeRunner::new(|_| ok("[]"));
     let ctx = t.ctx().runner(&empty).build();

@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 use crate::error::{Error, Result};
 use crate::process::{Cmd, Output, RealRunner, RunError, Runner};
 
-const ENV_KEYS: [&str; 6] = [
+const ENV_KEYS: [&str; 7] = [
+    "GPU_OWNER",
     "HOME",
     "PATH",
     "TZ",

@@ -110,14 +110,14 @@ Manual AMD workspaces have **no auto-destroy**. `--yes` approves renting until m
 
 ## Owners
 
-Several agents can rent through one account. Label your launches so `gpu ls` shows who started what: pass `--owner NAME` to `gpu up` or `gpu run`, or set `GPU_OWNER=NAME` (the flag wins). NAME is 1-32 letters, digits, `.`, `_` or `-`. The owner is stored in the instance label as `REPO@NAME`, so it survives across processes.
+Several agents can rent through one account. Label your launches so `gpu ls` shows who started what: pass `--owner NAME` to `gpu up` or `gpu run`, or set `GPU_OWNER=NAME` (the flag wins). NAME is 1-32 lowercase letters, digits, `_` or `-`. The owner is stored on the instance, so it survives across processes: in the label as `REPO@NAME` on Vast, Runpod and Modal, as the `gpu-owner` TPU label on Google Cloud, and as a `gpu-owner:NAME` tag on DigitalOcean (Droplet names must be hostnames).
 
 ```sh
 GPU_OWNER=firstmate gpu up --no-repo --gpu 'RTX 4090' --expire 2h --yes
 gpu ls --owner firstmate        # only that owner's instances; `--json` rows carry "owner"
 ```
 
-If the same owner already has a running instance, `gpu up`/`gpu run` print a warning naming its ID and still launch (`owner_warning` with `--json`). Other owners' instances never trigger it. Instances without an owner show a blank Owner column.
+If the same owner already has an instance on the provider being launched that has not ended (created, loading, running, READY and similar; not exited, stopped or deleted), `gpu up`/`gpu run` print a warning naming its ID and still launch (`owner_warning` with `--json`). Only that provider is queried, and other owners' instances never trigger it. Instances without an owner show a blank Owner column.
 
 ## Connect and edit
 

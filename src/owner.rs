@@ -1,11 +1,15 @@
 //! Who launched an instance: `--owner`, else `GPU_OWNER`, stored in the label.
 //!
-//! The provider label is `REPO` or `REPO@OWNER`. `@` never occurs in a
-//! repository name (`repos::is_name`) or an owner, so the split is exact and
-//! instances launched before this existed (no `@`) simply have no owner.
+//! The listed label is `REPO` or `REPO@OWNER`. `tag` replaces `@` in the repo
+//! part and an owner never contains one, so the split is exact and instances
+//! launched before this existed (no `@`) simply have no owner. Vast, Runpod
+//! and Modal store that label as is; GCP keeps the owner in a TPU label and
+//! DigitalOcean in a Droplet tag, and their inventories rebuild it. The owner
+//! alphabet is what both of those accept.
 
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
+use crate::provider::Provider;
 use crate::pyfmt::py_str;
 use crate::pyjson::{Dict, Value};
 
@@ -18,7 +22,7 @@ fn valid(owner: &str) -> bool {
         && owner.len() <= MAX_LEN
         && owner
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '-'))
 }
 
 /// `--owner`, else `GPU_OWNER`, else none. An empty value counts as unset.
@@ -32,7 +36,7 @@ pub fn resolve(ctx: &Ctx, flag: Option<&str>) -> Result<Option<String>> {
     };
     if !valid(value) {
         return Err(Error::usage(format!(
-            "Invalid owner from {source}: use 1-{MAX_LEN} letters, digits, '.', '_' or '-'."
+            "Invalid owner from {source}: use 1-{MAX_LEN} lowercase letters, digits, '_' or '-'."
         )));
     }
     Ok(Some(value.to_string()))
@@ -45,9 +49,15 @@ pub fn from_cfg(cfg: &Dict) -> Option<String> {
 
 /// The provider label for `repo`, tagged with the launch's owner.
 pub fn tag(repo: &str, cfg: &Dict) -> String {
-    match from_cfg(cfg) {
-        Some(owner) => format!("{}@{owner}", repo.replace('@', "_")),
-        None => repo.to_string(),
+    labeled(repo, from_cfg(cfg).as_deref())
+}
+
+/// The label for `repo` launched by `owner`.
+pub fn labeled(repo: &str, owner: Option<&str>) -> String {
+    let repo = repo.replace('@', "_");
+    match owner {
+        Some(owner) => format!("{repo}@{owner}"),
+        None => repo,
     }
 }
 
@@ -67,18 +77,38 @@ pub fn of(item: &Dict) -> Option<String> {
     }
 }
 
-/// Warn (never refuse) when `owner` already has a running instance.
-pub fn warn_duplicate(ctx: &Ctx, cfg: &Dict, owner: &str) -> Result<()> {
+/// Statuses of an instance that is gone or no longer running work.
+const ENDED: [&str; 12] = [
+    "exited",
+    "stopped",
+    "stopping",
+    "destroyed",
+    "deleted",
+    "deleting",
+    "terminated",
+    "terminating",
+    "preempted",
+    "suspended",
+    "off",
+    "outputs-only",
+];
+
+/// Warn (never refuse) when the launch's owner already has a not-yet-ended
+/// instance on `provider`.
+pub fn warn_duplicate(ctx: &Ctx, cfg: &Dict, provider: Provider) -> Result<()> {
+    let Some(owner) = from_cfg(cfg) else {
+        return Ok(());
+    };
     // Best effort: an unreachable inventory must not block the launch.
-    let Ok(items) = crate::provider::listed_items(ctx, cfg) else {
+    let Ok(items) = crate::provider::listed_items(ctx, cfg, provider) else {
         return Ok(());
     };
     let ids: Vec<String> = items
         .iter()
-        .filter(|item| of(item).as_deref() == Some(owner))
+        .filter(|item| of(item).as_deref() == Some(owner.as_str()))
         .filter(|item| {
-            py_str(item.get("actual_status").unwrap_or(&Value::Null))
-                .eq_ignore_ascii_case("running")
+            let status = py_str(item.get("actual_status").unwrap_or(&Value::Null));
+            !ENDED.iter().any(|ended| status.eq_ignore_ascii_case(ended))
         })
         .filter_map(|item| item.get("id").map(py_str))
         .collect();
@@ -86,7 +116,8 @@ pub fn warn_duplicate(ctx: &Ctx, cfg: &Dict, owner: &str) -> Result<()> {
         return Ok(());
     }
     let message = format!(
-        "Owner {owner} already has a running instance: {}. Continuing; gpu ls --owner {owner} lists them.",
+        "Owner {owner} already has a {} instance that has not ended: {}. Continuing; gpu ls --owner {owner} lists them.",
+        provider.label(),
         ids.join(", ")
     );
     ctx.result("owner_warning", Value::str(&message));

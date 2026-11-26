@@ -160,6 +160,12 @@ fn fixture() -> (TestEnv, Ctx, Arc<FakeRunner>, Arc<Mutex<State>>) {
                 if reject { return Ok(Output::failed(1, if state.ambiguous_create { "unknown transport failure" } else { "RESOURCE_EXHAUSTED capacity stockout token=do-not-print" })); }
                 let mut n = node(a.contains(&"--spot"));
                 n.insert("name", Value::str(format!("projects/test-project/locations/{}/nodes/{}",arg(cmd,"zone"), a[5])));
+                let mut labels = Dict::new();
+                for pair in arg(cmd, "labels").split(',') {
+                    let (key, value) = pair.split_once('=').unwrap();
+                    labels.insert(key, Value::str(value));
+                }
+                n.insert("labels", Value::Dict(labels));
                 state.nodes.push(n);
                 ok("{}")
             },
@@ -484,6 +490,38 @@ fn lists_are_provider_labelled_and_gcp_only_does_not_require_vast() {
         .iter()
         .all(|a| ["gcloud", "curl"].contains(&a[0].as_str())));
     assert!(out(&ctx).contains("\"provider\": \"gcp\""));
+}
+
+#[test]
+fn tpu_owner_is_stored_listed_and_warned_about_without_asking_vast() {
+    let (_env, ctx, runner, _state) = fixture();
+    let mut flags = UP.to_vec();
+    flags.extend(["--owner", "firstmate"]);
+    assert_eq!(main(&ctx, &flags), 0, "{}", err(&ctx));
+    let create = runner
+        .argvs()
+        .into_iter()
+        .find(|a| a.get(4).is_some_and(|s| s == "create"))
+        .unwrap();
+    assert!(create.contains(&"--labels=gpu-cli=true,gpu-owner=firstmate".into()));
+    assert_eq!(err(&ctx), "");
+
+    out(&ctx);
+    assert_eq!(main(&ctx, &["ls", "--json", "--owner", "firstmate"]), 0);
+    let listed = json(&out(&ctx));
+    let items = listed.as_list().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].get("provider").unwrap().as_str(), Some("gcp"));
+    assert_eq!(items[0].get("owner").unwrap().as_str(), Some("firstmate"));
+
+    let start = runner.calls().len();
+    assert_eq!(main(&ctx, &flags), 0, "{}", err(&ctx));
+    assert!(
+        err(&ctx).contains("Owner firstmate already has a Google Cloud instance"),
+        "{}",
+        err(&ctx)
+    );
+    assert!(runner.argvs()[start..].iter().all(|a| a[0] != "vastai"));
 }
 
 #[test]

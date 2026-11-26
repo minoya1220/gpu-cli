@@ -672,6 +672,7 @@ fn approve(
         ))?;
         return Ok(None);
     }
+    crate::owner::warn_duplicate(ctx, &job.cfg, backend.provider())?;
     if !flags.yes
         && !crate::prompt::confirm(
             ctx,

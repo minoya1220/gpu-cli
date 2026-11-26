@@ -185,14 +185,6 @@ fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
     };
     if let Some(name) = &launch_owner {
         cfg.insert(owner::CFG_KEY, pyjson::Value::str(name));
-        let dry_run = match &command {
-            Command::Up(flags) => flags.dry_run,
-            Command::Run(flags) => flags.dry_run,
-            _ => true,
-        };
-        if !dry_run {
-            owner::warn_duplicate(ctx, &cfg, name)?;
-        }
     }
     if let Command::Up(flags) = &command {
         if !flags.target().amd() {

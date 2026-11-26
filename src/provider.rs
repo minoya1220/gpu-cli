@@ -371,9 +371,9 @@ fn inventory(ctx: &Ctx, cfg: &Dict, only: Option<Provider>) -> Result<Inventory>
     Ok(inventory)
 }
 
-/// Every listed instance, for the same-owner duplicate warning.
-pub(crate) fn listed_items(ctx: &Ctx, cfg: &Dict) -> Result<Vec<Dict>> {
-    Ok(inventory(ctx, cfg, None)?.items)
+/// The instances of one provider, for the same-owner duplicate warning.
+pub(crate) fn listed_items(ctx: &Ctx, cfg: &Dict, provider: Provider) -> Result<Vec<Dict>> {
+    Ok(inventory(ctx, cfg, Some(provider))?.items)
 }
 
 /// Live instances, and the providers whose answer is complete.

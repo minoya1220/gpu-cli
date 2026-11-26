@@ -2,13 +2,16 @@
 
 use super::cli::dry_run_request;
 use crate::owner;
+use crate::provider::Provider;
 use crate::testing::*;
 
 const LIVE: &str = r#"[
  {"id": 1, "gpu_name": "RTX 4090", "actual_status": "running", "label": "proj@firstmate"},
  {"id": 2, "gpu_name": "RTX 4090", "actual_status": "running", "label": "proj@rental-agent"},
  {"id": 3, "gpu_name": "RTX 4090", "actual_status": "exited", "label": "proj@carol"},
- {"id": 4, "gpu_name": "RTX 4090", "actual_status": "running", "label": "proj"}
+ {"id": 4, "gpu_name": "RTX 4090", "actual_status": "running", "label": "proj"},
+ {"id": 5, "gpu_name": "RTX 4090", "actual_status": "loading", "label": "proj@firstmate"},
+ {"id": 6, "gpu_name": "RTX 4090", "actual_status": "exited", "label": "proj@firstmate"}
 ]"#;
 
 #[test]
@@ -31,14 +34,19 @@ fn flag_beats_env_beats_none() {
     );
     let bare = t.ctx().build();
     assert_eq!(owner::resolve(&bare, None).unwrap(), None);
-    assert!(owner::resolve(&bare, Some("bad owner@x")).is_err());
+    for bad in ["bad owner@x", "First", "a.b", &"x".repeat(33)] {
+        assert!(owner::resolve(&bare, Some(bad)).is_err(), "{bad}");
+    }
 }
 
 #[test]
 fn label_round_trips_and_keeps_the_repo_name() {
     assert_eq!(owner::split("proj@firstmate"), ("proj", Some("firstmate")));
     assert_eq!(owner::split("proj"), ("proj", None));
-    assert_eq!(owner::split("no-repo@a.b"), ("no-repo", Some("a.b")));
+    assert_eq!(owner::split("no-repo@a_b-1"), ("no-repo", Some("a_b-1")));
+    assert_eq!(owner::labeled("proj@v2", None), "proj_v2");
+    assert_eq!(owner::split(&owner::labeled("proj@v2", None)).1, None);
+    assert_eq!(owner::labeled("proj@v2", Some("me")), "proj_v2@me");
     let item = dict(r#"{"label": "proj@firstmate"}"#);
     assert_eq!(crate::instances::repo_name(&item).as_deref(), Some("proj"));
 }
@@ -116,22 +124,32 @@ fn ls_shows_filters_and_reports_owners() {
     );
 }
 
+fn owned(name: &str) -> crate::pyjson::Dict {
+    let mut cfg = crate::config::defaults();
+    cfg.insert(owner::CFG_KEY, crate::pyjson::Value::str(name));
+    cfg
+}
+
 #[test]
-fn duplicate_warning_fires_only_for_the_same_owner() {
+fn duplicate_warning_counts_unended_instances_of_the_same_owner_on_one_provider() {
     let t = TestEnv::new();
-    let runner = FakeRunner::new(|_| ok(LIVE));
-    let ctx = t.ctx().runner(&runner).build();
-    owner::warn_duplicate(&ctx, &crate::config::defaults(), "firstmate").unwrap();
+    let runner = FakeRunner::new(|cmd| {
+        assert_eq!(cmd.argv[..3], ["vastai", "show", "instances"]);
+        ok(LIVE)
+    });
+    let ctx = t.ctx().runner(&runner).build().for_command(true);
+    owner::warn_duplicate(&ctx, &owned("firstmate"), Provider::Vast).unwrap();
     let warning = err(&ctx);
     assert!(
-        warning.contains("firstmate") && warning.contains("1"),
+        warning
+            .contains("Owner firstmate already has a Vast.ai instance that has not ended: 1, 5."),
         "{warning}"
     );
-    assert!(!warning.contains('2'), "{warning}");
-    // Another owner's instance, a stopped one, and an unowned one never trigger it.
-    for other in ["carol", "nobody"] {
+    assert!(ctx.result_snapshot().get("owner_warning").is_some());
+    // Another owner's instance, an ended one, an unowned one, or no owner never trigger it.
+    for cfg in [owned("carol"), owned("nobody"), crate::config::defaults()] {
         let ctx = t.ctx().runner(&runner).build();
-        owner::warn_duplicate(&ctx, &crate::config::defaults(), other).unwrap();
+        owner::warn_duplicate(&ctx, &cfg, Provider::Vast).unwrap();
         assert_eq!(err(&ctx), "");
     }
 }

@@ -549,6 +549,7 @@ fn launch_offer(
         }
         return Ok(Attempt::Launched(Launched::default()));
     }
+    crate::owner::warn_duplicate(ctx, cfg, crate::provider::Provider::Vast)?;
     if !tty_confirmed {
         ctx.println(&format!(
             "Launch {mode} for {} on offer {} at ${}/hr?",

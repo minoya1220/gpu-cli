@@ -186,6 +186,47 @@ fn exact_dry_run_requests_are_amd_only_and_include_storage_in_guardrails() {
 }
 
 #[test]
+fn owner_is_stored_as_a_runpod_name_and_a_droplet_tag_and_listed_back() {
+    let mut owned = cfg();
+    owned.insert(crate::owner::CFG_KEY, Value::str("firstmate"));
+    for (provider, stored) in [
+        ("runpod", ["--name", "gpu-cli-workspace@firstmate"]),
+        ("do", ["--tag-names", "gpu-cli,gpu-owner:firstmate"]),
+    ] {
+        let t = TestEnv::new();
+        let runner = FakeRunner::new(fixture);
+        let ctx = t.ctx().runner(&runner).build().for_command(true);
+        up(&ctx, &flags(provider, &[]), &owned).unwrap();
+        let result = ctx.result_snapshot();
+        let Some(Value::List(request)) = result.get("request").and_then(|r| r.get("argv")) else {
+            panic!("no request argv");
+        };
+        let request: Vec<String> = request.iter().map(crate::pyfmt::py_str).collect();
+        let at = request.iter().position(|a| a == stored[0]).unwrap();
+        assert_eq!(request[at + 1], stored[1]);
+        if provider == "do" {
+            let at = request.iter().position(|a| a == "create").unwrap();
+            assert_eq!(request[at + 1], "gpu-cli-workspace");
+        }
+    }
+    let t = TestEnv::new();
+    let runner = FakeRunner::new(|cmd| {
+        assert_eq!(cmd.program(), "doctl");
+        testing::ok(
+            r#"[{"id":42,"name":"gpu-cli-workspace","region":{"slug":"atl1"},"status":"new","tags":["gpu-cli","gpu-owner:firstmate"]},{"id":43,"name":"other","region":{"slug":"atl1"},"status":"active","tags":["gpu-cli"]}]"#,
+        )
+    });
+    let ctx = t.ctx().runner(&runner).build();
+    let items = list(&ctx, Provider::DigitalOcean).unwrap();
+    let owners: Vec<_> = items.iter().map(crate::owner::of).collect();
+    assert_eq!(owners, [Some("firstmate".to_string()), None]);
+    assert_eq!(
+        items[0].get("label"),
+        Some(&Value::str("gpu-cli-workspace@firstmate"))
+    );
+}
+
+#[test]
 fn shared_run_dry_run_keeps_upload_checks_and_never_uses_vast() {
     for provider in ["runpod", "do"] {
         let t = TestEnv::new();

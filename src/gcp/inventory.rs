@@ -197,7 +197,11 @@ pub fn list(ctx: &Ctx, settings: &Settings) -> Result<Vec<Dict>> {
                 "actual_status",
                 Value::str(text(node, "state").unwrap_or("UNKNOWN")),
             );
-            item.insert("label", Value::str("no-repo"));
+            let owner = node
+                .get("labels")
+                .and_then(|labels| labels.get(crate::gcp::launch::OWNER_LABEL))
+                .and_then(Value::as_str);
+            item.insert("label", Value::str(crate::owner::labeled("no-repo", owner)));
             if let Some(created) =
                 text(node, "createTime").and_then(|s| s.parse::<Timestamp>().ok())
             {

@@ -438,7 +438,7 @@ pub fn up(ctx: &Ctx, flags: &UpFlags, cfg: &Dict) -> Result<crate::launch::Launc
         cfg,
         flags.disk,
         None,
-        "gpu-cli-workspace",
+        &crate::owner::tag("gpu-cli-workspace", cfg),
         &setup,
     )?;
     if flags.max_price.is_some_and(|cap| plan.rate > cap) {
@@ -461,6 +461,7 @@ pub fn up(ctx: &Ctx, flags: &UpFlags, cfg: &Dict) -> Result<crate::launch::Launc
         ))?;
         return Ok(Default::default());
     }
+    crate::owner::warn_duplicate(ctx, cfg, provider)?;
     if !flags.yes
         && !crate::prompt::confirm(
             ctx,

@@ -340,3 +340,57 @@ fn persistent_transport_failure_stops_after_a_small_budget() {
 
 mod expiry_prompt;
 mod lifecycle;
+
+#[test]
+fn include_uploads_untracked_gpu_runs_script_and_lists_it_in_dry_run() {
+    let env = TestEnv::new();
+    let cwd = env.root.join("project");
+    fs::create_dir_all(cwd.join("gpu-runs")).unwrap();
+    fs::write(cwd.join("train.py"), b"pass").unwrap();
+    fs::write(cwd.join("gpu-runs/pr12.sh"), b"echo hi").unwrap();
+    fs::write(cwd.join("gpu-runs/other.sh"), b"echo no").unwrap();
+    let runner = FakeRunner::new(|cmd| match cmd.program() {
+        "git" => testing::status(128),
+        "vastai" if cmd.argv[1] == "search" => {
+            testing::ok(r#"[{"id":42,"gpu_name":"T4","dph_total":0.1,"num_gpus":1}]"#)
+        }
+        _ => panic!("{:?}", cmd.argv),
+    });
+    let ctx = env.ctx().runner(&runner).build().for_command(true);
+    run(
+        &ctx,
+        &flags(&["--dry-run", "--include", "./gpu-runs/pr12.sh"]),
+        &crate::config::defaults(),
+        &cwd,
+    )
+    .unwrap();
+    assert_eq!(
+        ctx.result_snapshot().get("files"),
+        Some(&Value::List(vec![
+            Value::str("gpu-runs/pr12.sh"),
+            Value::str("train.py")
+        ]))
+    );
+}
+
+#[test]
+fn included_secret_looking_files_need_allow_secrets() {
+    let env = TestEnv::new();
+    let cwd = env.root.join("project");
+    fs::create_dir(&cwd).unwrap();
+    fs::write(cwd.join(".env"), b"secret").unwrap();
+    let runner = FakeRunner::new(|cmd| match cmd.program() {
+        "git" => testing::status(128),
+        _ => panic!("{:?}", cmd.argv),
+    });
+    let ctx = env.ctx().runner(&runner).build().for_command(true);
+    let error = run(
+        &ctx,
+        &flags(&["--dry-run", "--include", ".env"]),
+        &crate::config::defaults(),
+        &cwd,
+    )
+    .unwrap_err();
+    assert_eq!(error.exit_code(), 2);
+    assert!(error.text().contains(".env"));
+}

@@ -44,6 +44,7 @@ gpu run --gpu 'RTX 4090' --expire 30m --yes --env HF_TOKEN -- python train.py
 `gpu run` rents a Vast container, uploads your files, runs setup and the command, downloads results, then destroys the instance.
 
 - Upload: the current folder and below, nothing above it; the job starts in that folder. In a git repo, every non-ignored file there including uncommitted edits; elsewhere, all files minus `.venv`, `node_modules` and caches. `--dry-run` lists them. Secret-looking files (`.env*`, SSH keys, `*.pem`, `.netrc`, `.aws/`, `credentials*.json`) are refused unless you pass `--allow-secrets`. The cap is `--max-upload` (default 1G).
+- `--include PATH` (repeatable) also uploads a file, or the files under a directory, that git ignores or does not track, such as a job script you just wrote: `gpu run --gpu 'RTX 4090' --expire 30m --include gpu-runs/job.sh --yes -- sh gpu-runs/job.sh`. The path must stay inside the current folder (no absolute paths, `..` or escaping symlinks) and goes through the same secret check, `--max-upload` and `--dry-run` listing.
 - Setup: `uv.lock`, `pyproject.toml` or `requirements.txt` is installed with uv. On a CUDA/torch `--image`, pass `--no-setup` or your own `--setup CMD` so uv does not reinstall torch.
 - Secrets: `--env NAME` sends a local variable over SSH stdin, never in arguments or Vast metadata. Job output is not filtered.
 - Results: write to `outputs/`. They land in `./gpu-runs/<time>-<id>/` with `log.txt` and `result.json`; add `gpu-runs/` to `.gitignore`.

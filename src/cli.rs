@@ -467,6 +467,9 @@ pub struct RunFlags {
     /// Permit uploading secret-looking files (refused by default)
     #[arg(long)]
     pub allow_secrets: bool,
+    /// Also upload this file or directory even if git ignores or does not track it, e.g. gpu-runs/job.sh (repeatable)
+    #[arg(long, value_name = "PATH")]
+    pub include: Vec<String>,
     /// Results directory relative to the job's working directory
     #[arg(long, default_value = "outputs")]
     pub outputs: String,

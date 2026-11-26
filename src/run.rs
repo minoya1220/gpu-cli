@@ -467,7 +467,13 @@ fn prepare(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<Prepar
     let env = forwarded_env(ctx, flags)?;
     let args = UpArgs::from(flags);
     crate::launch::validate_launch_args(&args).map_err(|e| Error::usage(e.text()))?;
-    let upload = run_files::prepare(ctx, cwd, run_files::max_bytes(&flags.max_upload)?)?;
+    let upload = run_files::prepare_including(
+        ctx,
+        cwd,
+        run_files::max_bytes(&flags.max_upload)?,
+        false,
+        &flags.include,
+    )?;
     let secrets: Vec<_> = upload
         .files
         .iter()

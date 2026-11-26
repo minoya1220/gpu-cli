@@ -535,9 +535,10 @@ fn launch_offer(
         offer_price(&offer)?
     };
     let rate = rate.is_finite().then_some(rate);
-    crate::guardrails::spending(ctx, cfg, rate, deadline)?;
+    let estimate = crate::guardrails::spending(ctx, cfg, rate, deadline)?;
     planned_result(ctx, crate::provider::Provider::Vast, None, rate, deadline);
     if args.dry_run {
+        crate::guardrails::dry_run_budget(ctx, cfg)?;
         ctx.result("request", Value::List(request.clone()));
         ctx.println("DRY RUN: no instance created")?;
         ctx.println(&pyjson::dumps(&Value::List(request), Some(2)))?;
@@ -576,6 +577,9 @@ fn launch_offer(
             "Create accepted but no instance ID returned; completion unverified",
         )
         .next("gpu ls"));
+    }
+    if let Some(id) = &instance_id {
+        crate::spend::record_best_effort(ctx, &crate::spend::key("vast", id), estimate);
     }
     let ready_alias = arm_expiry(ctx, args, instance_id.as_deref(), deadline)?;
     announced?;

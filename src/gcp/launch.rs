@@ -334,6 +334,7 @@ fn launch_loop(
                 .and_then(|prices| prices.hourly(&picks.tpu, picks.spot));
             crate::guardrails::spending(ctx, cfg, rate, Some(deadline))?;
             crate::launch::planned_result(ctx, Provider::Gcp, None, rate, Some(deadline));
+            crate::guardrails::dry_run_budget(ctx, cfg)?;
             ctx.println("DRY RUN: no TPU or expiry task created")?;
             let requests = [queue.create_args(ctx, &id, deadline)?, args];
             let requests = Value::List(
@@ -350,7 +351,7 @@ fn launch_loop(
             .as_ref()
             .map(|p| (p.price.clone(), p.rate))
             .unwrap_or_else(|| quote(ctx, cfg, &picks));
-        crate::guardrails::spending(ctx, cfg, rate, Some(deadline))?;
+        let estimate = crate::guardrails::spending(ctx, cfg, rate, Some(deadline))?;
         crate::launch::planned_result(ctx, Provider::Gcp, Some(&id.cli()), rate, Some(deadline));
         let local = deadline_label(ctx, deadline);
         if approved.is_none() {
@@ -454,6 +455,7 @@ fn launch_loop(
         }
         drop(wait);
         ctx.result("created", Value::Bool(true));
+        crate::spend::record_best_effort(ctx, &crate::spend::key("gcp", &id.cli()), estimate);
         ctx.println(&format!(
             "Created TPU {}. Deletes at {local}.\nNext: gpu ssh {} --exec",
             id.cli(),

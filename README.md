@@ -220,7 +220,7 @@ With `--json`, each command prints one object, `{"command":...,"ok":...,"result"
 | 12 | not set up (`gpu setup`) |
 | 13 | sign-in expired |
 | 14 | readiness timeout |
-| 15 | over `max_session_spend` |
+| 15 | over `max_session_spend` or `max_daily_spend` |
 | 16 | ID not found |
 | 20 | `--command-timeout` or Modal helper timeout |
 
@@ -236,11 +236,12 @@ A create timeout does not mean nothing was created: check `gpu ls` before retryi
   "disk": 20,
   "reliability": 0.95,
   "default_expire": "2h",
-  "max_session_spend": 5
+  "max_session_spend": 5,
+  "max_daily_spend": 20
 }
 ```
 
-`max_session_spend` refuses a launch whose estimated cost up to its deadline exceeds that many USD. Keep secrets out of this file. SSH aliases go in `~/.ssh/vst_config`, `~/.ssh/gpu_gcp_config` and `~/.ssh/gpu_amd/`.
+`max_session_spend` refuses a launch whose estimated cost up to its deadline exceeds that many USD. `max_daily_spend` bounds the total: a launch is refused (exit 15) when the estimated cost of every launch started in the last 24 hours plus this launch's estimate to its deadline exceeds that many USD, and the message states the three amounts. Each launch is recorded at its estimate in `~/.local/state/gpu/spend.json` (`$XDG_STATE_HOME/gpu/`), only while the cap is set; `gpu down` of a Vast instance replaces its estimate with the billed estimate, and entries older than 24 hours are pruned. A launch whose cost cannot be estimated (no deadline, unknown price, manual AMD workspaces) is refused when either cap is set. `--dry-run` prints the window total and the remaining budget and records nothing. The cap counts estimates, not your bill, and launches that overlap in time can both pass the check. Keep secrets out of this file. SSH aliases go in `~/.ssh/vst_config`, `~/.ssh/gpu_gcp_config` and `~/.ssh/gpu_amd/`.
 
 ## Development
 

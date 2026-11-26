@@ -340,7 +340,7 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
     let phase = Phase::start(ctx, "launch");
     report_plan(ctx, flags, &job);
     let (mut backend, selected) = select_backend(ctx, flags, &job)?;
-    let Some(request) = approve(ctx, flags, &selected, &job, backend.as_ref())? else {
+    let Some((request, ledger)) = approve(ctx, flags, &selected, &job, backend.as_ref())? else {
         return Ok(());
     };
     let (results, staging) = stage_results(ctx, cwd)?;
@@ -348,6 +348,7 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
     ctx.begin_run();
     let mut session = Session {
         created_id: None,
+        ledger,
         run_id: String::new(),
         local: results.clone(),
         paths: None,
@@ -395,6 +396,8 @@ struct Prepared {
 /// What a run owns once a paid instance may exist.
 struct Session {
     created_id: Option<String>,
+    /// The launch estimate to record once the instance exists.
+    ledger: Option<f64>,
     run_id: String,
     local: PathBuf,
     /// The remote state root and job directory, once known.
@@ -631,7 +634,7 @@ fn approve(
     selected: &RunFlags,
     job: &Prepared,
     backend: &dyn RunBackend,
-) -> Result<Option<Value>> {
+) -> Result<Option<(Value, Option<f64>)>> {
     let label = job
         .upload
         .root
@@ -641,13 +644,14 @@ fn approve(
         .to_string();
     let plan = backend.plan(ctx, selected, &job.cfg, job.deadline, label)?;
     let rate = plan.rate;
-    crate::guardrails::spending(ctx, &job.cfg, Some(rate), Some(job.deadline))?;
+    let ledger = crate::guardrails::spending(ctx, &job.cfg, Some(rate), Some(job.deadline))?;
     let estimate = rate * job.seconds as f64 / 3600.0;
     ctx.result("estimated_spend", Value::Float(estimate));
     ctx.result("price_per_hour", Value::Float(rate));
     ctx.result("gpu", plan.gpu);
     let request = plan.request?;
     if flags.dry_run {
+        crate::guardrails::dry_run_budget(ctx, &job.cfg)?;
         if backend.provider().amd() {
             ctx.eprintln("AMD planning only: estimated spend is hypothetical; no enforceable deadline or live attached run is supported.")?;
         }
@@ -682,7 +686,7 @@ fn approve(
             "Not enough time remains before expiry; choose a longer --expire.",
         ));
     }
-    Ok(Some(request))
+    Ok(Some((request, ledger)))
 }
 
 /// Prove the destination is writable before spending anything. Keep a unique
@@ -723,10 +727,12 @@ fn execute(
         } else {
             READINESS_TIMEOUT
         });
+    let backend_key = backend.provider().key();
     let id = backend.launch(ctx, request, job.deadline, timeout, &mut |id, named| {
         // Record ownership before any local I/O can fail. Launch readiness
         // failures must still reach provider-state-verified destruction.
         session.created_id = Some(id.to_string());
+        crate::spend::record_best_effort(ctx, &crate::spend::key(backend_key, id), session.ledger);
         session.run_id = match named {
             Some(named) => named.into(),
             None => format!("{}-{id}", job.now.strftime("%Y%m%dT%H%M%SZ")),

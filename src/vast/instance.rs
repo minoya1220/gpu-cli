@@ -307,6 +307,11 @@ pub fn lifecycle(ctx: &Ctx, instance_id: &str, destroy: bool, yes: bool) -> Resu
             ));
         };
         crate::vast::billing::record(ctx, &billed);
+        crate::spend::settle_best_effort(
+            ctx,
+            &crate::spend::key("vast", instance_id),
+            billed.amount,
+        );
         ctx.println(&format!(
             "Instance {instance_id} ({gpu}) destroyed{}.",
             crate::vast::billing::describe(&billed)

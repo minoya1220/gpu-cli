@@ -16,8 +16,12 @@ fn seed(ctx: &Ctx, entries: &[(&str, i64, f64)]) {
 }
 
 fn stored(ctx: &Ctx) -> Vec<(String, f64)> {
-    let text = std::fs::read_to_string(ledger_path(&ctx.env)).unwrap_or_default();
-    parse(&text).into_iter().map(|e| (e.key, e.usd)).collect()
+    let bytes = std::fs::read(ledger_path(&ctx.env)).unwrap_or_default();
+    parse(&ctx.env, &bytes)
+        .unwrap()
+        .into_iter()
+        .map(|e| (e.key, e.usd))
+        .collect()
 }
 
 #[test]
@@ -25,7 +29,7 @@ fn window_total_sums_only_the_last_24_hours() {
     let t = TestEnv::new();
     let ctx = t.ctx().build();
     let now = ctx.clock.now().as_second();
-    assert_eq!(window_total(&ctx), 0.0);
+    assert_eq!(window_total(&ctx).unwrap(), 0.0);
     seed(
         &ctx,
         &[
@@ -34,19 +38,40 @@ fn window_total_sums_only_the_last_24_hours() {
             ("vast:3", now - WINDOW_SECONDS - 1, 9.0),
         ],
     );
-    assert_eq!(window_total(&ctx), 1.75);
+    assert_eq!(window_total(&ctx).unwrap(), 1.75);
 }
 
 #[test]
-fn a_corrupt_ledger_counts_as_empty_and_is_rewritten() {
+fn a_damaged_ledger_is_refused_and_left_alone() {
     let t = TestEnv::new();
     let ctx = t.ctx().build();
     let path = ledger_path(&ctx.env);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(&path, "not json").unwrap();
-    assert_eq!(window_total(&ctx), 0.0);
-    record(&ctx, "vast:1", 0.5).unwrap();
-    assert_eq!(stored(&ctx), [("vast:1".to_string(), 0.5)]);
+    let damaged: [&[u8]; 4] = [
+        b"not json",
+        b"\xff\xfe",
+        br#"{"launches":{}}"#,
+        br#"{"launches":[{"key":"vast:1","at":1,"usd":"lots"}]}"#,
+    ];
+    for bytes in damaged {
+        std::fs::write(&path, bytes).unwrap();
+        let error = window_total(&ctx).unwrap_err();
+        assert_eq!(error.exit_code(), 15, "{}", error.text());
+        assert!(error.text().contains("max_daily_spend"), "{}", error.text());
+        assert!(record(&ctx, "vast:2", 0.5).is_err());
+        assert!(settle(&ctx, "vast:1", 0.5).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn an_unreadable_ledger_is_refused() {
+    let t = TestEnv::new();
+    let ctx = t.ctx().build();
+    std::fs::create_dir_all(ledger_path(&ctx.env)).unwrap();
+    let error = window_total(&ctx).unwrap_err();
+    assert_eq!(error.exit_code(), 15, "{}", error.text());
+    assert!(error.text().contains("cannot be read"), "{}", error.text());
 }
 
 #[test]
@@ -84,7 +109,7 @@ fn settle_replaces_the_estimate_with_the_billed_amount() {
     settle(&ctx, "vast:1", 0.25).unwrap();
     settle(&ctx, "vast:unknown", 3.0).unwrap();
     assert_eq!(stored(&ctx), [("vast:1".to_string(), 0.25)]);
-    assert_eq!(window_total(&ctx), 0.25);
+    assert_eq!(window_total(&ctx).unwrap(), 0.25);
 }
 
 #[test]

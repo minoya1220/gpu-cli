@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 
 use crate::ctx::{Ctx, Env};
-use crate::error::Result;
+use crate::error::{os_message, Error, ExitCode, Result};
 use crate::pyjson::{self, Dict, Value};
 
 pub(crate) const WINDOW_SECONDS: i64 = 24 * 3600;
@@ -23,30 +23,50 @@ struct Entry {
     usd: f64,
 }
 
-fn parse(text: &str) -> Vec<Entry> {
+fn unreadable(env: &Env, reason: &str) -> Error {
+    let path = ledger_path(env);
+    Error::status(
+        ExitCode::SpendLimit,
+        format!(
+            "Cannot enforce max_daily_spend: the spend ledger {} {reason}. Fix or remove it, or change the opt-in cap in config.json.",
+            path.display()
+        ),
+    )
+}
+
+fn entry(item: &Value) -> Option<Entry> {
+    let item = item.as_dict()?;
+    let usd = match item.get("usd")? {
+        Value::Float(v) => *v,
+        Value::Int(v) => *v as f64,
+        _ => return None,
+    };
+    let at = match item.get("at")? {
+        Value::Int(v) => *v,
+        Value::Float(v) => *v as i64,
+        _ => return None,
+    };
+    let key = item.get("key")?.as_str()?.to_string();
+    (usd.is_finite() && usd >= 0.0).then_some(Entry { key, at, usd })
+}
+
+/// Empty bytes are a missing ledger; anything else must parse completely, so
+/// a damaged ledger is never mistaken for one with less spend in it.
+fn parse(env: &Env, bytes: &[u8]) -> Result<Vec<Entry>> {
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let corrupt = || unreadable(env, "is not a valid ledger");
+    let text = std::str::from_utf8(bytes).map_err(|_| corrupt())?;
     let Ok(Value::Dict(root)) = pyjson::loads(text) else {
-        return Vec::new();
+        return Err(corrupt());
     };
     let Some(Value::List(items)) = root.get("launches") else {
-        return Vec::new();
+        return Err(corrupt());
     };
     items
         .iter()
-        .filter_map(|item| {
-            let item = item.as_dict()?;
-            let usd = match item.get("usd")? {
-                Value::Float(v) => *v,
-                Value::Int(v) => *v as f64,
-                _ => return None,
-            };
-            let at = match item.get("at")? {
-                Value::Int(v) => *v,
-                Value::Float(v) => *v as i64,
-                _ => return None,
-            };
-            let key = item.get("key")?.as_str()?.to_string();
-            (usd.is_finite() && usd >= 0.0).then_some(Entry { key, at, usd })
-        })
+        .map(|item| entry(item).ok_or_else(corrupt))
         .collect()
 }
 
@@ -70,15 +90,25 @@ fn in_window(entry: &Entry, now: i64) -> bool {
     entry.at > now - WINDOW_SECONDS
 }
 
-/// Estimated spend of launches started in the last 24 hours. A missing or
-/// unreadable ledger counts as empty.
-pub(crate) fn window_total(ctx: &Ctx) -> f64 {
+/// Estimated spend of launches started in the last 24 hours. Only a missing
+/// ledger counts as empty.
+pub(crate) fn window_total(ctx: &Ctx) -> Result<f64> {
     let now = ctx.clock.now().as_second();
-    let text = std::fs::read_to_string(ledger_path(&ctx.env)).unwrap_or_default();
-    parse(&text)
+    let path = ledger_path(&ctx.env);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => {
+            return Err(unreadable(
+                &ctx.env,
+                &format!("cannot be read ({})", os_message(&e, None)),
+            ))
+        }
+    };
+    Ok(parse(&ctx.env, &bytes)?
         .iter()
         .filter(|e| in_window(e, now))
-        .fold(0.0, |total, e| total + e.usd)
+        .fold(0.0, |total, e| total + e.usd))
 }
 
 /// Provider-qualified key, so IDs from different providers never collide.
@@ -90,7 +120,7 @@ pub(crate) fn key(provider: &str, id: &str) -> String {
 pub(crate) fn record(ctx: &Ctx, key: &str, estimate: f64) -> Result<()> {
     let now = ctx.clock.now().as_second();
     crate::atomic_file::update(&ledger_path(&ctx.env), |original| {
-        let mut entries = parse(&String::from_utf8_lossy(original));
+        let mut entries = parse(&ctx.env, original)?;
         entries.retain(|e| in_window(e, now) && e.key != key);
         entries.push(Entry {
             key: key.to_string(),
@@ -109,7 +139,7 @@ pub(crate) fn settle(ctx: &Ctx, key: &str, billed: f64) -> Result<()> {
     }
     let now = ctx.clock.now().as_second();
     crate::atomic_file::update(&ledger_path(&ctx.env), |original| {
-        let mut entries = parse(&String::from_utf8_lossy(original));
+        let mut entries = parse(&ctx.env, original)?;
         entries.retain(|e| in_window(e, now));
         for entry in entries.iter_mut().filter(|e| e.key == key) {
             entry.usd = billed;

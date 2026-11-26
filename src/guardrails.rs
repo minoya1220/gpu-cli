@@ -161,7 +161,7 @@ pub(crate) fn spending(
         return Err(Error::status(ExitCode::SpendLimit, "Cannot satisfy max_daily_spend. Pass --expire, choose hardware with a known price, or change \
             the opt-in cap in config.json."));
     };
-    let spent = crate::spend::window_total(ctx);
+    let spent = crate::spend::window_total(ctx)?;
     ctx.result("daily_spent_usd", Value::Float(spent));
     ctx.result("daily_cap_usd", Value::Float(cap));
     ctx.result("daily_remaining_usd", Value::Float((cap - spent).max(0.0)));
@@ -186,7 +186,7 @@ pub(crate) fn dry_run_budget(ctx: &Ctx, cfg: &Dict) -> Result<()> {
     let Some(cap) = cap_setting(cfg, "max_daily_spend")? else {
         return Ok(());
     };
-    let spent = crate::spend::window_total(ctx);
+    let spent = crate::spend::window_total(ctx)?;
     ctx.println(&format!(
         "Daily budget: {} estimated spent in the last 24h of {}; {} remaining.",
         dollars(spent),

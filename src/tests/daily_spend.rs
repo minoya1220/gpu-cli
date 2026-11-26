@@ -69,7 +69,7 @@ fn a_launch_under_the_cap_is_recorded_at_its_estimate() {
     let text = ledger(&ctx);
     assert!(text.contains(r#""key": "vast:900""#), "{text}");
     assert!(text.contains(r#""key": "vast:123""#), "{text}");
-    assert!((crate::spend::window_total(&ctx) - (0.25 + ESTIMATE)).abs() < 0.01);
+    assert!((crate::spend::window_total(&ctx).unwrap() - (0.25 + ESTIMATE)).abs() < 0.01);
 }
 
 #[test]
@@ -86,6 +86,18 @@ fn a_launch_over_the_cap_is_refused_with_the_amounts() {
     assert!(message.contains("max_daily_spend"), "{message}");
     assert!(!created(&runner));
     assert_eq!(ledger(&ctx), before);
+}
+
+#[test]
+fn a_damaged_ledger_refuses_the_launch() {
+    let (_t, ctx, runner) = fixture("50");
+    let path = crate::spend::ledger_path(&ctx.env);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "{truncated").unwrap();
+    assert_eq!(main(&ctx, UP), 15, "{}", err(&ctx));
+    assert!(err(&ctx).contains("spend ledger"), "{}", err(&ctx));
+    assert!(!created(&runner));
+    assert_eq!(ledger(&ctx), "{truncated");
 }
 
 #[test]
@@ -209,6 +221,6 @@ fn destroying_a_launch_replaces_its_estimate_with_the_billed_amount() {
     );
     assert_eq!(main(&ctx, &["down", "12", "--yes"]), 0, "{}", err(&ctx));
     // 1h at $0.36/hr replaces the $8 estimate; the other launch is untouched.
-    let total = crate::spend::window_total(&ctx);
+    let total = crate::spend::window_total(&ctx).unwrap();
     assert!((total - 1.36).abs() < 0.01, "{total}");
 }

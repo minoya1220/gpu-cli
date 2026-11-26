@@ -152,7 +152,7 @@ gpu stop 12345678       # stop compute, keep the disk
 gpu down 12345678       # delete the instance and disk; --yes skips the prompt
 ```
 
-A stopped instance still bills for storage.
+A stopped instance still bills for storage. When `gpu down` destroys a running instance, it prints the runtime and an estimated cost (hourly price times runtime; `billed_usd` and `runtime_seconds` with `--json`); Vast's own billing is authoritative.
 
 ## Auto-destroy a Vast instance
 

@@ -44,7 +44,7 @@ fn test_lifecycle_verifies_before_reporting() {
                     "running"
                 };
                 ok(&format!(
-                    r#"[{{"id": 12, "gpu_name": "RTX 4090", "actual_status": "{status}"}}]"#
+                    r#"[{{"id": 12, "gpu_name": "RTX 4090", "actual_status": "{status}", "dph_total": 0.36, "duration": 7200}}]"#
                 ))
             });
             // A managed alias that only a verified destroy may remove.
@@ -68,7 +68,7 @@ fn test_lifecycle_verifies_before_reporting() {
                 assert_eq!(polls.load(Ordering::SeqCst), 3);
                 assert!(stdout.contains("Instance 12 (RTX 4090)"));
                 let done = if action == "destroy" {
-                    "destroyed; billing stopped."
+                    "destroyed after 2h00m; billed about $0.72 (estimate)."
                 } else {
                     "stopped; storage charges may continue."
                 };
@@ -89,6 +89,30 @@ fn test_lifecycle_verifies_before_reporting() {
             }
         }
     }
+}
+
+#[test]
+fn test_destroy_without_cost_data_keeps_the_plain_message() {
+    let t = TestEnv::new();
+    let asked = Arc::new(AtomicBool::new(false));
+    let flag = asked.clone();
+    let runner = FakeRunner::new(move |cmd| {
+        if cmd.argv[1] == "destroy" {
+            flag.store(true, Ordering::SeqCst);
+            return ok("success");
+        }
+        if flag.load(Ordering::SeqCst) {
+            return ok("[]");
+        }
+        ok(r#"[{"id": 12, "gpu_name": "RTX 4090", "actual_status": "running"}]"#)
+    });
+    let ctx = t
+        .ctx()
+        .runner(&runner)
+        .clock(&FakeClock::now_real())
+        .build();
+    assert_eq!(main(&ctx, &["down", "12", "--yes"]), 0);
+    assert!(out(&ctx).contains("Instance 12 (RTX 4090) destroyed; billing stopped."));
 }
 
 #[test]

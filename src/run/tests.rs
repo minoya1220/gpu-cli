@@ -26,11 +26,14 @@ fn cleanup_always_sends_destroy_before_any_inventory_and_retries_bad_reads() {
         )
         .unwrap();
         crate::vast::instance::destroy_created(&ctx, "123").unwrap();
+        // The cost read comes first, is best effort, and never gates destroy.
+        let calls = runner.calls();
+        let destroy = calls.iter().find(|cmd| cmd.argv[1] == "destroy").unwrap();
         assert_eq!(
-            &runner.calls()[0].argv,
+            &destroy.argv,
             &["vastai", "destroy", "instance", "123", "--yes"]
         );
-        assert_eq!(shows.load(Ordering::SeqCst), bad_reads + 1);
+        assert_eq!(shows.load(Ordering::SeqCst), bad_reads.max(1) + 1);
         assert!(!crate::vast::ssh_config::has_host(&ctx.env, "123").unwrap());
     }
 }

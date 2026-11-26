@@ -469,3 +469,19 @@ fn upload_beats_only_while_bytes_arrive() {
     assert!(beat.is_file());
     assert_eq!(fs::read(t.root.join("target/job.py")).unwrap(), data);
 }
+
+#[test]
+fn a_launch_too_close_to_expiry_is_a_rejection_that_sends_nothing() {
+    let t = TestEnv::new();
+    let runner = FakeRunner::new(|cmd| panic!("unexpected command: {:?}", cmd.argv));
+    let ctx = t.ctx().runner(&runner).build();
+    let deadline = ctx.clock.now() + jiff::Span::new().minutes(5);
+    let mut backend = ModalBackend::new(Some(fake_rates()));
+    let request = Value::Dict(dict(r#"{"gpu":"T4"}"#));
+    let error = backend
+        .launch(&ctx, &request, deadline, 60.0, &mut |_, _| Ok(()))
+        .unwrap_err();
+    assert_eq!(error.exit_code(), 2, "{}", error.text());
+    assert!(error.is_rejection());
+    assert!(runner.argvs().is_empty());
+}

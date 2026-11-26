@@ -838,7 +838,7 @@ impl RunBackend for Backend {
         _timeout: f64,
         _created: &mut dyn FnMut(&str, Option<&str>) -> Result<()>,
     ) -> Result<String> {
-        Err(Error::usage(EXPIRY))
+        Err(Error::usage(EXPIRY).rejected())
     }
     fn remote(&self, _command: &str, _timeout: f64) -> Cmd {
         unreachable!("AMD live runs are disabled")

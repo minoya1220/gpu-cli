@@ -25,19 +25,17 @@ fn number(instance: &Dict, key: &str) -> Option<f64> {
         .filter(|n| n.is_finite() && *n >= 0.0)
 }
 
-/// Estimate from `dph_total` x runtime. Runtime comes from `start_date` (epoch
-/// seconds) against `now`, else Vast's own `duration` seconds. `None` unless
-/// the instance is running.
+/// Estimate from `dph_total` x runtime since `start_date` (epoch seconds).
+/// `None` unless the instance is running and both fields are present.
 pub(crate) fn estimate(instance: &Dict, now: Timestamp) -> Option<Billed> {
     if instance.get("actual_status").and_then(Value::as_str) != Some("running") {
         return None;
     }
-    let price = number(instance, "dph_total").or_else(|| number(instance, "dph"))?;
-    let started = number(instance, "start_date")
+    let price = number(instance, "dph_total")?;
+    let runtime_seconds = number(instance, "start_date")
         .filter(|s| *s > 0.0)
         .map(|s| now.as_second() as f64 - s)
-        .filter(|s| *s >= 0.0);
-    let runtime_seconds = started.or_else(|| number(instance, "duration"))?;
+        .filter(|s| *s >= 0.0)?;
     Some(Billed {
         amount: price * runtime_seconds / 3600.0,
         runtime_seconds,
@@ -95,21 +93,30 @@ mod tests {
     }
 
     #[test]
-    fn estimate_uses_start_date_then_duration() {
+    fn estimate_needs_start_date_and_dph_total() {
         let now: Timestamp = "2026-01-01T03:12:00Z".parse().unwrap();
         let start = now.as_second() - 3 * 3600 - 12 * 60;
-        let item = dict(&format!(
-            r#"{{"actual_status": "running", "dph_total": 0.325, "start_date": {start}.5, "duration": 5}}"#
-        ));
-        let billed = estimate(&item, now).unwrap();
+        let running = |fields: &str| dict(&format!(r#"{{"actual_status": "running", {fields}}}"#));
+        let billed = estimate(
+            &running(&format!(r#""dph_total": 0.325, "start_date": {start}.5"#)),
+            now,
+        )
+        .unwrap();
         assert_eq!(billed.runtime_seconds, 11520.0 - 0.5);
         assert!((billed.amount - 0.325 * 11519.5 / 3600.0).abs() < 1e-9);
-        let running = |fields: &str| dict(&format!(r#"{{"actual_status": "running", {fields}}}"#));
-        let item = running(r#""dph_total": 0.36, "duration": 7200"#);
-        assert_eq!(estimate(&item, now).unwrap().amount, 0.72);
-        assert!(estimate(&running(r#""duration": 7200"#), now).is_none());
-        assert!(estimate(&running(r#""dph_total": 0.3"#), now).is_none());
-        assert!(estimate(&running(r#""dph_total": true, "duration": 1"#), now).is_none());
+        let start = format!(r#""start_date": {start}"#);
+        for fields in [
+            r#""dph_total": 0.36, "duration": 7200"#.to_string(),
+            format!(r#""dph": 0.36, {start}"#),
+            format!(r#""dph_total": true, {start}"#),
+            r#""dph_total": 0.36, "start_date": 0"#.to_string(),
+            format!(
+                r#""dph_total": 0.36, "start_date": {}"#,
+                now.as_second() + 60
+            ),
+        ] {
+            assert!(estimate(&running(&fields), now).is_none(), "{fields}");
+        }
     }
 
     #[test]
@@ -121,7 +128,7 @@ mod tests {
             "",
         ] {
             let item = dict(&format!(
-                r#"{{{status}"dph_total": 0.36, "duration": 7200}}"#
+                r#"{{{status}"dph_total": 0.36, "start_date": 1}}"#
             ));
             assert!(estimate(&item, now).is_none());
         }

@@ -4,6 +4,7 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use crate::ctx::Clock;
 use crate::process::Output;
 use crate::testing::*;
 use crate::vast::instance::wait_for_lifecycle;
@@ -15,6 +16,7 @@ fn test_lifecycle_verifies_before_reporting() {
         for outcome in ["success", "timeout", "failure", "poll_failure"] {
             let t = TestEnv::new();
             let clock = FakeClock::now_real();
+            let started = clock.now().as_second() - 7200;
             let polls = Arc::new(AtomicUsize::new(0));
             let requested = Arc::new(AtomicBool::new(false));
             let (counter, asked) = (polls.clone(), requested.clone());
@@ -44,7 +46,7 @@ fn test_lifecycle_verifies_before_reporting() {
                     "running"
                 };
                 ok(&format!(
-                    r#"[{{"id": 12, "gpu_name": "RTX 4090", "actual_status": "{status}", "dph_total": 0.36, "duration": 7200}}]"#
+                    r#"[{{"id": 12, "gpu_name": "RTX 4090", "actual_status": "{status}", "dph_total": 0.36, "start_date": {started}}}]"#
                 ))
             });
             // A managed alias that only a verified destroy may remove.
@@ -123,7 +125,7 @@ fn down_once(record: &str, json: bool) -> String {
 fn test_destroy_without_a_running_estimate_keeps_the_plain_message() {
     for record in [
         r#"{"id": 12, "gpu_name": "RTX 4090", "actual_status": "running"}"#,
-        r#"{"id": 12, "gpu_name": "RTX 4090", "actual_status": "stopped", "dph_total": 0.36, "duration": 93600}"#,
+        r#"{"id": 12, "gpu_name": "RTX 4090", "actual_status": "stopped", "dph_total": 0.36, "start_date": 1}"#,
     ] {
         assert!(
             down_once(record, false).contains("Instance 12 (RTX 4090) destroyed; billing stopped.")

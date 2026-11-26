@@ -88,7 +88,7 @@ impl RunBackend for VastBackend {
         ctx.result("created", Value::Null);
         let request = request
             .as_list()
-            .ok_or_else(|| Error::msg("Invalid Vast run request."))?;
+            .ok_or_else(|| Error::msg("Invalid Vast run request.").rejected())?;
         let reply = Vast::new(ctx).create(request).inspect_err(|_| {
             if let Some(notice) = ctx.interrupt_notice() {
                 let _ = ctx.eprintln(&notice);

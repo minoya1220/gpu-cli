@@ -447,7 +447,7 @@ pub fn up(ctx: &Ctx, flags: &UpFlags, cfg: &Dict) -> Result<crate::launch::Launc
             "Total hourly rate exceeds --max-price; no resource created.",
         ));
     }
-    // No deadline means an opt-in session spend cap cannot be satisfied.
+    // No deadline means an opt-in spend cap cannot be satisfied.
     crate::guardrails::spending(ctx, cfg, Some(plan.rate), None)?;
     ctx.result("price_per_hour", Value::Float(plan.rate));
     ctx.result("request", request(&plan));
@@ -838,7 +838,7 @@ impl RunBackend for Backend {
         _timeout: f64,
         _created: &mut dyn FnMut(&str, Option<&str>) -> Result<()>,
     ) -> Result<String> {
-        Err(Error::usage(EXPIRY))
+        Err(Error::usage(EXPIRY).rejected())
     }
     fn remote(&self, _command: &str, _timeout: f64) -> Cmd {
         unreachable!("AMD live runs are disabled")

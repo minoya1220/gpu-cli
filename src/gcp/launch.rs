@@ -334,6 +334,7 @@ fn launch_loop(
                 .and_then(|prices| prices.hourly(&picks.tpu, picks.spot));
             crate::guardrails::spending(ctx, cfg, rate, Some(deadline))?;
             crate::launch::planned_result(ctx, Provider::Gcp, None, rate, Some(deadline));
+            crate::guardrails::dry_run_budget(ctx, cfg)?;
             ctx.println("DRY RUN: no TPU or expiry task created")?;
             let requests = [queue.create_args(ctx, &id, deadline)?, args];
             let requests = Value::List(
@@ -350,7 +351,7 @@ fn launch_loop(
             .as_ref()
             .map(|p| (p.price.clone(), p.rate))
             .unwrap_or_else(|| quote(ctx, cfg, &picks));
-        crate::guardrails::spending(ctx, cfg, rate, Some(deadline))?;
+        let budget = crate::guardrails::spending(ctx, cfg, rate, Some(deadline))?;
         crate::launch::planned_result(ctx, Provider::Gcp, Some(&id.cli()), rate, Some(deadline));
         let local = deadline_label(ctx, deadline);
         if approved.is_none() {
@@ -367,13 +368,26 @@ fn launch_loop(
             return Err(Error::msg("Expiry deadline passed. No TPU created")
                 .next("gpu up --provider gcp --expire 2h"));
         }
-        let wait = ctx.waiting("Waiting for Google Cloud to create the TPU")?;
-        queue.check(ctx)?;
+        let reservation = crate::spend::reserve(ctx, budget)?;
+        let wait = match ctx
+            .waiting("Waiting for Google Cloud to create the TPU")
+            .and_then(|wait| queue.check(ctx).map(|()| wait))
+        {
+            Ok(wait) => wait,
+            Err(e) => {
+                crate::spend::release_best_effort(ctx, reservation);
+                return Err(e);
+            }
+        };
         // Arm and read back the control-plane task BEFORE issuing create. A laptop
         // crash, SSH failure, stopped VM or guest failure cannot remove this timer.
-        queue.arm(ctx, &id, deadline)?;
+        if let Err(e) = queue.arm(ctx, &id, deadline) {
+            crate::spend::release_best_effort(ctx, reservation);
+            return Err(e);
+        }
         ctx.result("expiry_armed", Value::Bool(true));
         if deadline.as_second() <= ctx.clock.now().as_second() {
+            crate::spend::release_best_effort(ctx, reservation);
             return Err(Error::msg(
                 "Expiry deadline passed. No TPU created. Its deletion task may remain",
             )
@@ -385,6 +399,7 @@ fn launch_loop(
             // Keep the timer after ambiguous errors/timeouts (create may be in flight).
             let rejected = e.is_rejection();
             if rejected && absent(ctx, &id).unwrap_or(false) && queue.cancel(ctx, &id).is_ok() {
+                crate::spend::release_best_effort(ctx, reservation);
                 ctx.result("expiry_armed", Value::Bool(false));
                 ctx.result("created", Value::Bool(false));
                 drop(wait);
@@ -454,6 +469,7 @@ fn launch_loop(
         }
         drop(wait);
         ctx.result("created", Value::Bool(true));
+        crate::spend::claim_best_effort(ctx, reservation, &crate::spend::key("gcp", &id.cli()));
         ctx.println(&format!(
             "Created TPU {}. Deletes at {local}.\nNext: gpu ssh {} --exec",
             id.cli(),

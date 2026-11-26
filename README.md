@@ -67,7 +67,7 @@ gpu down modal:sb-EXAMPLE --yes
 - Use Modal GPU names. `--cpu` (default 4) and `--memory` (GiB, default 16) set the size. `--expire` must exceed 10 minutes and be at most 24 hours; build, scheduling, upload and setup count against it.
 - `--timeout` defaults to 20 minutes on Modal, as the first pull of a large CUDA image can take over 10. The wait is also capped at `--expire` minus 10 minutes. A timeout says whether the image or GPU scheduling was still pending.
 - Behind a proxy, Modal uses `HTTPS_PROXY`/`ALL_PROXY` (HTTP or SOCKS) and `NO_PROXY`.
-- `--max-price` and `max_session_spend` check an estimate, not your bill; Modal also bills setup, idle and download time.
+- `--max-price`, `max_session_spend` and `max_daily_spend` check an estimate, not your bill; Modal also bills setup, idle and download time.
 - GPU Sandboxes can be preempted and the job is never rerun. Outputs sync to a Volume every 30 seconds; checkpoint your work.
 - If the CLI dies, the Sandbox still ends at its deadline, but its output Volume keeps billing storage. `gpu ls --provider modal` shows it as `outputs-only`. Recover and delete it:
 
@@ -103,7 +103,7 @@ gpu cp do:atl1:ID ./input :/workspace/input
 gpu down do:atl1:ID --yes          # polls for verified absence
 ```
 
-Manual AMD workspaces have **no auto-destroy**. `--yes` approves renting until manual deletion; remove `default_expire` to use them. `--expire`, `gpu expire`, live `gpu run` and a configured `max_session_spend` on manual launches fail closed. `gpu run --provider runpod|do --gpu MI300X --expire 30m --dry-run -- COMMAND` uses the shared upload/planning checks only; its estimate is hypothetical, not an enforced deadline.
+Manual AMD workspaces have **no auto-destroy**. `--yes` approves renting until manual deletion; remove `default_expire` to use them. `--expire`, `gpu expire`, live `gpu run` and a configured `max_session_spend` or `max_daily_spend` on manual launches fail closed. `gpu run --provider runpod|do --gpu MI300X --expire 30m --dry-run -- COMMAND` uses the shared upload/planning checks only; its estimate is hypothetical, not an enforced deadline.
 
 `--max-price` checks the hourly estimate: Runpod includes container disk ($0.10/GB-month, estimated at 730h/month); DO includes its fixed boot disk. Network/tax and independent retained resources are extra. Runpod stop loses the container filesystem and still bills retained storage; DO power-off continues **full GPU billing**. `down` deletes the Pod/Droplet, not independent volumes, snapshots or backups. IDs are `runpod:ID` and `do:REGION:ID`; bare numbers remain Vast.
 
@@ -220,7 +220,7 @@ With `--json`, each command prints one object, `{"command":...,"ok":...,"result"
 | 12 | not set up (`gpu setup`) |
 | 13 | sign-in expired |
 | 14 | readiness timeout |
-| 15 | over `max_session_spend` |
+| 15 | over `max_session_spend` or `max_daily_spend` |
 | 16 | ID not found |
 | 20 | `--command-timeout` or Modal helper timeout |
 
@@ -236,11 +236,12 @@ A create timeout does not mean nothing was created: check `gpu ls` before retryi
   "disk": 20,
   "reliability": 0.95,
   "default_expire": "2h",
-  "max_session_spend": 5
+  "max_session_spend": 5,
+  "max_daily_spend": 20
 }
 ```
 
-`max_session_spend` refuses a launch whose estimated cost up to its deadline exceeds that many USD. Keep secrets out of this file. SSH aliases go in `~/.ssh/vst_config`, `~/.ssh/gpu_gcp_config` and `~/.ssh/gpu_amd/`.
+`max_session_spend` refuses a launch whose estimated cost up to its deadline exceeds that many USD. `max_daily_spend` bounds the total: a launch is refused (exit 15) when the estimated cost of every launch started in the last 24 hours plus this launch's estimate to its deadline exceeds that many USD, and the message states the three amounts. Each launch reserves its estimate in `~/.local/state/gpu/spend.json` (`$XDG_STATE_HOME/gpu/`) before its create request, under the same lock as the check, only while the cap is set; a launch the provider definitely rejected gives its reservation back, and one whose create is unverified (a timeout) keeps it; `gpu down` of a Vast instance replaces its estimate with the billed estimate, and entries older than 24 hours are pruned. A launch whose cost cannot be estimated (no deadline, unknown price, manual AMD workspaces) is refused when either cap is set. A ledger that cannot be read, parsed or written also refuses launches (exit 15) until it is fixed or removed; it is never treated as empty. `--dry-run` prints the window total and the remaining budget and records nothing. The cap counts estimates, not your bill. Keep secrets out of this file. SSH aliases go in `~/.ssh/vst_config`, `~/.ssh/gpu_gcp_config` and `~/.ssh/gpu_amd/`.
 
 ## Development
 

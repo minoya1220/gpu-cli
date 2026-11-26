@@ -96,43 +96,105 @@ pub(crate) fn nonterminal(ctx: &Ctx, command: &Command, cfg: &Dict) -> Result<()
     Ok(())
 }
 
-/// Opt-in per-launch compute estimate, not a billing-system limit. Refuse
-/// unknown rates/deadlines rather than pretending to enforce a cap.
-pub(crate) fn spending(
-    ctx: &Ctx,
-    cfg: &Dict,
-    rate: Option<f64>,
-    deadline: Option<Timestamp>,
-) -> Result<()> {
-    let Some(cap) = cfg.get("max_session_spend") else {
-        return Ok(());
+fn cap_setting(cfg: &Dict, key: &str) -> Result<Option<f64>> {
+    let Some(cap) = cfg.get(key) else {
+        return Ok(None);
     };
     let cap = match cap {
         Value::Float(v) => *v,
         Value::Int(v) => *v as f64,
         _ => {
-            return Err(Error::usage(
-                "max_session_spend must be a positive dollar amount.",
-            ))
+            return Err(Error::usage(format!(
+                "{key} must be a positive dollar amount."
+            )))
         }
     };
     if !cap.is_finite() || cap <= 0.0 {
-        return Err(Error::usage(
-            "max_session_spend must be a positive dollar amount.",
-        ));
+        return Err(Error::usage(format!(
+            "{key} must be a positive dollar amount."
+        )));
     }
-    let error = || {
-        Error::status(ExitCode::SpendLimit, "Cannot satisfy max_session_spend. Pass --expire, choose cheaper hardware/a shorter duration, or change \
-            the opt-in cap in config.json.")
-    };
-    let (Some(rate), Some(deadline)) = (rate, deadline) else {
-        return Err(error());
-    };
-    let seconds = (deadline.as_second() - ctx.clock.now().as_second()).max(0) as f64;
-    let estimate = rate * seconds / 3600.0;
-    if !rate.is_finite() || rate < 0.0 || !estimate.is_finite() || estimate > cap {
-        return Err(error());
+    Ok(Some(cap))
+}
+
+fn dollars(amount: f64) -> String {
+    crate::vast::billing::format_amount(amount)
+}
+
+/// Opt-in compute estimate caps, not billing-system limits: `max_session_spend`
+/// bounds this launch, `max_daily_spend` this launch plus every launch started
+/// in the last 24 hours. Refuse unknown rates/deadlines rather than pretending
+/// to enforce a cap. Returns the launch's estimate when `max_daily_spend` is
+/// set, for the caller to reserve in the ledger right before creating.
+pub(crate) fn spending(
+    ctx: &Ctx,
+    cfg: &Dict,
+    rate: Option<f64>,
+    deadline: Option<Timestamp>,
+) -> Result<Option<crate::spend::Budget>> {
+    let session = cap_setting(cfg, "max_session_spend")?;
+    let daily = cap_setting(cfg, "max_daily_spend")?;
+    if session.is_none() && daily.is_none() {
+        return Ok(None);
     }
-    ctx.result("estimated_spend", Value::Float(estimate));
-    Ok(())
+    let estimate = match (rate, deadline) {
+        (Some(rate), Some(deadline)) => {
+            let seconds = (deadline.as_second() - ctx.clock.now().as_second()).max(0) as f64;
+            let estimate = rate * seconds / 3600.0;
+            (rate.is_finite() && rate >= 0.0 && estimate.is_finite()).then_some(estimate)
+        }
+        _ => None,
+    };
+    if let Some(cap) = session {
+        match estimate {
+            Some(estimate) if estimate <= cap => ctx.result("estimated_spend", Value::Float(estimate)),
+            _ => {
+                return Err(Error::status(ExitCode::SpendLimit, "Cannot satisfy max_session_spend. Pass --expire, choose cheaper hardware/a shorter duration, or change \
+            the opt-in cap in config.json."))
+            }
+        }
+    }
+    let Some(cap) = daily else {
+        return Ok(None);
+    };
+    let Some(estimate) = estimate else {
+        return Err(Error::status(ExitCode::SpendLimit, "Cannot satisfy max_daily_spend. Pass --expire, choose hardware with a known price, or change \
+            the opt-in cap in config.json."));
+    };
+    let spent = crate::spend::window_total(ctx)?;
+    ctx.result("daily_spent_usd", Value::Float(spent));
+    ctx.result("daily_cap_usd", Value::Float(cap));
+    ctx.result("daily_remaining_usd", Value::Float((cap - spent).max(0.0)));
+    if spent + estimate > cap {
+        return Err(daily_refusal(spent, estimate, cap));
+    }
+    Ok(Some(crate::spend::Budget { cap, estimate }))
+}
+
+pub(crate) fn daily_refusal(spent: f64, estimate: f64, cap: f64) -> Error {
+    Error::status(
+        ExitCode::SpendLimit,
+        format!(
+            "Cannot satisfy max_daily_spend: {} estimated spent in the last 24h + {} this launch exceeds the {} cap. \
+             Wait for earlier launches to leave the window, choose cheaper hardware/a shorter duration, or change the opt-in cap in config.json.",
+            dollars(spent),
+            dollars(estimate),
+            dollars(cap)
+        ),
+    )
+}
+
+/// Dry-run line for `max_daily_spend`: the window total and what is left.
+/// Records nothing.
+pub(crate) fn dry_run_budget(ctx: &Ctx, cfg: &Dict) -> Result<()> {
+    let Some(cap) = cap_setting(cfg, "max_daily_spend")? else {
+        return Ok(());
+    };
+    let spent = crate::spend::window_total(ctx)?;
+    ctx.println(&format!(
+        "Daily budget: {} estimated spent in the last 24h of {}; {} remaining.",
+        dollars(spent),
+        dollars(cap),
+        dollars((cap - spent).max(0.0))
+    ))
 }

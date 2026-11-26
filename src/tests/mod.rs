@@ -2,6 +2,7 @@ mod automation;
 mod boot_guard;
 mod cli;
 mod cli_validation;
+mod daily_spend;
 mod editors;
 mod expiry;
 mod expiry_launch;

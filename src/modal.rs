@@ -414,7 +414,7 @@ impl RunBackend for ModalBackend {
         timeout: f64,
         created: &mut dyn FnMut(&str, Option<&str>) -> Result<()>,
     ) -> Result<String> {
-        self.helper = Some(Helper::new()?);
+        self.helper = Some(Helper::new().map_err(Error::rejected)?);
         let helper = self.helper.as_ref().unwrap();
         // A unique reconciliation key exists before any paid request. No job or
         // secret is put in Modal metadata. Never retry an ambiguous create.
@@ -434,10 +434,10 @@ impl RunBackend for ModalBackend {
         let mut spec = request
             .as_dict()
             .cloned()
-            .ok_or_else(|| Error::msg("Invalid Modal create spec."))?;
+            .ok_or_else(|| Error::msg("Invalid Modal create spec.").rejected())?;
         let remaining = deadline.as_second() - ctx.clock.now().as_second();
         if remaining <= 600 {
-            return Err(Error::usage("Not enough time remains before expiry."));
+            return Err(Error::usage("Not enough time remains before expiry.").rejected());
         }
         spec.insert("timeout", Value::Int(remaining));
         let mut tags = spec

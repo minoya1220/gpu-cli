@@ -535,9 +535,10 @@ fn launch_offer(
         offer_price(&offer)?
     };
     let rate = rate.is_finite().then_some(rate);
-    crate::guardrails::spending(ctx, cfg, rate, deadline)?;
+    let budget = crate::guardrails::spending(ctx, cfg, rate, deadline)?;
     planned_result(ctx, crate::provider::Provider::Vast, None, rate, deadline);
     if args.dry_run {
+        crate::guardrails::dry_run_budget(ctx, cfg)?;
         ctx.result("request", Value::List(request.clone()));
         ctx.println("DRY RUN: no instance created")?;
         ctx.println(&pyjson::dumps(&Value::List(request), Some(2)))?;
@@ -565,12 +566,21 @@ fn launch_offer(
             Error::msg("Expiry deadline passed; no instance created").next("gpu up --expire 2h")
         );
     }
+    let reservation = crate::spend::reserve(ctx, budget)?;
     let (summary, instance_id) = match create(ctx, vast, &request, deadline) {
         Ok(created) => created,
-        Err(error) => return Ok(Attempt::CreateFailed(error)),
+        Err(error) => {
+            if error.is_rejection() {
+                crate::spend::release_best_effort(ctx, reservation);
+            }
+            return Ok(Attempt::CreateFailed(error));
+        }
     };
     // Preserve the created ID and attempt expiry before propagating a failed announcement.
     let announced = ctx.println(&summary);
+    if let Some(id) = &instance_id {
+        crate::spend::claim_best_effort(ctx, reservation, &crate::spend::key("vast", id));
+    }
     if ctx.json() && instance_id.is_none() {
         return Err(Error::msg(
             "Create accepted but no instance ID returned; completion unverified",

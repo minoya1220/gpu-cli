@@ -53,6 +53,28 @@ gpu run --gpu 'RTX 4090' --expire 30m --yes --env HF_TOKEN -- python train.py
 
 The job's exit code passes through. `run` adds 17 job timeout, 18 instance lost, 19 cleanup unverified (it may still bill: run `gpu down ID --yes`) and 130 cancelled.
 
+### Async jobs: `gpu job`
+
+`gpu run` waits for the job. When the caller cannot wait (a script, an agent tool call), split it into separate calls:
+
+```sh
+gpu job start --gpu 'RTX 4090' --expire 2h --yes --json -- python train.py   # returns once the job runs
+gpu job status JOB_ID            # booting, running, succeeded, failed, cancelled, expired or lost; exit code; elapsed; cost
+gpu job logs JOB_ID --follow     # the output so far; --follow streams until the job ends
+gpu job outputs JOB_ID           # downloads outputs, then destroys the instance
+gpu job cancel JOB_ID            # stops the job and destroys the instance
+gpu job ls --owner alice         # jobs and their states
+```
+
+- `gpu job start` takes the flags of `gpu run` and goes through the same checks (required `--expire`, spend caps, `--owner`, secret refusal, `--include`, `--max-upload`), then prints the job ID. With `--json` the result has `job_id`, `id` (the Vast instance), `provider`, `owner` and `expires_at`. `gpu run` is the same steps plus waiting and collecting, so it behaves exactly as before.
+- The job is saved as `~/.local/state/gpu/jobs/JOB_ID.json` (under `$XDG_STATE_HOME`), so any later `gpu` process finds it by ID; the Vast instance ID works too. The record holds no credentials.
+- The exit code, log and outputs stay on the instance after the job ends. The instance destroys itself at `--expire` whether or not anyone collects them, so run `gpu job outputs` before then.
+- `gpu job outputs` downloads `--outputs` into `./gpu-runs/JOB_ID/` (with `log.txt` and `result.json`) and then destroys the instance, unless the job was started with `--linger DURATION`, which keeps it that long. A job that is still running is refused. If the download fails the instance is kept so you can retry.
+- `status` cost is an estimate: the rented hourly price times the time since creation, until the instance is destroyed. `gpu job logs --json` returns the text in `log` with `next_offset`; pass it to `--offset` to read only what is new.
+- A job whose instance vanished before collection is `expired` (it reached its deadline) or `lost`; its exit code stays in `status`, its outputs are gone.
+- `status`, `logs` and `ls` check the Vast instance list first and only SSH to a running instance, with a short connect timeout, so they return quickly. A stopped or exited instance is reported `lost` with its `provider_status`; it still bills until `gpu job cancel` destroys it. A job whose supervisor is gone (`lost` while the instance runs) will not finish; `gpu job outputs` still downloads what its outputs folder holds and destroys the instance.
+- Vast only. Modal sandboxes tie their helper process and output volume to one attached process, so Modal stays on blocking `gpu run`.
+
 ### Modal
 
 Modal needs [uv](https://docs.astral.sh/uv/getting-started/installation/), not the `modal` command.
@@ -220,6 +242,8 @@ gpu cp 12345678 :/workspace/results ./results -r
 ```
 
 `--wait-setup` also waits for the clone and setup. `exec` returns the remote exit code; use `sh -c` for shell syntax.
+
+`gpu job` commands take `--json` too (`command` is `job start`, `job status`, and so on).
 
 With `--json`, each command prints one object, `{"command":...,"ok":...,"result":...}`, plus `error` on failure. `gpu ls --json` prints a bare array unless you add `--envelope`.
 

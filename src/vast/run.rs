@@ -19,6 +19,7 @@ fn ssh(alias: &str, command: &str, timeout: f64) -> Cmd {
 
 /// `gpu run` on a Vast offer: create, wait for SSH, arm the instance's
 /// own expiry, then supervise over the managed SSH alias.
+#[derive(Clone)]
 pub(crate) struct VastBackend {
     alias: String,
     offer: Option<Dict>,
@@ -29,6 +30,14 @@ impl VastBackend {
         Self {
             alias: String::new(),
             offer: Some(offer),
+        }
+    }
+
+    /// A backend for an instance a previous process launched, answering on `alias`.
+    pub(crate) fn resumed(alias: &str) -> Self {
+        Self {
+            alias: alias.into(),
+            offer: None,
         }
     }
 

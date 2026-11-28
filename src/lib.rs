@@ -15,6 +15,7 @@ pub(crate) mod gcp;
 mod guardrails;
 pub(crate) mod history;
 pub mod instances;
+pub(crate) mod job;
 pub mod launch;
 pub(crate) mod modal;
 mod output;
@@ -180,7 +181,9 @@ fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
     guardrails::nonterminal(ctx, &command, &cfg)?;
     let launch_owner = match &command {
         Command::Up(flags) => owner::resolve(ctx, flags.owner.as_deref())?,
-        Command::Run(flags) => owner::resolve(ctx, flags.owner.as_deref())?,
+        Command::Run(flags) | Command::Job(cli::JobCommand::Start(flags)) => {
+            owner::resolve(ctx, flags.owner.as_deref())?
+        }
         _ => None,
     };
     if let Some(name) = &launch_owner {
@@ -198,6 +201,16 @@ fn dispatch(ctx: &Ctx, mut command: Command) -> Result<()> {
         Command::Setup(flags) => setup::run(ctx, &cfg, &flags),
         Command::Offers { provider } => amd::offers(ctx, provider),
         Command::Run(flags) => run::run(ctx, &flags, &cfg, &std::env::current_dir()?),
+        Command::Job(action) => match action {
+            cli::JobCommand::Start(flags) => {
+                run::start_job(ctx, &flags, &cfg, &std::env::current_dir()?)
+            }
+            cli::JobCommand::Status { id } => job::status(ctx, &id),
+            cli::JobCommand::Logs { id, follow, offset } => job::logs(ctx, &id, follow, offset),
+            cli::JobCommand::Outputs { id } => job::outputs(ctx, &id),
+            cli::JobCommand::Cancel { id } => job::cancel(ctx, &id),
+            cli::JobCommand::Ls { owner } => job::ls(ctx, owner.as_deref()),
+        },
         Command::Wait {
             id,
             timeout,

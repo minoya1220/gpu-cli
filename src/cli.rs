@@ -56,6 +56,9 @@ pub enum Command {
         after_help = run_help()
     )]
     Run(RunFlags),
+    /// Start, check, collect and cancel one-shot jobs in separate calls (Vast only)
+    #[command(subcommand, after_help = job_help())]
+    Job(JobCommand),
     /// List single-MI300X catalog prices and stock hints (not a capacity guarantee)
     Offers {
         /// AMD provider whose current catalog to read (runpod or do)
@@ -194,6 +197,7 @@ impl Command {
             Self::Setup(_) => "setup",
             Self::Up(_) => "up",
             Self::Run(_) => "run",
+            Self::Job(action) => action.name(),
             Self::Ls { .. } => "ls",
             Self::Offers { .. } => "offers",
             Self::Wait { .. } => "wait",
@@ -208,6 +212,73 @@ impl Command {
             Self::Link(_) => "link",
             Self::Unlink { .. } => "unlink",
             Self::AutosyncRun(_) => "autosync-run",
+        }
+    }
+}
+
+fn job_help() -> String {
+    let codes = crate::error::help_codes(true);
+    format!("A job is a gpu run split into separate calls, so a caller never has to wait for it:\n\
+        gpu job start --gpu 'RTX 4090' --expire 2h --yes --json -- python train.py   (prints the job ID once the job runs)\n\
+        gpu job status ID; gpu job logs ID [--follow]; gpu job outputs ID; gpu job cancel ID; gpu job ls [--owner NAME]\n\
+        Job records live in ~/.local/state/gpu/jobs, so any later gpu process can resume a job by ID. An uncollected job's \
+        instance is destroyed at --expire; keep outputs by running gpu job outputs ID before then.\n\
+        Exit codes: 0 success; 1 error; 2 usage; {codes}.")
+}
+
+/// `gpu job`: the pieces of `gpu run`, one call each.
+#[derive(Subcommand, Debug)]
+#[allow(clippy::large_enum_variant)] // like Command, which holds RunFlags inline
+pub enum JobCommand {
+    /// Rent, upload and launch like gpu run, then return the job ID while the job runs
+    #[command(
+        after_help = "Takes the flags of gpu run. --linger keeps the instance that long after gpu job outputs; \
+        the default destroys it. Example: gpu job start --gpu 'RTX 4090' --expire 2h --yes --json -- python train.py"
+    )]
+    Start(RunFlags),
+    /// Show a job's state, exit code, elapsed time and estimated cost
+    Status {
+        /// Job ID from gpu job start (or its Vast instance ID)
+        id: String,
+    },
+    /// Print a job's output so far
+    Logs {
+        /// Job ID from gpu job start (or its Vast instance ID)
+        id: String,
+        /// Keep streaming until the job ends
+        #[arg(long, short = 'f')]
+        follow: bool,
+        /// Start at this byte offset (the next_offset of an earlier call)
+        #[arg(long, default_value_t = 0, value_name = "BYTES")]
+        offset: u64,
+    },
+    /// Download a finished job's outputs, then destroy its instance unless it was started with --linger
+    Outputs {
+        /// Job ID from gpu job start (or its Vast instance ID)
+        id: String,
+    },
+    /// Stop a job and destroy its instance
+    Cancel {
+        /// Job ID from gpu job start (or its Vast instance ID)
+        id: String,
+    },
+    /// List jobs with their state
+    Ls {
+        /// Only list jobs started with this owner (see gpu run --owner)
+        #[arg(long)]
+        owner: Option<String>,
+    },
+}
+
+impl JobCommand {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Start(_) => "job start",
+            Self::Status { .. } => "job status",
+            Self::Logs { .. } => "job logs",
+            Self::Outputs { .. } => "job outputs",
+            Self::Cancel { .. } => "job cancel",
+            Self::Ls { .. } => "job ls",
         }
     }
 }

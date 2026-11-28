@@ -315,6 +315,10 @@ fn a_stopped_instance_is_reported_from_the_list_and_cancel_still_destroys_it() {
         !s.home.join("asked").exists(),
         "no SSH to a stopped instance"
     );
+    let text = gpu(&s, &["job", "status", &id]);
+    let text = String::from_utf8_lossy(&text.stdout);
+    assert!(text.contains(&format!("gpu job cancel {id}")), "{text}");
+    assert!(!text.contains("gpu job outputs"), "{text}");
     let out = gpu(&s, &["job", "logs", &id]);
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&out.stderr).contains("exited"));

@@ -610,11 +610,6 @@ fn summary(record: &Record, now: i64) -> String {
     ));
     if record.destroyed {
         text.push_str("\n  instance destroyed");
-    } else if record.state == LOST && !record.collected {
-        text.push_str(&format!(
-            "\n  the job supervisor is gone, so the job will not finish; collect what it left: gpu job outputs {}",
-            record.job_id
-        ));
     }
     if record.collected {
         text.push_str(&format!(
@@ -645,7 +640,23 @@ pub fn status(ctx: &Ctx, id: &str) -> Result<()> {
         ))?;
     }
     if !ctx.json() {
-        ctx.println(&summary(&record, ctx.clock.now().as_second()))?;
+        let mut text = summary(&record, ctx.clock.now().as_second());
+        match &seen {
+            Seen::Live(_, status) if status.phase == "lost" && !record.collected => {
+                text.push_str(&format!(
+                    "\n  the job supervisor is gone, so the job will not finish; collect what it left: gpu job outputs {}",
+                    record.job_id
+                ));
+            }
+            Seen::Down(_) => {
+                text.push_str(&format!(
+                    "\n  the instance is not running but still bills; destroy it: gpu job cancel {}",
+                    record.job_id
+                ));
+            }
+            _ => {}
+        }
+        ctx.println(&text)?;
     }
     Ok(())
 }

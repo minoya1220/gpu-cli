@@ -341,7 +341,7 @@ fn load(ctx: &Ctx, id: &str) -> Result<Record> {
     let missing = || {
         Error::status(
             ExitCode::NotFound,
-            format!("Job {id} not found on this machine."),
+            format!("Job {id} not found on this machine"),
         )
         .next("gpu job ls")
     };
@@ -776,7 +776,7 @@ pub fn logs(ctx: &Ctx, id: &str, follow: bool, offset: u64) -> Result<()> {
         }
         Seen::Down(provider) => {
             return Err(Error::msg(format!(
-                "{}, so the log of job {} cannot be read.",
+                "{}, so the log of job {} cannot be read",
                 down_text(&record, &provider),
                 record.job_id
             ))
@@ -832,7 +832,7 @@ pub fn outputs(ctx: &Ctx, id: &str) -> Result<()> {
                 ))?;
             } else if status.exit.is_none() {
                 return Err(Error::msg(format!(
-                    "Job {} is still {}; outputs can be collected once it finishes.",
+                    "Job {} is still {}; outputs can be collected once it finishes",
                     record.job_id, record.state
                 ))
                 .next(format!("gpu job logs {} --follow", record.job_id)));
@@ -842,7 +842,7 @@ pub fn outputs(ctx: &Ctx, id: &str) -> Result<()> {
         Seen::Down(provider) => {
             report(ctx, &record);
             return Err(Error::msg(format!(
-                "{}, so the outputs of job {} cannot be downloaded now.",
+                "{}, so the outputs of job {} cannot be downloaded now",
                 down_text(&record, &provider),
                 record.job_id
             ))

@@ -179,8 +179,15 @@ fn outputs_downloads_then_destroys_and_is_safe_to_repeat() {
 
     // A running job's outputs are not collected, and nothing is destroyed.
     std::fs::write(s.home.join("remote-status"), "job\t-\t0\t14\n").unwrap();
-    let out = gpu(&s, &["job", "outputs", &id, "--json"]);
+    let out = gpu(&s, &["job", "outputs", &id]);
     assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        format!(
+            "gpu: Job {id} is still running; outputs can be collected once it finishes. \
+             Next: gpu job logs {id} --follow\n"
+        )
+    );
     assert!(!s.home.join("destroyed").exists());
     assert!(!s.home.join("downloading").exists());
 
@@ -321,7 +328,23 @@ fn a_stopped_instance_is_reported_from_the_list_and_cancel_still_destroys_it() {
     assert!(!text.contains("gpu job outputs"), "{text}");
     let out = gpu(&s, &["job", "logs", &id]);
     assert_eq!(out.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("exited"));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        format!(
+            "gpu: Vast instance 123 is exited, not running, so the log of job {id} cannot be read. \
+             Next: gpu job status {id}\n"
+        )
+    );
+    let out = gpu(&s, &["job", "outputs", &id]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).ends_with(&format!(
+            "gpu: Vast instance 123 is exited, not running, so the outputs of job {id} cannot be downloaded now. \
+             Next: gpu job cancel {id}\n"
+        )),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     // The stopped instance still bills: cancel destroys it.
     assert!(!s.home.join("destroyed").exists());
@@ -543,6 +566,10 @@ fn unknown_and_damaged_job_ids_are_clear_errors() {
     assert_eq!(out.status.code(), Some(16));
     let out = gpu(&s, &["job", "status", "../../etc/passwd"]);
     assert_eq!(out.status.code(), Some(16));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "gpu: Job ../../etc/passwd not found on this machine. Next: gpu job ls\n"
+    );
     std::fs::create_dir_all(s.root.join("state/gpu/jobs")).unwrap();
     std::fs::write(s.root.join("state/gpu/jobs/broken.json"), "{").unwrap();
     let out = gpu(&s, &["job", "status", "broken"]);

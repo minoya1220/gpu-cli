@@ -550,6 +550,12 @@ pub struct RunFlags {
     /// Also upload this file (not a directory) even if git ignores or does not track it, e.g. gpu-runs/job.sh (repeatable)
     #[arg(long, value_name = "PATH")]
     pub include: Vec<String>,
+    /// Take the code from this git repository (GitHub owner/name, name under your owner, or URL) instead of the current folder; needs --ref
+    #[arg(long, value_name = "REPO", requires = "git_ref")]
+    pub source_repo: Option<String>,
+    /// Commit, branch or tag of --source-repo to upload; resolved locally to a full commit SHA
+    #[arg(long = "ref", value_name = "REF", requires = "source_repo")]
+    pub git_ref: Option<String>,
     /// Results directory relative to the job's working directory
     #[arg(long, default_value = "outputs")]
     pub outputs: String,

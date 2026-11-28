@@ -169,6 +169,47 @@ fn included(root: &Path, include: &[String]) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+/// Upload the tree checked out in `source`, plus `include`d files read from the
+/// caller's `cwd`. Each included file is copied into `source` (never through a
+/// symlink) so the fetched tree and the includes go through the same checks.
+pub(crate) fn prepare_from_source(
+    ctx: &Ctx,
+    source: &Path,
+    cwd: &Path,
+    cap: u64,
+    drop_secrets: bool,
+    include: &[String],
+) -> Result<Upload> {
+    let source = source.canonicalize()?;
+    let from = cwd.canonicalize()?;
+    for path in included(&from, include)? {
+        let dest = source.join(&path);
+        let mut at = source.clone();
+        for part in path.parent().into_iter().flat_map(Path::components) {
+            at.push(part);
+            match fs::symlink_metadata(&at) {
+                Ok(meta) if meta.is_dir() => {}
+                Ok(_) => {
+                    return Err(Error::usage(format!(
+                        "--include {} collides with a non-directory in the fetched source.",
+                        path.display()
+                    )))
+                }
+                Err(_) => fs::create_dir(&at)?,
+            }
+        }
+        if fs::symlink_metadata(&dest).is_ok_and(|m| m.is_dir()) {
+            return Err(Error::usage(format!(
+                "--include {} collides with a directory in the fetched source.",
+                path.display()
+            )));
+        }
+        let _ = fs::remove_file(&dest);
+        fs::copy(from.join(&path), &dest)?;
+    }
+    prepare_including(ctx, &source, cap, drop_secrets, include)
+}
+
 /// `prepare_with`, plus `include`d paths added to the git/walk selection.
 pub(crate) fn prepare_including(
     ctx: &Ctx,

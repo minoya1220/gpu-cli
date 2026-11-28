@@ -402,6 +402,7 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path, detached: bool
                     owner: crate::owner::from_cfg(&job.cfg),
                     gpu: selected.gpu.clone(),
                     command: &flags.command,
+                    source: job.source.clone(),
                     rate: session.rate,
                     created_at: session.created_at,
                     deadline: job.deadline.as_second(),
@@ -441,6 +442,8 @@ struct Prepared {
     env: String,
     args: UpArgs,
     upload: run_files::Upload,
+    /// The repository and commit the upload was fetched from, if any.
+    source: Option<crate::source::SourceInfo>,
     setup: String,
     cfg: Dict,
     /// `gpu job start`: leave the job running for a later `gpu job` command.
@@ -535,13 +538,31 @@ fn prepare(
     let env = forwarded_env(ctx, flags)?;
     let args = UpArgs::from(flags);
     crate::launch::validate_launch_args(&args).map_err(|e| Error::usage(e.text()))?;
-    let upload = run_files::prepare_including(
-        ctx,
-        cwd,
-        run_files::max_bytes(&flags.max_upload)?,
-        false,
-        &flags.include,
-    )?;
+    let cap = run_files::max_bytes(&flags.max_upload)?;
+    // The checkout lives only until the archive exists, on success or failure.
+    let (upload, source) = match (&flags.source_repo, &flags.git_ref) {
+        (Some(repo), Some(git_ref)) => {
+            let owner = cfg.get("owner").and_then(Value::as_str).unwrap_or("");
+            let checkout = crate::source::fetch(ctx, repo, owner, git_ref)?;
+            let upload = run_files::prepare_from_source(
+                ctx,
+                &checkout.path(),
+                cwd,
+                cap,
+                false,
+                &flags.include,
+            )?;
+            ctx.println(&format!(
+                "Source: {} at commit {} ({git_ref}).",
+                checkout.info.repo, checkout.info.commit
+            ))?;
+            (upload, Some(checkout.info.clone()))
+        }
+        _ => (
+            run_files::prepare_including(ctx, cwd, cap, false, &flags.include)?,
+            None,
+        ),
+    };
     let secrets: Vec<_> = upload
         .files
         .iter()
@@ -584,6 +605,7 @@ fn prepare(
         env,
         args,
         upload,
+        source,
         setup,
         cfg,
         detached,
@@ -647,6 +669,11 @@ fn report_plan(ctx: &Ctx, flags: &RunFlags, job: &Prepared) {
         ctx.result("requested_expires_at", Value::str(job.deadline.to_string()));
         ctx.result("expiry_supported", Value::Bool(false));
         ctx.result("live_supported", Value::Bool(false));
+    }
+    if let Some(source) = &job.source {
+        ctx.result("source_repo", Value::str(&source.repo));
+        ctx.result("source_ref", Value::str(&source.git_ref));
+        ctx.result("source_commit", Value::str(&source.commit));
     }
     ctx.result("uploaded_files", Value::Int(job.upload.files.len() as i64));
     if flags.dry_run {

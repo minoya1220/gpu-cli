@@ -1,0 +1,30 @@
+[project]
+name = "gpu-mcp"
+version = "0.1.0"
+description = "MCP server exposing asynchronous gpu job commands over OAuth-protected streamable HTTP"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.28",
+    "mcp==2.3.0",
+    "starlette>=0.48",
+    "uvicorn>=0.31",
+]
+
+[project.scripts]
+gpu-mcp = "gpu_mcp.__main__:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gpu_mcp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

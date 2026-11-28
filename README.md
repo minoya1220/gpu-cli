@@ -263,6 +263,66 @@ With `--json`, each command prints one object, `{"command":...,"ok":...,"result"
 
 A create timeout does not mean nothing was created: check `gpu ls` before retrying.
 
+## MCP server for Claude
+
+`mcp/` is a small MCP server that lets Claude sessions, including claude.ai and cloud sessions, run `gpu job`s. It runs on your Mac, listens only on localhost, and is reached through Tailscale Funnel. Callers log in with GitHub; only the usernames in its config get in.
+
+Tools: `search_offers` (the cheapest matching Vast offer and its estimate, from a dry run), `run_job` (code from `source_repo` at `ref`, plus optional small inline `files`), `job_status`, `job_logs` (tail or from an offset, size-capped), `job_outputs` (downloads results, destroys the instance, returns small text files inline and the rest as a list with sizes, readable in chunks), `cancel_job` and `list_jobs`. There is no `up`, `exec`, `ssh`, `cp`, `--env` or `--allow-secrets`, and results go only back to the caller.
+
+- Each job's `--owner` is the caller's lowercased GitHub login (or `[owner_labels]`); a job owned by anyone else is "not found".
+- Slow calls return quickly: `run_job` gives a `launch_id` to poll with `job_status` while the machine boots, and `job_outputs`/`cancel_job` say `collecting`/`cancelling` until done. Claude documents a 300-second tool timeout for custom connectors, but some clients drop calls at 60 seconds, so no call waits longer than `tool_wait_seconds` (default 20). A server restart forgets pending `launch_id`s; the gpu processes carry on and `list_jobs` shows the job once it runs.
+- Server caps: `max_price_per_hour` and `max_expire` per job, and `daily_spend_per_caller` over the last 24 hours. A launch reserves its worst case (price cap times lifetime), which becomes the rented price times the lifetime once it runs; a launch that never reached the create request gives it back. gpu's own `max_session_spend`/`max_daily_spend` still apply as a total cap for the server's account.
+- `audit.jsonl` in `data_dir` has one JSON line per tool call and login: time, caller, tool, arguments (inline files as names and sizes), job ID and status. Calls the SDK rejects for a wrong argument type never reach the server code and are not logged.
+- Tokens are the server's own (1 hour access, 30-day rotating refresh), stored as SHA-256 hashes in `oauth.json`. Removing a user from the config cuts them off on their next call.
+
+Setup:
+
+1. Create a macOS user for the server, e.g. `gpumcp`, as a Standard user. Install `gpu` and `vastai` for it, run `vastai set api-key` as that user, and give it a gpu config with `max_daily_spend`. It holds only the Vast key: public repos need nothing more; for private repos give it a fine-grained read-only GitHub token limited to those repos (for example with `gh auth login` as that user), never your own credentials.
+2. Create a GitHub OAuth app (Settings → Developer settings → OAuth Apps) with homepage `https://MACHINE.TAILNET.ts.net` and callback `https://MACHINE.TAILNET.ts.net/github/callback`. Keep its client ID and secret in the server's environment only, as `GPU_MCP_GITHUB_CLIENT_ID` and `GPU_MCP_GITHUB_CLIENT_SECRET`.
+3. Install the server as that user, from this checkout: `uv sync --locked --directory mcp`. Write `~/.config/gpu-mcp/config.toml` (or pass `--config`, or set `GPU_MCP_CONFIG`) and check it with `mcp/.venv/bin/gpu-mcp --check`:
+
+   ```toml
+   public_url = "https://MACHINE.TAILNET.ts.net"
+   allowed_github_users = ["YOUR_GITHUB_USER"]
+   port = 8765                      # always bound to 127.0.0.1
+   gpu_binary = "/Users/gpumcp/.cargo/bin/gpu"
+   # data_dir = "~/.local/state/gpu-mcp"   # tokens, audit log, spend ledger, job folders
+   # redirect_uris = ["https://claude.ai/api/mcp/auth_callback", "https://claude.com/api/mcp/auth_callback"]
+   # allow_loopback_redirects = false     # true for `claude mcp add` in Claude Code
+
+   [caps]
+   max_price_per_hour = 2.0
+   max_expire = "4h"
+   daily_spend_per_caller = 20
+
+   # [limits]  # defaults: log_max_bytes = 32768, output_file_max_bytes = 32768,
+   #           # inline_file_max_bytes = 65536, tool_wait_seconds = 20
+   ```
+
+4. Run it with launchd, as `/Library/LaunchDaemons/dev.gpu-mcp.plist` (`sudo launchctl bootstrap system /Library/LaunchDaemons/dev.gpu-mcp.plist`). Make the plist `root:wheel` and mode 600, since it holds the secret:
+
+   ```xml
+   <?xml version="1.0" encoding="UTF-8"?>
+   <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+   <plist version="1.0"><dict>
+     <key>Label</key><string>dev.gpu-mcp</string>
+     <key>UserName</key><string>gpumcp</string>
+     <key>ProgramArguments</key><array><string>/Users/gpumcp/gpu-cli/mcp/.venv/bin/gpu-mcp</string></array>
+     <key>EnvironmentVariables</key><dict>
+       <key>PATH</key><string>/Users/gpumcp/.cargo/bin:/Users/gpumcp/.local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+       <key>GPU_MCP_GITHUB_CLIENT_ID</key><string>...</string>
+       <key>GPU_MCP_GITHUB_CLIENT_SECRET</key><string>...</string>
+     </dict>
+     <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
+     <key>StandardErrorPath</key><string>/Users/gpumcp/gpu-mcp.log</string>
+   </dict></plist>
+   ```
+
+5. Publish it: `tailscale funnel --bg 8765` serves `https://MACHINE.TAILNET.ts.net` from `127.0.0.1:8765`. `tailscale funnel status` shows it and `tailscale funnel --https=443 off` stops it.
+6. In claude.ai, Settings → Connectors → Add custom connector, URL `https://MACHINE.TAILNET.ts.net/mcp`, no client ID or secret: Claude registers itself (dynamic client registration) with callback `https://claude.ai/api/mcp/auth_callback`, then sends you to GitHub to log in. Claude Code signed in to claude.ai can use that connector. To add it to Claude Code directly (`claude mcp add --transport http gpu https://MACHINE.TAILNET.ts.net/mcp`), set `allow_loopback_redirects = true`, which accepts any `http://localhost:PORT` callback it registers.
+
+Tests use a fake `gpu` binary and a scripted GitHub: `uv run --directory mcp pytest`.
+
 ## Configuration
 
 `gpu setup` creates `~/.config/gpu/config.json` (or `$XDG_CONFIG_HOME/gpu/`). Keys override the defaults in `src/config.rs`:

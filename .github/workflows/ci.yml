@@ -55,6 +55,20 @@ jobs:
       - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
       - run: cargo test --locked
 
+  mcp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: MCP server tests (fake gpu binary, no network)
+        run: |
+          python3 -m venv "$RUNNER_TEMP/uv"
+          "$RUNNER_TEMP/uv/bin/pip" install uv==0.10.4
+          "$RUNNER_TEMP/uv/bin/uv" sync --locked --directory mcp
+          "$RUNNER_TEMP/uv/bin/uv" run --locked --directory mcp pytest
+
   # Execution visibility only: no minimum coverage percentage.
   coverage:
     runs-on: ubuntu-latest

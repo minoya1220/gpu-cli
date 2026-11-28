@@ -1,9 +1,11 @@
 import asyncio
 import json
+import os
 import time
 
 import pytest
 from conftest import audit_lines, job, make_config
+from gpu_mcp import gpu
 from gpu_mcp.audit import Audit
 from gpu_mcp.tools import GpuTools, ToolError
 
@@ -136,6 +138,36 @@ def test_failed_launch_gives_back_only_uncreated_reservations(tools, fake_gpu):
     with pytest.raises(ToolError, match="Unknown ref"):
         call(tools, "run_job", **RUN)
     assert tools.ledger.spent("owner") == pytest.approx(2.0)
+
+
+def test_launch_that_dies_without_an_envelope_keeps_its_reservation(tools, fake_gpu, monkeypatch):
+    async def died(binary, args, cwd, timeout):
+        return gpu.GpuResult(-9, None, "")
+
+    monkeypatch.setattr(gpu, "run", died)
+    with pytest.raises(ToolError):
+        call(tools, "run_job", **RUN)
+    assert tools.ledger.spent("owner") == pytest.approx(2.0)
+
+
+def test_old_launch_folders_of_ended_jobs_are_removed(tools, fake_gpu, config):
+    def folder(name, job_id, age_days):
+        root = config.data_dir / "work" / name / "gpu-runs" / job_id
+        root.mkdir(parents=True)
+        stamp = time.time() - age_days * 86400
+        for path in (root, root.parent, root.parent.parent):
+            os.utime(path, (stamp, stamp))
+        return root.parent.parent
+
+    ended = folder("launch-" + "1" * 16, "job-ended", 10)
+    running = folder("launch-" + "2" * 16, "job-running", 10)
+    recent = folder("launch-" + "3" * 16, "job-recent", 1)
+    fake_gpu.reply("job ls", {"jobs": [job("job-ended", state="succeeded"), job("job-running", state="running"),
+                                       job("job-recent", state="succeeded")]})
+    started(fake_gpu)
+    call(tools, "run_job", **RUN)
+    assert not ended.exists()
+    assert running.exists() and recent.exists()
 
 
 def test_slow_launch_returns_a_launch_id_to_poll(tools, fake_gpu, config):

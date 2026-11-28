@@ -76,6 +76,7 @@ class Config:
     owner_labels: dict[str, str] = field(default_factory=dict)
     access_token_seconds: int = 3600
     refresh_token_seconds: int = 30 * 86400
+    work_retention_days: int = 7
     github_client_id: str = field(default="", repr=False)
     github_client_secret: str = field(default="", repr=False)
 
@@ -190,6 +191,7 @@ def from_dict(raw: dict, env: dict[str, str]) -> Config:
         owner_labels=owner_labels,
         access_token_seconds=int(_number(raw, "access_token_seconds", 3600, int)),
         refresh_token_seconds=int(_number(raw, "refresh_token_seconds", 30 * 86400, int)),
+        work_retention_days=int(_number(raw, "work_retention_days", 7, int)),
         github_client_id=client_id,
         github_client_secret=client_secret,
     )

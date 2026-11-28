@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import re
 import secrets
+import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -254,6 +255,7 @@ class GpuTools:
         for path in inline:
             args.append(f"--include={path}")
 
+        await self.sweep_work()
         worst = price * seconds / 3600
         try:
             reservation = self.ledger.reserve(caller, worst, self.config.caps.daily_spend_per_caller)
@@ -285,16 +287,45 @@ class GpuTools:
             raise ToolError(result["error"])
         return result
 
+    async def sweep_work(self) -> None:
+        """Remove launch folders older than the retention whose jobs have all ended."""
+        cutoff = time.time() - self.config.work_retention_days * 86400
+        stale: list[tuple[Path, list[str]]] = []
+        for folder in self.work.glob("launch-*") if self.work.is_dir() else []:
+            if not LAUNCH_ID.fullmatch(folder.name) or not folder.is_dir() or folder.is_symlink():
+                continue
+            op = self.ops.get(folder.name)
+            if op is not None and op.result is None:
+                continue
+            runs = folder / "gpu-runs"
+            jobs = list(runs.iterdir()) if runs.is_dir() else []
+            try:
+                newest = max(p.stat().st_mtime for p in [folder, *([runs] if jobs else []), *jobs])
+            except OSError:
+                continue
+            if newest <= cutoff:
+                stale.append((folder, [p.name for p in jobs]))
+        if not stale:
+            return
+        res = await self._gpu(["job", "ls"])
+        if not res.ok:
+            return
+        records = {j.get("job_id"): j for j in res.result.get("jobs", []) if isinstance(j, dict)}
+        for folder, job_ids in stale:
+            if not any(_unended(records.get(job_id)) for job_id in job_ids):
+                shutil.rmtree(folder, ignore_errors=True)
+
     async def _launch(self, caller: str, reservation: str, seconds: int, args: list[str],
                       workdir: Path, op: Op) -> dict[str, Any]:
         res = await self._gpu(args, cwd=workdir, timeout=None)
         r = res.result
         if not res.ok:
             # gpu sets created to false while planning and to null once it sends
-            # the create request; a failure before planning reports no result.
-            # Only a launch that never reached the create request gives back
-            # its reservation.
-            if r.get("created", False) is False:
+            # the create request; a failure before planning reports an empty
+            # result. Only a launch whose envelope shows it never reached the
+            # create request gives back its reservation; with no envelope at
+            # all (the process died) an instance may exist, so it stays.
+            if res.envelope is not None and r.get("created", False) is False:
                 self.ledger.settle(caller, reservation, None)
             return {"ok": False, "launch_id": op.id, "error": res.error}
         job_id = r.get("job_id")
@@ -501,6 +532,16 @@ JOB_FIELDS = (
     "source_repo", "source_ref", "source_commit", "provider_status", "stale", "warning",
     "log_bytes", "retained_until",
 )
+
+
+ENDED = {"succeeded", "failed", "cancelled", "expired"}
+
+
+def _unended(job: dict[str, Any] | None) -> bool:
+    """Whether a job record shows a job that has not ended; no record means it is gone."""
+    if job is None:
+        return False
+    return not (job.get("state") in ENDED or job.get("outputs_collected") is True)
 
 
 def _job_view(result: dict[str, Any]) -> dict[str, Any]:

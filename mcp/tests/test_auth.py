@@ -2,11 +2,13 @@ import base64
 import hashlib
 import json
 import secrets
+import time
 from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
 from conftest import audit_lines, make_config
+from gpu_mcp import auth
 from gpu_mcp.server import build
 from starlette.testclient import TestClient
 
@@ -182,6 +184,23 @@ def test_registration_only_accepts_configured_redirects(client):
     reply = register(client, redirect="https://evil.example/callback")
     assert reply.status_code == 400
     assert reply.json()["error"] == "invalid_redirect_uri"
+
+
+def test_idle_registrations_are_pruned_so_registering_never_runs_out(client, github, config):
+    _, kept = tokens(client, github)
+    for _ in range(auth.MAX_CLIENTS + 20):
+        assert register(client).status_code == 201
+    store = json.loads((config.data_dir / "oauth.json").read_text())
+    assert len(store["clients"]) <= auth.MAX_CLIENTS
+    live = {t["client_id"] for t in store["refresh"].values()}
+    assert live == {kept}
+    assert kept in store["clients"]
+    provider = client.app.state.provider
+    for cid, entry in provider.store.data["clients"].items():
+        if cid not in live:
+            entry["registered_at"] = time.time() - auth.CLIENT_GRACE_SECONDS - 1
+    assert register(client).status_code == 201
+    assert set(provider.store.data["clients"]) - live and len(provider.store.data["clients"]) == len(live) + 1
 
 
 def test_loopback_redirects_only_when_enabled(tmp_path, fake_gpu, github):

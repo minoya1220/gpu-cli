@@ -47,6 +47,8 @@ GITHUB_USER = "https://api.github.com/user"
 
 CODE_SECONDS = 300
 PENDING_SECONDS = 600
+MAX_CLIENTS = 100
+CLIENT_GRACE_SECONDS = 3600
 SCOPE = "gpu"
 
 
@@ -94,7 +96,9 @@ class GitHubOAuthProvider:
 
     async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
         raw = self.store.data["clients"].get(client_id)
-        return OAuthClientInformationFull.model_validate(raw) if raw else None
+        if not raw:
+            return None
+        return OAuthClientInformationFull.model_validate({k: v for k, v in raw.items() if k != "registered_at"})
 
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
         uris = [str(u) for u in client_info.redirect_uris or []]
@@ -103,10 +107,33 @@ class GitHubOAuthProvider:
                 "invalid_redirect_uri",
                 "This server only accepts redirect URIs listed in its config.",
             )
-        if len(self.store.data["clients"]) >= 100:
+        self._prune_clients()
+        if len(self.store.data["clients"]) >= MAX_CLIENTS:
             raise RegistrationError("invalid_client_metadata", "Too many registered clients.")
-        self.store.data["clients"][client_info.client_id] = client_info.model_dump(mode="json")
+        self.store.data["clients"][client_info.client_id] = {
+            **client_info.model_dump(mode="json"),
+            "registered_at": time.time(),
+        }
         self.store.save()
+
+    def _prune_clients(self) -> None:
+        """Forget clients that never got tokens, so open registration cannot fill the store.
+
+        A client with a live token is kept. One without is dropped after
+        CLIENT_GRACE_SECONDS, or oldest first when the store is full.
+        """
+        now = time.time()
+        live = {
+            v.get("client_id")
+            for kind in ("access", "refresh")
+            for v in self.store.data[kind].values()
+            if v.get("expires_at", 0) > now
+        }
+        clients = self.store.data["clients"]
+        idle = sorted((c.get("registered_at", 0), cid) for cid, c in clients.items() if cid not in live)
+        for registered_at, cid in idle:
+            if registered_at < now - CLIENT_GRACE_SECONDS or len(clients) >= MAX_CLIENTS:
+                del clients[cid]
 
     # Authorization -------------------------------------------------------
 

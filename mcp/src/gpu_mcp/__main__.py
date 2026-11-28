@@ -25,7 +25,10 @@ def main(argv: list[str] | None = None) -> int:
 
     from .server import build
 
+    import asyncio
+
     app = build(config)
+    asyncio.run(app.state.tools.sweep_work())
     uvicorn.run(app, host=config.host, port=config.port, proxy_headers=False, log_level="info")
     return 0
 

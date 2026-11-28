@@ -289,6 +289,7 @@ Setup:
    # data_dir = "~/.local/state/gpu-mcp"   # tokens, audit log, spend ledger, job folders
    # redirect_uris = ["https://claude.ai/api/mcp/auth_callback", "https://claude.com/api/mcp/auth_callback"]
    # allow_loopback_redirects = false     # true for `claude mcp add` in Claude Code
+   # work_retention_days = 7               # delete launch folders of ended jobs after this many days
 
    [caps]
    max_price_per_hour = 2.0

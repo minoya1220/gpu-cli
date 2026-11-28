@@ -9,6 +9,7 @@ fn record() -> Record {
         owner: Some("alice".into()),
         gpu: Some("RTX 4090".into()),
         command: vec!["python".into(), "train.py".into(), "a b".into()],
+        source: None,
         rate: 0.36,
         created_at: 1_000,
         expires_at: 8_200,
@@ -215,4 +216,32 @@ fn a_stopped_instance_is_lost_but_not_destroyed() {
     let mut r = record();
     assert!(!apply(&mut r, &Seen::Down("loading".into()), 2_000));
     assert_eq!(r.state, BOOTING);
+}
+
+#[test]
+fn source_repo_and_commit_are_saved_and_reported_only_when_set() {
+    let plain = record();
+    assert!(plain.entry(0).get("source_commit").is_none());
+    assert!(Record::from_value(&plain.to_value())
+        .unwrap()
+        .source
+        .is_none());
+    let mut sourced = record();
+    sourced.source = Some(crate::source::SourceInfo {
+        repo: "https://github.com/acme/widgets".into(),
+        git_ref: "main".into(),
+        commit: "a".repeat(40),
+    });
+    let back = Record::from_value(&sourced.to_value()).unwrap();
+    assert_eq!(back, sourced);
+    let entry = sourced.entry(0);
+    assert_eq!(
+        entry.get("source_commit"),
+        Some(&Value::str("a".repeat(40)))
+    );
+    assert_eq!(entry.get("source_ref"), Some(&Value::str("main")));
+    assert_eq!(
+        entry.get("source_repo"),
+        Some(&Value::str("https://github.com/acme/widgets"))
+    );
 }

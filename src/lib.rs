@@ -36,6 +36,7 @@ pub mod repos;
 pub(crate) mod run;
 mod run_files;
 pub(crate) mod setup;
+mod source;
 mod spend;
 mod ssh;
 mod sync;

@@ -62,6 +62,8 @@ pub(crate) struct Record {
     pub(crate) owner: Option<String>,
     pub(crate) gpu: Option<String>,
     pub(crate) command: Vec<String>,
+    /// The git repository and exact commit the code came from, if any.
+    pub(crate) source: Option<crate::source::SourceInfo>,
     pub(crate) rate: f64,
     pub(crate) created_at: i64,
     pub(crate) expires_at: i64,
@@ -87,6 +89,7 @@ pub(crate) struct Start<'a> {
     pub(crate) owner: Option<String>,
     pub(crate) gpu: Option<String>,
     pub(crate) command: &'a [String],
+    pub(crate) source: Option<crate::source::SourceInfo>,
     pub(crate) rate: f64,
     pub(crate) created_at: i64,
     pub(crate) deadline: i64,
@@ -124,6 +127,7 @@ impl Record {
             "command",
             Value::List(self.command.iter().map(Value::str).collect()),
         );
+        self.insert_source(&mut d);
         d.insert("price_per_hour", Value::Float(self.rate));
         d.insert("created_at", Value::Int(self.created_at));
         d.insert("expires_at", Value::Int(self.expires_at));
@@ -142,6 +146,14 @@ impl Record {
         d.insert("outputs_collected", Value::Bool(self.collected));
         d.insert("destroyed", Value::Bool(self.destroyed));
         Value::Dict(d)
+    }
+
+    fn insert_source(&self, d: &mut Dict) {
+        if let Some(source) = &self.source {
+            d.insert("source_repo", Value::str(&source.repo));
+            d.insert("source_ref", Value::str(&source.git_ref));
+            d.insert("source_commit", Value::str(&source.commit));
+        }
     }
 
     fn from_value(value: &Value) -> Option<Record> {
@@ -170,6 +182,18 @@ impl Record {
                 .iter()
                 .map(|c| c.as_str().map(String::from))
                 .collect::<Option<_>>()?,
+            source: match (
+                text("source_repo"),
+                text("source_ref"),
+                text("source_commit"),
+            ) {
+                (Some(repo), Some(git_ref), Some(commit)) => Some(crate::source::SourceInfo {
+                    repo,
+                    git_ref,
+                    commit,
+                }),
+                _ => None,
+            },
             rate,
             created_at: int("created_at")?,
             expires_at: int("expires_at")?,
@@ -275,6 +299,7 @@ impl Record {
             "command",
             Value::List(self.command.iter().map(Value::str).collect()),
         );
+        self.insert_source(&mut d);
         d
     }
 }
@@ -372,6 +397,7 @@ pub(crate) fn save_started(ctx: &Ctx, start: Start) -> Result<()> {
         owner: start.owner,
         gpu: start.gpu,
         command: start.command.to_vec(),
+        source: start.source,
         rate: start.rate,
         created_at: start.created_at,
         expires_at: start.deadline,

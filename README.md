@@ -271,9 +271,9 @@ Tools: `search_offers` (the cheapest matching Vast offer and its estimate, from 
 
 - Each job's `--owner` is the caller's lowercased GitHub login (or `[owner_labels]`); a job owned by anyone else is "not found".
 - Slow calls return quickly: `run_job` gives a `launch_id` to poll with `job_status` while the machine boots, and `job_outputs`/`cancel_job` say `collecting`/`cancelling` until done. Claude documents a 300-second tool timeout for custom connectors, but some clients drop calls at 60 seconds, so no call waits longer than `tool_wait_seconds` (default 20). A server restart forgets pending `launch_id`s; the gpu processes carry on and `list_jobs` shows the job once it runs.
-- Server caps: `max_price_per_hour` and `max_expire` per job, and `daily_spend_per_caller` over the last 24 hours. A launch reserves its worst case (price cap times lifetime), which becomes the rented price times the lifetime once it runs; a launch that never reached the create request gives it back. gpu's own `max_session_spend`/`max_daily_spend` still apply as a total cap for the server's account.
+- Server caps: `max_price_per_hour` and `max_expire` per job, and `daily_spend_per_caller` over the last 24 hours. A launch reserves its worst case (price cap times lifetime), which becomes the rented price times the lifetime once it runs; a launch whose gpu output shows it never reached the create request gives it back, but one that died without output keeps it. gpu's own `max_session_spend`/`max_daily_spend` still apply as a total cap for the server's account.
 - `audit.jsonl` in `data_dir` has one JSON line per tool call and login: time, caller, tool, arguments (inline files as names and sizes), job ID and status. Calls the SDK rejects for a wrong argument type never reach the server code and are not logged.
-- Tokens are the server's own (1 hour access, 30-day rotating refresh), stored as SHA-256 hashes in `oauth.json`. Removing a user from the config cuts them off on their next call.
+- Tokens are the server's own (1 hour access, 30-day rotating refresh), stored as SHA-256 hashes in `oauth.json`. Registered clients without a live token are forgotten after an hour (oldest first when 100 are stored), so open registration cannot fill the store. Removing a user from the config cuts them off on their next call.
 
 Setup:
 

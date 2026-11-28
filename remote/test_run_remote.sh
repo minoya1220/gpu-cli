@@ -33,6 +33,9 @@ launch() {
     if [ -n "${7:-}" ]; then
         GPU_RUN_CONFIG+=$'\n'"WAIT_FOR_STARTUP=$7"
     fi
+    if [ -n "${EXTRA_CONFIG:-}" ]; then
+        GPU_RUN_CONFIG+=$'\n'"$EXTRA_CONFIG"
+    fi
     # shellcheck disable=SC2016
     GPU_RUN_HOOK=$(printf 'printf "%%s" "$1" >%q\n' "$TMP/hook-$token")
     # Feed a separate bash, just like SSH stdin; it exits immediately after start.
@@ -241,6 +244,24 @@ check test "$(printf '%s' "$status" | cut -f2)" = 17
 check test "$(cat "$TMP/flushed-checkpoint")" = "$(cat "$TMP/work/deadline-checkpoint/outputs/checkpoint")"
 wait_hook deadline-checkpoint
 unset GPU_RUN_OUTPUTS_HOOK
+passed=$((passed+1))
+
+# A detached job (gpu job start) has nobody attached: the supervisor keeps its
+# status, log and outputs for the later collector and never runs the expiry
+# hook itself; the instance's armed expiry is the only backstop.
+EXTRA_CONFIG='DETACHED=1' launch detached 'echo kept > outputs/result.txt; echo detached-done; exit 3'
+status=$(wait_done detached)
+check test "$(printf '%s' "$status" | cut -f2)" = 3
+sleep 3
+check test ! -e "$TMP/hook-detached"
+check test "$(status_of detached | cut -f2)" = 3
+check test "$(cat "$TMP/work/detached/outputs/result.txt")" = kept
+check grep -Fxq detached-done "$TMP/state/detached/log"
+read -r detached_pid <"$TMP/state/detached/pid"
+count=0
+while [ -d "/proc/$detached_pid" ] && [ "$count" -lt 50 ]; do sleep 0.1; count=$((count+1)); done
+check test ! -d "/proc/$detached_pid"
+unset EXTRA_CONFIG
 passed=$((passed+1))
 
 # A second start with the same run ID must not launch duplicate work.

@@ -24,20 +24,20 @@ mod tests;
 
 pub const REMOTE_SOURCE: &str = include_str!("../remote/run_remote.sh");
 pub(crate) const DOWNLOAD_RESERVE: i64 = 600;
-const CHUNK: u64 = 131072;
+pub(crate) const CHUNK: u64 = 131072;
 /// Default `--timeout`: how long launch waits for SSH readiness.
 const READINESS_TIMEOUT: f64 = 600.0;
 /// Where results land, under the directory `gpu run` was started in.
 const RESULTS_DIR: &str = "gpu-runs";
 
 /// The run's current phase, reported as the `phase` result field.
-struct Phase<'a> {
+pub(crate) struct Phase<'a> {
     ctx: &'a Ctx,
     current: std::cell::RefCell<String>,
 }
 
 impl<'a> Phase<'a> {
-    fn start(ctx: &'a Ctx, phase: &str) -> Phase<'a> {
+    pub(crate) fn start(ctx: &'a Ctx, phase: &str) -> Phase<'a> {
         let started = Phase {
             ctx,
             current: std::cell::RefCell::new(String::new()),
@@ -45,7 +45,7 @@ impl<'a> Phase<'a> {
         started.set(phase);
         started
     }
-    fn set(&self, phase: &str) {
+    pub(crate) fn set(&self, phase: &str) {
         *self.current.borrow_mut() = phase.into();
         self.ctx.result("phase", Value::str(phase));
     }
@@ -85,7 +85,12 @@ pub(crate) fn step_result(
     }
 }
 
-fn checked(ctx: &Ctx, backend: &dyn RunBackend, cmd: &Cmd, message: &str) -> Result<Output> {
+pub(crate) fn checked(
+    ctx: &Ctx,
+    backend: &dyn RunBackend,
+    cmd: &Cmd,
+    message: &str,
+) -> Result<Output> {
     backend.remote_result(ctx, ctx.run(cmd), message)
 }
 
@@ -167,7 +172,7 @@ pub(crate) trait RunBackend {
     fn destroy(&self, ctx: &Ctx, id: &str) -> Result<()>;
 }
 
-fn control(root: &str, token: &str, action: &str) -> String {
+pub(crate) fn control(root: &str, token: &str, action: &str) -> String {
     format!(
         "bash {} {action} {} {}",
         shell_quote(&format!("{root}/runner.sh")),
@@ -326,21 +331,37 @@ fn choose(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, args: &UpArgs) -> Result<Sele
 
 /// `cwd` is explicit so all file tests are isolated without process-wide chdir.
 pub fn run(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> {
-    let outcome = run_inner(ctx, flags, cfg, cwd);
+    let outcome = run_inner(ctx, flags, cfg, cwd, false);
     ctx.end_run();
     outcome
 }
 
-fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> {
+/// `gpu job start`: everything `gpu run` does up to and including starting the
+/// job, then return with the instance still running and a job record saved.
+/// A failure before that point cleans up exactly as `gpu run` does.
+pub fn start_job(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> {
+    let outcome = run_inner(ctx, flags, cfg, cwd, true);
+    ctx.end_run();
+    outcome
+}
+
+fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path, detached: bool) -> Result<()> {
     let started = ctx.clock.monotonic();
     if flags.provider.is_some_and(Provider::amd) {
         crate::amd::validate_run(flags)?;
     }
-    let job = prepare(ctx, flags, cfg, cwd)?;
+    if detached && flags.provider.is_some_and(|p| p != Provider::Vast) {
+        return Err(crate::job::vast_only());
+    }
+    let job = prepare(ctx, flags, cfg, cwd, detached)?;
     let phase = Phase::start(ctx, "launch");
     report_plan(ctx, flags, &job);
     let (mut backend, selected) = select_backend(ctx, flags, &job)?;
-    let Some((request, ledger)) = approve(ctx, flags, &selected, &job, backend.as_ref())? else {
+    if detached && backend.provider() != Provider::Vast {
+        return Err(crate::job::vast_only());
+    }
+    let Some((request, ledger, rate)) = approve(ctx, flags, &selected, &job, backend.as_ref())?
+    else {
         return Ok(());
     };
     let (results, staging) = stage_results(ctx, cwd)?;
@@ -353,8 +374,10 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
         local: results.clone(),
         paths: None,
         launched: false,
+        rate,
+        created_at: 0,
     };
-    let outcome = execute(
+    let mut outcome = execute(
         &phase,
         flags,
         &job,
@@ -367,10 +390,39 @@ fn run_inner(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<()> 
     let Some(id) = session.created_id.clone() else {
         return outcome;
     };
+    if detached && outcome.is_ok() {
+        // The job runs on without this process: save what a later one needs
+        // to find it, and leave the instance and its expiry to the job.
+        outcome = match session.paths.as_ref() {
+            Some(paths) => crate::job::save_started(
+                ctx,
+                crate::job::Start {
+                    run_id: &session.run_id,
+                    instance: &id,
+                    owner: crate::owner::from_cfg(&job.cfg),
+                    gpu: selected.gpu.clone(),
+                    command: &flags.command,
+                    rate: session.rate,
+                    created_at: session.created_at,
+                    deadline: job.deadline.as_second(),
+                    linger: job.linger,
+                    outputs: &flags.outputs,
+                    local: &session.local,
+                    paths,
+                },
+            ),
+            None => Err(Error::msg("Job start left no remote paths.")),
+        };
+        if outcome.is_ok() {
+            ctx.set_interrupt_notice(None);
+            phase.set("started");
+            return Ok(());
+        }
+    }
     let owned = Owned {
         phase: &phase,
-        flags,
-        job: &job,
+        outputs: &flags.outputs,
+        deadline: job.deadline,
         backend: backend.as_ref(),
         session: &session,
         id: &id,
@@ -391,33 +443,47 @@ struct Prepared {
     upload: run_files::Upload,
     setup: String,
     cfg: Dict,
+    /// `gpu job start`: leave the job running for a later `gpu job` command.
+    detached: bool,
 }
 
 /// What a run owns once a paid instance may exist.
-struct Session {
-    created_id: Option<String>,
+pub(crate) struct Session {
+    pub(crate) created_id: Option<String>,
     /// The launch estimate to reserve right before create.
-    ledger: Option<crate::spend::Budget>,
-    run_id: String,
-    local: PathBuf,
+    pub(crate) ledger: Option<crate::spend::Budget>,
+    pub(crate) run_id: String,
+    pub(crate) local: PathBuf,
     /// The remote state root and job directory, once known.
-    paths: Option<(String, String)>,
+    pub(crate) paths: Option<(String, String)>,
     /// Whether the job start request went out.
-    launched: bool,
+    pub(crate) launched: bool,
+    /// The hourly price the plan was approved at.
+    pub(crate) rate: f64,
+    /// When the instance was created, as the clock read it.
+    pub(crate) created_at: i64,
 }
 
 /// A created instance's run, as the phases after the job see it.
-struct Owned<'a> {
-    phase: &'a Phase<'a>,
-    flags: &'a RunFlags,
-    job: &'a Prepared,
-    backend: &'a dyn RunBackend,
-    session: &'a Session,
-    id: &'a str,
+pub(crate) struct Owned<'a> {
+    pub(crate) phase: &'a Phase<'a>,
+    /// The `--outputs` directory and the lifetime ceiling the run started with.
+    pub(crate) outputs: &'a str,
+    pub(crate) deadline: Timestamp,
+    pub(crate) backend: &'a dyn RunBackend,
+    pub(crate) session: &'a Session,
+    pub(crate) id: &'a str,
 }
 
 /// Validate flags and config, then pack the upload. Nothing remote happens.
-fn prepare(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<Prepared> {
+fn prepare(
+    ctx: &Ctx,
+    flags: &RunFlags,
+    cfg: &Dict,
+    cwd: &Path,
+    detached: bool,
+) -> Result<Prepared> {
+    let gpu = if detached { "gpu job start" } else { "gpu run" };
     let now = ctx.clock.now();
     let expire = flags
         .expire
@@ -430,9 +496,9 @@ fn prepare(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<Prepar
             .trim()
             .to_string(),
         None => {
-            return Err(Error::usage(
-                "gpu run requires --expire DURATION or default_expire in config.json.",
-            ));
+            return Err(Error::usage(format!(
+                "{gpu} requires --expire DURATION or default_expire in config.json."
+            )));
         }
     };
     let seconds = run_duration(&expire, now)?;
@@ -454,12 +520,14 @@ fn prepare(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<Prepar
         ));
     }
     if !ctx.interactive() && flags.gpu.is_none() {
-        return Err(Error::usage("Non-terminal gpu run requires --gpu MODEL."));
+        return Err(Error::usage(format!(
+            "Non-terminal {gpu} requires --gpu MODEL."
+        )));
     }
     if !ctx.interactive() && !flags.yes && !flags.dry_run {
-        return Err(Error::usage(
-            "Non-terminal gpu run requires --yes; use --dry-run to inspect without renting.",
-        ));
+        return Err(Error::usage(format!(
+            "Non-terminal {gpu} requires --yes; use --dry-run to inspect without renting."
+        )));
     }
     if flags.image.as_deref().is_some_and(str::is_empty) {
         return Err(Error::usage("--image must not be empty."));
@@ -518,6 +586,7 @@ fn prepare(ctx: &Ctx, flags: &RunFlags, cfg: &Dict, cwd: &Path) -> Result<Prepar
         upload,
         setup,
         cfg,
+        detached,
     })
 }
 
@@ -640,7 +709,7 @@ fn approve(
     selected: &RunFlags,
     job: &Prepared,
     backend: &dyn RunBackend,
-) -> Result<Option<(Value, Option<crate::spend::Budget>)>> {
+) -> Result<Option<(Value, Option<crate::spend::Budget>, f64)>> {
     let label = job
         .upload
         .root
@@ -694,7 +763,7 @@ fn approve(
             "Not enough time remains before expiry; choose a longer --expire.",
         ));
     }
-    Ok(Some((request, ledger)))
+    Ok(Some((request, ledger, rate)))
 }
 
 /// Prove the destination is writable before spending anything. Keep a unique
@@ -741,6 +810,7 @@ fn execute(
         // Record ownership before any local I/O can fail. Launch readiness
         // failures must still reach provider-state-verified destruction.
         session.created_id = Some(id.to_string());
+        session.created_at = ctx.clock.now().as_second();
         crate::spend::claim_best_effort(
             ctx,
             reservation.take(),
@@ -809,6 +879,9 @@ fn execute(
     ] {
         config.push_str(&format!("{key}={}\n", shell_quote(&value)));
     }
+    if job.detached {
+        config.push_str("DETACHED=1\n");
+    }
     let hook = backend.hook(&id);
     let payload = format!(
         "{}GPU_RUN_SOURCE={}\nGPU_RUN_CONFIG={}\nGPU_RUN_HOOK={}\nGPU_RUN_OUTPUTS_HOOK={}\n{REMOTE_SOURCE}",
@@ -830,6 +903,9 @@ fn execute(
         &backend.remote(&start, 30.0).stdin(Input::Text(payload)),
         "Job startup unverified; instance will be destroyed.",
     )?;
+    if job.detached {
+        return Ok(());
+    }
     follow(
         phase,
         backend,
@@ -882,9 +958,9 @@ fn settle(owned: &Owned, mut outcome: Result<()>, started: f64) -> Result<()> {
                     ctx,
                     backend,
                     paths,
-                    &owned.flags.outputs,
+                    owned.outputs,
                     &session.local,
-                    owned.job.deadline,
+                    owned.deadline,
                     true,
                 ) {
                     let _ = ctx.eprintln(&format!(
@@ -943,11 +1019,11 @@ fn settle(owned: &Owned, mut outcome: Result<()>, started: f64) -> Result<()> {
 /// Stop a failed job, fetch the rest of its log and download its outputs
 /// under the original deadline. True when a download failure replaced
 /// `outcome`.
-fn recover(owned: &Owned, paths: &(String, String), outcome: &mut Result<()>) -> bool {
+pub(crate) fn recover(owned: &Owned, paths: &(String, String), outcome: &mut Result<()>) -> bool {
     let Owned {
         phase,
-        flags,
-        job,
+        outputs,
+        deadline,
         backend,
         session,
         id,
@@ -955,7 +1031,6 @@ fn recover(owned: &Owned, paths: &(String, String), outcome: &mut Result<()>) ->
     let ctx = phase.ctx;
     let root = &paths.0;
     let run_id = &session.run_id;
-    let deadline = job.deadline;
     let response = || {
         checked(
             ctx,
@@ -1011,7 +1086,7 @@ fn recover(owned: &Owned, paths: &(String, String), outcome: &mut Result<()>) ->
         ctx,
         backend,
         paths,
-        &flags.outputs,
+        outputs,
         &session.local,
         deadline,
         false,
@@ -1023,22 +1098,14 @@ fn recover(owned: &Owned, paths: &(String, String), outcome: &mut Result<()>) ->
     let lost = backend.provider() == Provider::Modal && backend.lost(ctx, id);
     let committed = lost
         && ctx.interrupts() < 2
-        && download(
-            ctx,
-            backend,
-            paths,
-            &flags.outputs,
-            &session.local,
-            deadline,
-            true,
-        )
-        .inspect_err(|error| {
-            let _ = ctx.eprintln(&format!(
-                "Could not fetch committed outputs: {}",
-                error.text()
-            ));
-        })
-        .is_ok();
+        && download(ctx, backend, paths, outputs, &session.local, deadline, true)
+            .inspect_err(|error| {
+                let _ = ctx.eprintln(&format!(
+                    "Could not fetch committed outputs: {}",
+                    error.text()
+                ));
+            })
+            .is_ok();
     if outcome.is_ok()
         || matches!(
             outcome,
@@ -1063,13 +1130,14 @@ fn recover(owned: &Owned, paths: &(String, String), outcome: &mut Result<()>) ->
     false
 }
 
-struct Status {
-    phase: String,
-    exit: Option<i32>,
-    timed: bool,
-    size: u64,
+#[derive(Clone)]
+pub(crate) struct Status {
+    pub(crate) phase: String,
+    pub(crate) exit: Option<i32>,
+    pub(crate) timed: bool,
+    pub(crate) size: u64,
 }
-fn parse_status(text: &str) -> Option<Status> {
+pub(crate) fn parse_status(text: &str) -> Option<Status> {
     let fields: Vec<_> = text.trim().split('\t').collect();
     if fields.len() != 4 || !["setup", "job"].contains(&fields[0]) {
         return None;
@@ -1194,7 +1262,13 @@ fn follow(
 }
 
 /// The remote command writing `amount` log bytes from `offset` to `into`.
-fn log_chunk(backend: &dyn RunBackend, root: &str, offset: u64, amount: u64, into: &Path) -> Cmd {
+pub(crate) fn log_chunk(
+    backend: &dyn RunBackend,
+    root: &str,
+    offset: u64,
+    amount: u64,
+    into: &Path,
+) -> Cmd {
     let command = format!(
         "dd if={} bs=64K iflag=skip_bytes,count_bytes skip={offset} count={amount} status=none",
         shell_quote(&format!("{root}/log"))

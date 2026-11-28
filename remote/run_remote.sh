@@ -70,6 +70,10 @@ supervise() {
     # Publish only after the log is complete. An attached caller renews a
     # short heartbeat in status/download; keep its original download ceiling.
     publish "$phase" "$rc" "$timed"
+    # A detached job (gpu job start) has no attached caller: keep the status,
+    # log and outputs until `gpu job outputs` collects them. The instance's own
+    # expiry, armed to DEADLINE at launch, destroys them if nobody does.
+    [ "${DETACHED:-0}" = 1 ] && return 0
     trap 'exit' TERM INT HUP
     local attached=0
     while [ "$(date +%s)" -lt "$DEADLINE" ]; do

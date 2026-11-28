@@ -18,7 +18,7 @@ fn sandbox() -> Sandbox {
 case "$1 $2" in
  'search offers') printf '[{"id":100,"gpu_name":"RTX 4090","dph_total":0.3,"num_gpus":1,"reliability":0.99}]\n';;
  'create instance') touch "$HOME/created"; printf '{"success":true,"new_contract":123}\n';;
- 'show instances') if [ -e "$HOME/destroyed" ] || [ -e "$HOME/vanished" ]; then echo '[]'; else echo '[{"id":123,"actual_status":"running","ssh_host":"fake","ssh_port":1234}]'; fi;;
+ 'show instances') if [ -e "$HOME/destroyed" ] || [ -e "$HOME/vanished" ]; then echo '[]'; elif [ -e "$HOME/exited" ]; then echo '[{"id":123,"actual_status":"exited","intended_status":"running"}]'; else echo '[{"id":123,"actual_status":"running","ssh_host":"fake","ssh_port":1234}]'; fi;;
  'destroy instance') touch "$HOME/destroyed"; echo ok;;
  *) exit 97;;
 esac
@@ -31,12 +31,12 @@ esac
         r#"#!/bin/sh
 for last do :; done
 case "$last" in
- true) exit 0;;
+ true) [ ! -e "$HOME/unreachable" ];;
  *' -s -- arm '*) cat >/dev/null; echo arm >>"$HOME/arms"; printf '{"status":"armed","deadline":2000000000}\n';;
  'mkdir -p '*) cat >/dev/null;;
  *' -s -- start '*) cat >"$HOME/payload"; touch "$HOME/started"; echo started;;
  *' stop '*) touch "$HOME/stopped"; printf 'job\t143\t0\t6\n' >"$HOME/remote-status";;
- *' status '*) cat "$HOME/remote-status";;
+ *' status '*) touch "$HOME/asked"; cat "$HOME/remote-status";;
  'dd if='*) skip=${last#*skip=}; skip=${skip%% *}; count=${last#*count=}; count=${count%% *}
             tail -c +$((skip + 1)) "$HOME/remote-log" | head -c "$count";;
  'tar -C '*) touch "$HOME/downloading"; export COPYFILE_DISABLE=1; exec tar --format=ustar -C "$HOME" -cf - outputs;;
@@ -293,6 +293,92 @@ fn a_vanished_instance_is_reported_lost_with_its_exit_code_kept() {
     assert_eq!(status.get("destroyed"), Some(&Value::Bool(true)));
     let out = gpu(&s, &["job", "outputs", &id]);
     assert_eq!(out.status.code(), Some(18));
+}
+
+#[test]
+fn a_stopped_instance_is_reported_from_the_list_and_cancel_still_destroys_it() {
+    let s = sandbox();
+    let id = start(&s, &[]);
+    std::fs::write(s.home.join("exited"), "").unwrap();
+    let _ = std::fs::remove_file(s.home.join("asked"));
+    let status = state(&s, &id);
+    assert_eq!(status.get("state"), Some(&Value::str("lost")));
+    assert_eq!(status.get("provider_status"), Some(&Value::str("exited")));
+    assert_eq!(status.get("destroyed"), Some(&Value::Bool(false)));
+    let out = gpu(&s, &["job", "ls", "--json"]);
+    let jobs = result(&out).get("jobs").unwrap().as_list().unwrap().clone();
+    assert_eq!(
+        jobs[0].as_dict().unwrap().get("provider_status"),
+        Some(&Value::str("exited"))
+    );
+    assert!(
+        !s.home.join("asked").exists(),
+        "no SSH to a stopped instance"
+    );
+    let out = gpu(&s, &["job", "logs", &id]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("exited"));
+
+    // The stopped instance still bills: cancel destroys it.
+    assert!(!s.home.join("destroyed").exists());
+    let out = gpu(&s, &["job", "cancel", &id, "--json"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(s.home.join("destroyed").exists());
+    assert_eq!(result(&out).get("destroyed"), Some(&Value::Bool(true)));
+}
+
+#[test]
+fn an_unreachable_instance_answers_quickly_and_its_log_is_an_error() {
+    let s = sandbox();
+    let id = start(&s, &[]);
+    std::fs::write(s.home.join("remote-status"), "job\t-\t0\t7\n").unwrap();
+    assert_eq!(state(&s, &id).get("state"), Some(&Value::str("running")));
+    std::fs::write(s.home.join("unreachable"), "").unwrap();
+    let begun = std::time::Instant::now();
+    let status = state(&s, &id);
+    assert!(
+        begun.elapsed() < std::time::Duration::from_secs(20),
+        "status waited {:?}",
+        begun.elapsed()
+    );
+    assert_eq!(status.get("stale"), Some(&Value::Bool(true)));
+    assert_eq!(status.get("state"), Some(&Value::str("running")));
+    // The empty placeholder log beside the outputs is not the job's log.
+    let out = gpu(&s, &["job", "logs", &id]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("Could not reach the instance"));
+    assert!(!s.home.join("destroyed").exists());
+}
+
+#[test]
+fn outputs_of_a_job_whose_supervisor_is_gone_are_collected_anyway() {
+    let s = sandbox();
+    let id = start(&s, &[]);
+    std::fs::write(s.home.join("remote-status"), "lost\n").unwrap();
+    let status = gpu(&s, &["job", "status", &id]);
+    assert!(String::from_utf8_lossy(&status.stdout).contains("will not finish"));
+    let out = gpu(&s, &["job", "outputs", &id, "--json"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("will not finish"));
+    let r = result(&out);
+    assert_eq!(r.get("state"), Some(&Value::str("lost")));
+    assert_eq!(r.get("outputs_collected"), Some(&Value::Bool(true)));
+    assert_eq!(r.get("destroyed"), Some(&Value::Bool(true)));
+    assert!(s.home.join("destroyed").exists());
+    let local = s.root.join("project/gpu-runs").join(&id);
+    assert_eq!(
+        std::fs::read(local.join("outputs/checkpoint")).unwrap(),
+        b"checkpoint"
+    );
 }
 
 #[test]

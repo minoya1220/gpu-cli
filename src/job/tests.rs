@@ -46,7 +46,7 @@ fn a_record_round_trips_through_its_file() {
     r.exit_code = Some(3);
     r.ended_at = Some(2_000);
     r.timed_out = true;
-    save(&ctx, &r).unwrap();
+    save(&ctx, &mut r.clone()).unwrap();
     let path = record_path(&ctx.env, &r.job_id);
     assert_eq!(read(&path).unwrap(), r);
     assert_eq!(load(&ctx, &r.job_id).unwrap(), r);
@@ -166,4 +166,53 @@ fn elapsed_and_cost_run_until_the_instance_is_destroyed() {
     assert!((r.cost(99_999) - 0.18).abs() < 1e-9);
     assert_eq!(duration_text(3_723), "1h02m03s");
     assert_eq!(duration_text(75), "1m15s");
+}
+
+#[test]
+fn a_stale_copy_never_undoes_what_another_command_saved() {
+    let env = TestEnv::new();
+    let ctx = env.ctx().build();
+    let mut stale = record();
+    stale.state = RUNNING.into();
+    save(&ctx, &mut stale.clone()).unwrap();
+    // `gpu job outputs` collects and destroys while `status` holds `stale`.
+    let mut collector = stale.clone();
+    apply(&mut collector, &live("job", Some(0), false), 2_000);
+    collector.collected = true;
+    collector.destroyed = true;
+    collector.ended_at = Some(2_100);
+    save(&ctx, &mut collector.clone()).unwrap();
+    // `status` then sees the instance gone and saves its older copy.
+    assert!(apply(&mut stale, &Seen::Gone, 2_200));
+    assert_eq!(stale.state, LOST);
+    save(&ctx, &mut stale).unwrap();
+    assert_eq!(stale, collector, "the caller sees the merged record");
+    assert_eq!(
+        read(&record_path(&ctx.env, &stale.job_id)).unwrap(),
+        collector
+    );
+
+    let mut cancelled = record();
+    cancelled.job_id = "20260101T000000Z-456".into();
+    cancelled.state = CANCELLED.into();
+    save(&ctx, &mut cancelled.clone()).unwrap();
+    let mut older = record();
+    older.job_id = cancelled.job_id.clone();
+    apply(&mut older, &live("job", None, false), 2_000);
+    save(&ctx, &mut older).unwrap();
+    assert_eq!(older.state, CANCELLED);
+}
+
+#[test]
+fn a_stopped_instance_is_lost_but_not_destroyed() {
+    for provider in ["stopped", "exited"] {
+        let mut r = record();
+        assert!(apply(&mut r, &Seen::Down(provider.into()), 2_000));
+        assert_eq!(r.state, LOST);
+        assert!(!r.destroyed && !r.done());
+        assert_eq!(r.ended_at, None, "it still bills");
+    }
+    let mut r = record();
+    assert!(!apply(&mut r, &Seen::Down("loading".into()), 2_000));
+    assert_eq!(r.state, BOOTING);
 }

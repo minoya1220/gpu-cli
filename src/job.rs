@@ -23,13 +23,17 @@ use crate::run::{
     checked, control, log_chunk, parse_status, recover, Owned, Phase, RunBackend, Session, Status,
     CHUNK,
 };
+use crate::vast;
 use crate::vast::run::VastBackend;
 
 #[cfg(test)]
 mod tests;
 
-/// How long a later command waits for the instance to answer SSH.
+/// How long `gpu job outputs` waits for the instance to answer SSH.
 const CONNECT_TIMEOUT: f64 = 45.0;
+/// `status`, `logs` and `ls` answer quickly: a running instance that does not
+/// answer SSH this fast is reported with its last known state.
+const REFRESH_CONNECT_TIMEOUT: f64 = 5.0;
 /// `gpu job cancel` must not hang on an instance that cannot be reached.
 const CANCEL_CONNECT_TIMEOUT: f64 = 20.0;
 
@@ -184,6 +188,28 @@ impl Record {
         (valid_id(&record.job_id) && rate.is_finite() && rate >= 0.0).then_some(record)
     }
 
+    /// Keep what another command already recorded: a concurrent command
+    /// working from an older copy never clears collected, destroyed or
+    /// cancelled, nor forgets the exit code.
+    fn merge(&mut self, stored: &Record) {
+        if stored.collected && !self.collected {
+            self.collected = true;
+            self.state = stored.state.clone();
+        }
+        if stored.state == CANCELLED {
+            self.state = CANCELLED.into();
+        }
+        self.destroyed |= stored.destroyed;
+        if self.exit_code.is_none() && stored.exit_code.is_some() {
+            self.exit_code = stored.exit_code;
+            self.timed_out = stored.timed_out;
+        }
+        self.ended_at = match (self.ended_at, stored.ended_at) {
+            (Some(mine), Some(theirs)) => Some(mine.min(theirs)),
+            (mine, theirs) => mine.or(theirs),
+        };
+    }
+
     fn finished(&self) -> bool {
         self.exit_code.is_some()
     }
@@ -253,9 +279,20 @@ impl Record {
     }
 }
 
-fn save(ctx: &Ctx, record: &Record) -> Result<()> {
-    let bytes = (pyjson::dumps(&record.to_value(), Some(2)) + "\n").into_bytes();
-    crate::atomic_file::update(&record_path(&ctx.env, &record.job_id), |_| Ok(bytes))
+/// Save a record, merged under the file lock with the one on disk.
+fn save(ctx: &Ctx, record: &mut Record) -> Result<()> {
+    let mut merged = record.clone();
+    crate::atomic_file::update(&record_path(&ctx.env, &record.job_id), |stored| {
+        if let Some(stored) = pyjson::loads(&String::from_utf8_lossy(stored))
+            .ok()
+            .and_then(|value| Record::from_value(&value))
+        {
+            merged.merge(&stored);
+        }
+        Ok((pyjson::dumps(&merged.to_value(), Some(2)) + "\n").into_bytes())
+    })?;
+    *record = merged;
+    Ok(())
 }
 
 fn read(path: &Path) -> Result<Record> {
@@ -311,12 +348,9 @@ fn load(ctx: &Ctx, id: &str) -> Result<Record> {
     if !valid_id(id) {
         return Err(missing());
     }
-    match read(&record_path(&ctx.env, id)) {
-        Ok(record) => return Ok(record),
-        Err(_) if record_path(&ctx.env, id).exists() => {
-            return read(&record_path(&ctx.env, id));
-        }
-        Err(_) => {}
+    let path = record_path(&ctx.env, id);
+    if path.exists() {
+        return read(&path);
     }
     let (found, _) = records(ctx)?;
     let mut matches = found.into_iter().filter(|r| r.instance == id);
@@ -331,7 +365,7 @@ fn load(ctx: &Ctx, id: &str) -> Result<Record> {
 
 /// Save the record of a job that has started, and tell the caller its ID.
 pub(crate) fn save_started(ctx: &Ctx, start: Start) -> Result<()> {
-    let record = Record {
+    let mut record = Record {
         job_id: start.run_id.into(),
         provider: Provider::Vast.key().into(),
         instance: start.instance.into(),
@@ -356,7 +390,7 @@ pub(crate) fn save_started(ctx: &Ctx, start: Start) -> Result<()> {
     if !valid_id(&record.job_id) {
         return Err(Error::msg(format!("Unusable job ID {}.", record.job_id)));
     }
-    save(ctx, &record)?;
+    save(ctx, &mut record)?;
     let now = ctx.clock.now().as_second();
     for (key, value) in record.entry(now).iter() {
         ctx.result(key, value.clone());
@@ -399,6 +433,8 @@ enum Seen {
     Live(Box<VastBackend>, Status),
     /// The instance no longer exists.
     Gone,
+    /// The instance exists but is not running; its provider status.
+    Down(String),
     /// Neither answered nor proven gone; the record keeps its last state.
     Unreachable(Error),
 }
@@ -408,17 +444,29 @@ fn connect(ctx: &Ctx, record: &Record, timeout: f64) -> Result<VastBackend> {
     Ok(VastBackend::resumed(&alias))
 }
 
-/// Ask the instance for the job's state. SSH only; the log is not fetched.
-fn observe(ctx: &Ctx, record: &Record, timeout: f64) -> Seen {
+/// The provider's instance list, asked once per command.
+fn listed(ctx: &Ctx) -> Result<Vec<Dict>> {
+    vast::list_instances(ctx, Some(15.0))
+}
+
+/// Ask for the job's state: the instance list first, then SSH only to a
+/// running instance. The log is not fetched.
+fn observe(ctx: &Ctx, record: &Record, live: &Result<Vec<Dict>>, timeout: f64) -> Seen {
+    let live = match live {
+        Ok(live) => live,
+        Err(error) => return Seen::Unreachable(error.clone()),
+    };
+    let Some(instance) = vast::find_instance(live, &record.instance) else {
+        return Seen::Gone;
+    };
+    match instance.get("actual_status").and_then(Value::as_str) {
+        Some("running") => {}
+        Some("destroyed") => return Seen::Gone,
+        other => return Seen::Down(crate::redact::redact_text(other.unwrap_or("unknown"))),
+    }
     let backend = match connect(ctx, record, timeout) {
         Ok(backend) => backend,
-        Err(error) => {
-            return if VastBackend::resumed("").lost(ctx, &record.instance) {
-                Seen::Gone
-            } else {
-                Seen::Unreachable(error)
-            };
-        }
+        Err(error) => return Seen::Unreachable(error),
     };
     match query_status(ctx, &backend, record) {
         Ok(status) => Seen::Live(Box::new(backend), status),
@@ -469,6 +517,14 @@ fn apply(record: &mut Record, seen: &Seen, now: i64) -> bool {
                 .into();
             }
         }
+        Seen::Down(provider) => {
+            if matches!(provider.as_str(), "stopped" | "exited")
+                && !record.finished()
+                && record.state != CANCELLED
+            {
+                record.state = LOST.into();
+            }
+        }
         Seen::Gone => {
             record.destroyed = true;
             record.ended_at.get_or_insert(now.min(record.expires_at));
@@ -492,11 +548,27 @@ fn refresh(ctx: &Ctx, record: &mut Record, timeout: f64) -> Result<Seen> {
     if record.done() {
         return Ok(Seen::Gone);
     }
-    let seen = observe(ctx, record, timeout);
+    refresh_from(ctx, record, &listed(ctx), timeout)
+}
+
+fn refresh_from(
+    ctx: &Ctx,
+    record: &mut Record,
+    live: &Result<Vec<Dict>>,
+    timeout: f64,
+) -> Result<Seen> {
+    let seen = observe(ctx, record, live, timeout);
     if apply(record, &seen, ctx.clock.now().as_second()) {
         save(ctx, record)?;
     }
     Ok(seen)
+}
+
+fn down_text(record: &Record, provider: &str) -> String {
+    format!(
+        "Vast instance {} is {provider}, not running",
+        record.instance
+    )
 }
 
 fn report(ctx: &Ctx, record: &Record) {
@@ -538,6 +610,11 @@ fn summary(record: &Record, now: i64) -> String {
     ));
     if record.destroyed {
         text.push_str("\n  instance destroyed");
+    } else if record.state == LOST && !record.collected {
+        text.push_str(&format!(
+            "\n  the job supervisor is gone, so the job will not finish; collect what it left: gpu job outputs {}",
+            record.job_id
+        ));
     }
     if record.collected {
         text.push_str(&format!(
@@ -550,10 +627,14 @@ fn summary(record: &Record, now: i64) -> String {
 
 pub fn status(ctx: &Ctx, id: &str) -> Result<()> {
     let mut record = load(ctx, id)?;
-    let seen = refresh(ctx, &mut record, CONNECT_TIMEOUT)?;
+    let seen = refresh(ctx, &mut record, REFRESH_CONNECT_TIMEOUT)?;
     report(ctx, &record);
     if let Seen::Live(_, status) = &seen {
         ctx.result("log_bytes", Value::Int(status.size as i64));
+    }
+    if let Seen::Down(provider) = &seen {
+        ctx.result("provider_status", Value::str(provider));
+        ctx.eprintln(&format!("{}.", down_text(&record, provider)))?;
     }
     if let Seen::Unreachable(error) = &seen {
         ctx.result("stale", Value::Bool(true));
@@ -615,7 +696,7 @@ pub fn logs(ctx: &Ctx, id: &str, follow: bool, offset: u64) -> Result<()> {
             ctx.console.write_out_bytes(bytes)
         }
     };
-    let (next, size) = match refresh(ctx, &mut record, CONNECT_TIMEOUT)? {
+    let (next, size) = match refresh(ctx, &mut record, REFRESH_CONNECT_TIMEOUT)? {
         Seen::Live(backend, mut status) => {
             let mut next = offset;
             loop {
@@ -661,26 +742,41 @@ pub fn logs(ctx: &Ctx, id: &str, follow: bool, offset: u64) -> Result<()> {
                 &Seen::Live(backend, status),
                 ctx.clock.now().as_second(),
             ) {
-                save(ctx, &record)?;
+                save(ctx, &mut record)?;
             }
             (next, size)
         }
-        seen => {
-            // Collected jobs keep their log beside the outputs.
+        // Collected jobs keep their log beside the outputs.
+        _ if record.collected => {
             let path = record.local.join("log.txt");
-            let bytes = fs::read(&path).map_err(|_| match &seen {
-                Seen::Unreachable(error) => Error::msg(format!(
-                    "Could not reach the instance for the log: {}",
-                    ctx.safe_diagnostic(error.text())
-                )),
-                _ => Error::msg(format!(
-                    "Job {} has no log left: its instance is gone and no outputs were collected.",
-                    record.job_id
-                )),
-            })?;
+            let bytes = fs::read(&path).map_err(|e| os_error(&e, &path))?;
             let skip = (offset as usize).min(bytes.len());
             emit(&bytes[skip..])?;
             (bytes.len() as u64, bytes.len() as u64)
+        }
+        Seen::Unreachable(error) => {
+            return Err(Error::msg(format!(
+                "Could not reach the instance for the log: {}",
+                ctx.safe_diagnostic(error.text())
+            ))
+            .next(format!("gpu job status {}", record.job_id)));
+        }
+        Seen::Down(provider) => {
+            return Err(Error::msg(format!(
+                "{}, so the log of job {} cannot be read.",
+                down_text(&record, &provider),
+                record.job_id
+            ))
+            .next(format!("gpu job status {}", record.job_id)));
+        }
+        Seen::Gone => {
+            return Err(Error::status(
+                ExitCode::InstanceLost,
+                format!(
+                    "Job {} has no log left: its instance is gone and no outputs were collected.",
+                    record.job_id
+                ),
+            ));
         }
     };
     report(ctx, &record);
@@ -716,7 +812,12 @@ pub fn outputs(ctx: &Ctx, id: &str) -> Result<()> {
     let seen = refresh(ctx, &mut record, CONNECT_TIMEOUT)?;
     let backend = match seen {
         Seen::Live(backend, status) => {
-            if status.exit.is_none() {
+            if status.phase == "lost" {
+                ctx.eprintln(&format!(
+                    "The supervisor of job {} is gone, so the job will not finish; downloading whatever is in its outputs folder.",
+                    record.job_id
+                ))?;
+            } else if status.exit.is_none() {
                 return Err(Error::msg(format!(
                     "Job {} is still {}; outputs can be collected once it finishes.",
                     record.job_id, record.state
@@ -724,6 +825,15 @@ pub fn outputs(ctx: &Ctx, id: &str) -> Result<()> {
                 .next(format!("gpu job logs {} --follow", record.job_id)));
             }
             backend
+        }
+        Seen::Down(provider) => {
+            report(ctx, &record);
+            return Err(Error::msg(format!(
+                "{}, so the outputs of job {} cannot be downloaded now.",
+                down_text(&record, &provider),
+                record.job_id
+            ))
+            .next(format!("gpu job cancel {}", record.job_id)));
         }
         Seen::Gone => {
             report(ctx, &record);
@@ -809,7 +919,7 @@ pub fn outputs(ctx: &Ctx, id: &str) -> Result<()> {
         ctx.result("destroyed", Value::Bool(false));
         ctx.result("retained_until", Value::str(timestamp(until)));
     }
-    save(ctx, &record)?;
+    save(ctx, &mut record)?;
     report(ctx, &record);
     ctx.result(
         "log_path",
@@ -862,7 +972,7 @@ pub fn cancel(ctx: &Ctx, id: &str) -> Result<()> {
             ctx.result("destroyed", Value::Bool(true));
         }
         // Remember the intent even when destroying failed, so a retry is safe.
-        save(ctx, &record)?;
+        save(ctx, &mut record)?;
         report(ctx, &record);
         destroyed?;
     } else {
@@ -881,17 +991,38 @@ pub fn ls(ctx: &Ctx, owner: Option<&str>) -> Result<()> {
         found.retain(|r| r.owner.as_deref() == Some(owner));
     }
     let mut unreachable = 0;
+    let mut providers = Vec::with_capacity(found.len());
+    let live = found
+        .iter()
+        .any(|r| !r.done() && !r.collected)
+        .then(|| listed(ctx));
     for record in &mut found {
-        if !record.done() && !record.collected {
-            if let Seen::Unreachable(_) = refresh(ctx, record, CONNECT_TIMEOUT)? {
-                unreachable += 1;
+        let mut provider = None;
+        if let (Some(live), false, false) = (&live, record.done(), record.collected) {
+            match refresh_from(ctx, record, live, REFRESH_CONNECT_TIMEOUT)? {
+                Seen::Unreachable(_) => unreachable += 1,
+                Seen::Down(status) => provider = Some(status),
+                _ => {}
             }
         }
+        providers.push(provider);
     }
     let now = ctx.clock.now().as_second();
     ctx.result(
         "jobs",
-        Value::List(found.iter().map(|r| Value::Dict(r.entry(now))).collect()),
+        Value::List(
+            found
+                .iter()
+                .zip(&providers)
+                .map(|(r, provider)| {
+                    let mut entry = r.entry(now);
+                    if let Some(provider) = provider {
+                        entry.insert("provider_status", Value::str(provider));
+                    }
+                    Value::Dict(entry)
+                })
+                .collect(),
+        ),
     );
     ctx.result("unreachable", Value::Int(unreachable));
     ctx.result(

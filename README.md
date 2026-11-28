@@ -72,6 +72,7 @@ gpu job ls --owner alice         # jobs and their states
 - `gpu job outputs` downloads `--outputs` into `./gpu-runs/JOB_ID/` (with `log.txt` and `result.json`) and then destroys the instance, unless the job was started with `--linger DURATION`, which keeps it that long. A job that is still running is refused. If the download fails the instance is kept so you can retry.
 - `status` cost is an estimate: the rented hourly price times the time since creation, until the instance is destroyed. `gpu job logs --json` returns the text in `log` with `next_offset`; pass it to `--offset` to read only what is new.
 - A job whose instance vanished before collection is `expired` (it reached its deadline) or `lost`; its exit code stays in `status`, its outputs are gone.
+- `status`, `logs` and `ls` check the Vast instance list first and only SSH to a running instance, with a short connect timeout, so they return quickly. A stopped or exited instance is reported `lost` with its `provider_status`; it still bills until `gpu job cancel` destroys it. A job whose supervisor is gone (`lost` while the instance runs) will not finish; `gpu job outputs` still downloads what its outputs folder holds and destroys the instance.
 - Vast only. Modal sandboxes tie their helper process and output volume to one attached process, so Modal stays on blocking `gpu run`.
 
 ### Modal

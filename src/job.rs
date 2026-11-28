@@ -493,6 +493,11 @@ fn query_status(ctx: &Ctx, backend: &VastBackend, record: &Record) -> Result<Sta
     parse_status(&out.stdout).ok_or_else(|| Error::msg("Job status response was not understood."))
 }
 
+/// A provider status the instance will not leave by itself.
+fn stopped(provider: &str) -> bool {
+    matches!(provider, "stopped" | "exited")
+}
+
 /// Fold an observation into the record. True when the record changed.
 fn apply(record: &mut Record, seen: &Seen, now: i64) -> bool {
     let before = record.clone();
@@ -518,10 +523,7 @@ fn apply(record: &mut Record, seen: &Seen, now: i64) -> bool {
             }
         }
         Seen::Down(provider) => {
-            if matches!(provider.as_str(), "stopped" | "exited")
-                && !record.finished()
-                && record.state != CANCELLED
-            {
+            if stopped(provider) && !record.finished() && record.state != CANCELLED {
                 record.state = LOST.into();
             }
         }
@@ -648,7 +650,7 @@ pub fn status(ctx: &Ctx, id: &str) -> Result<()> {
                     record.job_id
                 ));
             }
-            Seen::Down(_) => {
+            Seen::Down(provider) if stopped(provider) => {
                 text.push_str(&format!(
                     "\n  the instance is not running but still bills; destroy it: gpu job cancel {}",
                     record.job_id

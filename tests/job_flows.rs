@@ -18,7 +18,7 @@ fn sandbox() -> Sandbox {
 case "$1 $2" in
  'search offers') printf '[{"id":100,"gpu_name":"RTX 4090","dph_total":0.3,"num_gpus":1,"reliability":0.99}]\n';;
  'create instance') touch "$HOME/created"; printf '{"success":true,"new_contract":123}\n';;
- 'show instances') if [ -e "$HOME/destroyed" ] || [ -e "$HOME/vanished" ]; then echo '[]'; elif [ -e "$HOME/exited" ]; then echo '[{"id":123,"actual_status":"exited","intended_status":"running"}]'; else echo '[{"id":123,"actual_status":"running","ssh_host":"fake","ssh_port":1234}]'; fi;;
+ 'show instances') if [ -e "$HOME/destroyed" ] || [ -e "$HOME/vanished" ]; then echo '[]'; elif [ -e "$HOME/exited" ]; then echo '[{"id":123,"actual_status":"exited","intended_status":"running"}]'; elif [ -e "$HOME/loading" ]; then echo '[{"id":123,"actual_status":"loading","intended_status":"running"}]'; else echo '[{"id":123,"actual_status":"running","ssh_host":"fake","ssh_port":1234}]'; fi;;
  'destroy instance') touch "$HOME/destroyed"; echo ok;;
  *) exit 97;;
 esac
@@ -333,6 +333,23 @@ fn a_stopped_instance_is_reported_from_the_list_and_cancel_still_destroys_it() {
     );
     assert!(s.home.join("destroyed").exists());
     assert_eq!(result(&out).get("destroyed"), Some(&Value::Bool(true)));
+}
+
+#[test]
+fn a_restarting_instance_keeps_its_state_and_is_not_marked_for_cancel() {
+    let s = sandbox();
+    let id = start(&s, &[]);
+    std::fs::write(s.home.join("remote-status"), "job\t-\t0\t7\n").unwrap();
+    assert_eq!(state(&s, &id).get("state"), Some(&Value::str("running")));
+    std::fs::write(s.home.join("loading"), "").unwrap();
+    let status = state(&s, &id);
+    assert_eq!(status.get("state"), Some(&Value::str("running")));
+    assert_eq!(status.get("provider_status"), Some(&Value::str("loading")));
+    let out = gpu(&s, &["job", "status", &id]);
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(!text.contains("gpu job cancel"), "{text}");
+    assert!(!s.home.join("destroyed").exists());
 }
 
 #[test]
